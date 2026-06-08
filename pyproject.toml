@@ -21,7 +21,7 @@ agent-tracker-install-skill = "agent_tracker.skill_bootstrap:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-agent_tracker = ["vendor/skills/*/SKILL.md"]
+agent_tracker = ["vendor/skills/*/SKILL.md", "vendor/skills/*/agents/openai.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
