@@ -1,0 +1,793 @@
+{
+  "tasks": [
+    {
+      "id": "user-documentation",
+      "title": "Create user documentation",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 10,
+      "prompt_key": "user-documentation",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Give a new user enough context to install, configure, run, and extend agent-tracker without reading the source first. Include the dogfooding workflow in the user-facing docs.",
+      "execution": {
+        "primary_files": [
+          "README.md",
+          "docs/",
+          "tracking/README.md"
+        ],
+        "notes": "Keep examples copy-pasteable and project-agnostic."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual docs review: a new user can create a minimal project config and task plan from docs alone.",
+        "Manual dogfood review: an agent can pull the next available task using tracking/README.md."
+      ],
+      "next_action": "Expand README and docs so installation, config, task plans, CLI lifecycle, plugin authoring, spool ingestion, logging, and self-dogfooding are documented.",
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "docs"
+        ],
+        "write_scopes": [
+          "README.md",
+          "docs/",
+          "tracking/README.md"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "config-schema-versioning",
+      "title": "Add config validation and schema versioning",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 20,
+      "prompt_key": "config-schema-versioning",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Fail early with actionable errors for malformed project configs and establish a compatibility path for future config and database changes.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/config.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check ."
+      ],
+      "next_action": "Add config_schema_version support, validate config fields, record database schema metadata, and cover malformed config plus schema metadata in tests.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "user-documentation",
+          "description": "Documentation should define the current user-facing config and task-plan contracts before versioning them."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/config.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "pull-spool-command",
+      "title": "Implement pull-based spool support",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 30,
+      "prompt_key": "pull-spool-command",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Support a safe cross-directory spool bridge before adding network transports.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check ."
+      ],
+      "next_action": "Add pull-spool with dry-run, local/shared-filesystem copy, partial-file skipping, and idempotent behavior before ingest-spool.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "config-schema-versioning",
+          "description": "Spool config shape should be validated before adding remote/local path semantics."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "mcp-server-entrypoint",
+      "title": "Add an MCP server entrypoint",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 40,
+      "prompt_key": "mcp-server-entrypoint",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Package the existing MCP-friendly handlers as a real MCP server adapter while keeping business logic in the service layer.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/mcp_tools.py",
+          "src/agent_tracker/",
+          "pyproject.toml",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check ."
+      ],
+      "next_action": "Add a thin server adapter around AgentTrackerTools and test tool registration/payloads without duplicating Coordinator logic.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "pull-spool-command",
+          "description": "Keep local-first spool and config contracts stable before packaging another adapter."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/mcp_tools.py",
+          "src/agent_tracker/",
+          "pyproject.toml",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "approval-gates",
+      "title": "Add approval gates and authority metadata",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 50,
+      "prompt_key": "approval-gates",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Prevent automatic claims or completions for tasks that need human approval or stronger authority checks.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check ."
+      ],
+      "next_action": "Define authority metadata, approval transitions, claim filtering, and audit entries for approval and denial decisions.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "mcp-server-entrypoint",
+          "description": "Adapter identity and tool payloads should be clear before enforcing authority rules."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "markdown-export-plugins",
+      "title": "Move Markdown note and result export into plugins",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 60,
+      "prompt_key": "markdown-export-plugins",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Keep SQLite as live state while making git-backed summaries derived exports instead of manually edited coordination state.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/exporters.py",
+          "src/agent_tracker/plugins.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "adapter_note": "Project-specific HPC output belongs outside core."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual review: core remains project-agnostic."
+      ],
+      "next_action": "Define exporter expectations for readable Markdown summaries and keep large artifacts linked rather than copied.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "approval-gates",
+          "description": "Approval and audit semantics should be visible before adding richer derived exports."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/exporters.py",
+          "src/agent_tracker/plugins.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "followup-task-proposals",
+      "title": "Add deterministic follow-up task proposals",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 70,
+      "prompt_key": "followup-task-proposals",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Let project plugins propose follow-up tasks from completed work or events without giving callbacks direct authority to launch agents.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/plugins.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check ."
+      ],
+      "next_action": "Wire FollowupPlanner into service and CLI, persist proposed tasks separately from imported tasks, and support human review before promotion.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "markdown-export-plugins",
+          "description": "Readable exports should be available before adding proposal review state."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/plugins.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "attendant-command",
+      "title": "Add a cheap attendant command",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 80,
+      "prompt_key": "attendant-command",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Provide a scheduled command that handles routine coordination without keeping high-intelligence agents running as pollers.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check ."
+      ],
+      "next_action": "Add an idempotent command that ingests spool files, recovers stale leases, exports snapshots, proposes follow-ups, and reports concise counts.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "followup-task-proposals",
+          "description": "Attendant should call stable follow-up proposal APIs rather than inventing task creation behavior."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "vendored-project-manager-skill",
+      "title": "Vendor a generic project-manager skill",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 90,
+      "prompt_key": "vendored-project-manager-skill",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Provide a reusable project-manager Codex skill without an hpc-ci-specific name, and make it installable from this package in new environments.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
+          "src/agent_tracker/skill_bootstrap.py",
+          "pyproject.toml",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "docs/"
+        ],
+        "notes": "The vendored skill should be generic. HPC-specific workflows belong in project notebooks or repo-local extensions."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: the skill is named project-manager, not hpc-ci-project-manager.",
+        "Manual check: a new install can copy the vendored skill into a Codex skills directory."
+      ],
+      "next_action": "Finish documenting and validating the vendored project-manager skill bootstrap flow, including how hpc-ci-project-tracker should consume or extend it.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "user-documentation",
+          "description": "User docs should establish the expected skill and dogfooding workflows before expanding installation guidance."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "docs"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
+          "src/agent_tracker/skill_bootstrap.py",
+          "pyproject.toml",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "repo-project-notebooks",
+      "title": "Add repo and project notebook conventions",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 95,
+      "prompt_key": "repo-project-notebooks",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Define where project and repo notebooks live, what they contain, how prompt renderers should use them, and where to move currently stashed planning context.",
+      "execution": {
+        "primary_files": [
+          "docs/",
+          "src/agent_tracker/rendering.py",
+          "src/agent_tracker/exporters.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "source_context": [
+          "docs/research/2026-06-08-coordination-intake-dispatch.md",
+          "/Users/bm13805/Downloads/ChatGPT-Codex_Chat_Communication.md"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: stashed planning context has a durable home or an explicit migration path."
+      ],
+      "next_action": "Design notebook artifact conventions and decide where the coordination intake/dispatch research note should live long term.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "user-documentation",
+          "description": "The base documentation should exist before adding notebook conventions to it."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "docs",
+          "python"
+        ],
+        "write_scopes": [
+          "docs/",
+          "src/agent_tracker/rendering.py",
+          "src/agent_tracker/exporters.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "intake-inbox",
+      "title": "Add an intake inbox for ideas, features, and checks",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 100,
+      "prompt_key": "intake-inbox",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Capture rough user ideas, feature requests, checks, and planning notes as raw non-claimable intake for later project-manager triage.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: intake records are not returned as claimable tasks."
+      ],
+      "next_action": "Add raw intake records and CLI/service flows for capturing ideas/features/checks without promoting them into active tasks.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "followup-task-proposals",
+          "description": "The proposal model should exist before adding a broader human intake path."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "project-manager-triage-workflow",
+      "title": "Add project-manager intake triage workflow",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 110,
+      "prompt_key": "project-manager-triage-workflow",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Let a project-manager agent organize intake, ask planning questions, and promote selected items into proposed task contracts.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: project-manager triage creates proposed tasks, not immediately claimable tasks."
+      ],
+      "next_action": "Add deterministic project-manager triage commands and skill guidance for promoting intake into proposed tasks.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "intake-inbox",
+          "description": "Raw intake must exist before a triage workflow can organize it."
+        },
+        {
+          "kind": "task",
+          "task": "vendored-project-manager-skill",
+          "description": "The generic project-manager skill should exist before triage guidance depends on it."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "docs"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "intervention-queue",
+      "title": "Add a human intervention queue",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 120,
+      "prompt_key": "intervention-queue",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Model human intervention needs as durable queue state before sending external notifications.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: intervention reasons are small, explicit, and require resolution evidence."
+      ],
+      "next_action": "Define intervention reasons, state transitions, audit records, and resolution evidence before adding PR notification.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "approval-gates",
+          "description": "Approval and authority concepts should exist before broader intervention states."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "pr-notification-setup-check",
+      "title": "Check repository setup for PR-based notifications",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 130,
+      "prompt_key": "pr-notification-setup-check",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Add checks that determine whether associated repositories can support PR-based human notification, with fallbacks for sandbox auth limitations.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/plugins.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "notes": "Do not assume gh auth works inside agent sandboxes. Prefer explicit diagnostics and connector-compatible designs."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: setup diagnostics distinguish missing remote, missing PR, missing auth, and unsupported sandbox."
+      ],
+      "next_action": "Design and implement PR notification setup diagnostics before any notifier tries to post comments.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "intervention-queue",
+          "description": "Notification setup should target durable intervention states."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/plugins.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "pr-notification-exporter",
+      "title": "Add idempotent PR notification exporter",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 140,
+      "prompt_key": "pr-notification-exporter",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Notify the user about intervention states through PR comments or prepared PR notification payloads while keeping SQLite as canonical state.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/exporters.py",
+          "src/agent_tracker/plugins.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ]
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: repeated exports update or suppress duplicate notifications instead of spamming PR comments."
+      ],
+      "next_action": "Add an idempotent PR notification exporter with a dry-run/prepared-payload fallback for sandboxes without GitHub auth.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "pr-notification-setup-check",
+          "description": "Setup diagnostics should exist before notification posting is attempted."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/exporters.py",
+          "src/agent_tracker/plugins.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "hpc-validation-request-contract",
+      "title": "Define HPC validation request contract",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 150,
+      "prompt_key": "hpc-validation-request-contract",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Define how feature agents request HPC validation without owning long-running Slurm lifecycle work.",
+      "execution": {
+        "primary_files": [
+          "docs/",
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/plugins.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "notes": "Keep validation_request, callback_event, suite_verdict, and codex_review as separate records."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: the contract does not let callbacks launch high-value agents directly."
+      ],
+      "next_action": "Document and model validation requests separately from callback events, suite verdicts, and Codex review reports.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "intake-inbox",
+          "description": "The intake/proposal path should exist before adding specialized validation request records."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "docs"
+        ],
+        "write_scopes": [
+          "docs/",
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/plugins.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "codex-sdk-worker-adapter",
+      "title": "Add Codex SDK/App Server worker adapter",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 160,
+      "prompt_key": "codex-sdk-worker-adapter",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Allow queued tasks to be submitted to Codex programmatically without manually creating GUI chats.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/",
+          "pyproject.toml",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "notes": "Treat Codex App Server/SDK as an execution adapter. SQLite remains canonical for task state, leases, approvals, events, and audit records."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: worker records thread/prompt/report/evidence metadata without exposing local app-server control over unsafe network boundaries."
+      ],
+      "next_action": "Prototype a one-shot worker that claims a task, renders a prompt, invokes a Codex SDK/App Server thread, and records thread/report evidence.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "attendant-command",
+          "description": "Cheap attendant behavior should exist before adding high-value agent execution."
+        },
+        {
+          "kind": "task",
+          "task": "mcp-server-entrypoint",
+          "description": "Adapter boundaries should be clear before adding another execution surface."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/",
+          "pyproject.toml",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    }
+  ]
+}

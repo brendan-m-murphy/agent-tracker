@@ -311,15 +311,17 @@ Consider as an export/sync target, not as the first source of truth.
 
 ## Recommended Next Milestones
 
-1. Add config validation, DB schema versioning, and migration tests.
-2. Implement pull-based cross-network spool support with dry-run and idempotent
+1. Create user documentation for installation, configuration, core workflows,
+   plugin authoring, spool ingestion, and self-hosted project operation.
+2. Add config validation, DB schema versioning, and migration tests.
+3. Implement pull-based cross-network spool support with dry-run and idempotent
    ingestion.
-3. Add an actual MCP server entrypoint around the existing handler methods.
-4. Add approval gates and role/authority enforcement.
-5. Move HPC tracker Markdown note/result export into the plugin so agents do not
+4. Add an actual MCP server entrypoint around the existing handler methods.
+5. Add approval gates and role/authority enforcement.
+6. Move HPC tracker Markdown note/result export into the plugin so agents do not
    need to write tracker files.
-6. Add deterministic follow-up task proposal support.
-7. Add an attendant command that can run cheaply on a schedule: ingest spool,
+7. Add deterministic follow-up task proposal support.
+8. Add an attendant command that can run cheaply on a schedule: ingest spool,
    recover stale leases, export snapshots, and propose follow-ups.
 
 ## Non-Goals For Now

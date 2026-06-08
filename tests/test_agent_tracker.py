@@ -17,6 +17,7 @@ from agent_tracker import cli  # noqa: E402
 from agent_tracker.config import load_config  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
+from agent_tracker.skill_bootstrap import install_skill, vendored_skill_path  # noqa: E402
 
 
 def write_project(root: Path) -> Path:
@@ -403,3 +404,14 @@ def test_core_contains_no_project_specific_terms() -> None:
                 offenders.append(f"{path.name}:{term}")
 
     assert offenders == []
+
+
+def test_project_manager_skill_is_vendored_and_installable(tmp_path: Path) -> None:
+    """The reusable project-manager skill can be bootstrapped for new installs."""
+    source = vendored_skill_path("project-manager")
+    installed = install_skill(destination_root=tmp_path, dry_run=False)
+
+    assert (source / "SKILL.md").exists()
+    assert installed == tmp_path / "project-manager"
+    assert (installed / "SKILL.md").exists()
+    assert "name: project-manager" in (installed / "SKILL.md").read_text(encoding="utf-8")

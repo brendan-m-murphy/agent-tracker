@@ -33,6 +33,19 @@ uv run ruff format --check .
 uv run ty check
 ```
 
+## Self-Dogfooding
+
+This repository can track its own implementation work with `agent-tracker`.
+See [tracking/README.md](tracking/README.md) for the workflow to import the
+task plan, pull the next available task, log work, and add follow-up tasks.
+
+The package also vendors a generic Codex skill named `project-manager`. After
+installation, copy it into a Codex skills directory with:
+
+```bash
+agent-tracker-install-skill --name project-manager
+```
+
 ## Project Config
 
 Project config is JSON. Paths are resolved relative to the config file unless

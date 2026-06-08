@@ -1,0 +1,15 @@
+{
+  "project_id": "agent-tracker-self",
+  "name": "Agent Tracker Self-Dogfood",
+  "db_path": "state.sqlite",
+  "task_plan_path": "tasks.json",
+  "importer": "agent_tracker.importers:JsonTaskImporter",
+  "prompt_renderer": "agent_tracker.rendering:DefaultPromptRenderer",
+  "exporter": "agent_tracker.exporters:JsonSnapshotExporter",
+  "export_path": "exports/snapshot.json",
+  "spool": {
+    "inbox": "spool/inbox",
+    "done": "spool/done",
+    "error": "spool/error"
+  }
+}

@@ -15,9 +15,13 @@ mcp = []
 
 [project.scripts]
 agent-tracker = "agent_tracker.cli:main"
+agent-tracker-install-skill = "agent_tracker.skill_bootstrap:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+agent_tracker = ["vendor/skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
