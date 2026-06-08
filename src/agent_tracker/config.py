@@ -7,6 +7,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+SUPPORTED_CONFIG_SCHEMA_VERSION = 1
+
+_TEXT_FIELDS = {
+    "project_id",
+    "name",
+    "canonical_config_path",
+    "state_root",
+    "task_source_root",
+    "db_path",
+    "task_plan_path",
+    "importer",
+    "prompt_renderer",
+    "event_adapter",
+    "exporter",
+    "export_path",
+    "spool_inbox",
+    "spool_done",
+    "spool_error",
+}
+_SPOOL_PATH_FIELDS = {"inbox", "done", "error"}
+
 
 @dataclass(frozen=True)
 class ProjectConfig:
@@ -21,6 +42,7 @@ class ProjectConfig:
     state_root: Path | None = None
     task_source_root: Path | None = None
     canonical_config_path: Path | None = None
+    config_schema_version: int = SUPPORTED_CONFIG_SCHEMA_VERSION
 
     def resolve_path(self, key: str, default: str = "") -> Path:
         """Resolve a path-valued config key relative to the config directory."""
@@ -103,27 +125,96 @@ def load_config(path: str | Path) -> ProjectConfig:
     """Load a JSON project config."""
     config_path = Path(path).expanduser().resolve()
     data = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("project config must be a JSON object")
+    config_schema_version = _config_schema_version(data)
+    _validate_text_fields(data)
+    _validate_spool(data)
+    raw = dict(data)
+    raw["config_schema_version"] = config_schema_version
     root = config_path.parent
-    project_id = str(data["project_id"])
-    name = str(data.get("name") or project_id)
-    state_root = _resolve(root, str(data.get("state_root", "."))).resolve()
-    task_source_root = _resolve(root, str(data.get("task_source_root", "."))).resolve()
-    db_path = _resolve(state_root, str(data.get("db_path", ".agent-tracker/state.sqlite")))
+    project_id = _required_text(data, "project_id")
+    name = _optional_text(data, "name") or project_id
+    state_root = _resolve(root, _optional_text(data, "state_root", ".") or ".").resolve()
+    task_source_root = _resolve(
+        root,
+        _optional_text(data, "task_source_root", ".") or ".",
+    ).resolve()
+    db_path = _resolve(
+        state_root,
+        _optional_text(data, "db_path", ".agent-tracker/state.sqlite")
+        or ".agent-tracker/state.sqlite",
+    )
     canonical_config_path = None
-    canonical_value = str(data.get("canonical_config_path", "")).strip()
+    canonical_value = _optional_text(data, "canonical_config_path")
     if canonical_value:
         canonical_path = Path(canonical_value).expanduser()
         if not canonical_path.is_absolute():
             raise ValueError("canonical_config_path must be absolute or start with ~")
         canonical_config_path = canonical_path.resolve()
     return ProjectConfig(
+        config_schema_version=config_schema_version,
         project_id=project_id,
         name=name,
         root=root,
         db_path=db_path,
-        raw=data,
+        raw=raw,
         config_path=config_path,
         state_root=state_root,
         task_source_root=task_source_root,
         canonical_config_path=canonical_config_path,
     )
+
+
+def _config_schema_version(data: dict[str, Any]) -> int:
+    """Return the validated config schema version."""
+    value = data.get("config_schema_version", SUPPORTED_CONFIG_SCHEMA_VERSION)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("config_schema_version must be an integer")
+    if value != SUPPORTED_CONFIG_SCHEMA_VERSION:
+        raise ValueError(
+            "unsupported config_schema_version "
+            f"{value}; supported version is {SUPPORTED_CONFIG_SCHEMA_VERSION}"
+        )
+    return value
+
+
+def _required_text(data: dict[str, Any], key: str) -> str:
+    """Return a required non-empty string config field."""
+    if key not in data:
+        raise ValueError(f"config field {key!r} is required")
+    text = _optional_text(data, key)
+    if not text:
+        raise ValueError(f"config field {key!r} must be non-empty")
+    return text
+
+
+def _optional_text(data: dict[str, Any], key: str, default: str = "") -> str:
+    """Return a string config field, treating missing or null as a default."""
+    if key not in data or data[key] is None:
+        return default
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f"config field {key!r} must be a string")
+    return value.strip()
+
+
+def _validate_text_fields(data: dict[str, Any]) -> None:
+    """Validate known string-valued top-level config fields."""
+    for key in _TEXT_FIELDS:
+        if key in data:
+            _optional_text(data, key)
+
+
+def _validate_spool(data: dict[str, Any]) -> None:
+    """Validate the optional local spool config block."""
+    if "spool" not in data or data["spool"] is None:
+        return
+    spool = data["spool"]
+    if not isinstance(spool, dict):
+        raise ValueError("config field 'spool' must be an object")
+    for key in _SPOOL_PATH_FIELDS:
+        if key not in spool or spool[key] is None:
+            continue
+        if not isinstance(spool[key], str):
+            raise ValueError(f"config field 'spool.{key}' must be a string")

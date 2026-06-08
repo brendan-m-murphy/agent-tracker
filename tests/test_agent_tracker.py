@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from agent_tracker import cli  # noqa: E402
-from agent_tracker.config import load_config  # noqa: E402
+from agent_tracker.config import SUPPORTED_CONFIG_SCHEMA_VERSION, load_config  # noqa: E402
+from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import install_skill, vendored_skill_path  # noqa: E402
@@ -92,6 +93,61 @@ def write_project(root: Path) -> Path:
     return config_path
 
 
+def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> None:
+    """Configs without an explicit schema version use the current schema."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+
+    assert config.config_schema_version == SUPPORTED_CONFIG_SCHEMA_VERSION
+    assert config.raw["config_schema_version"] == SUPPORTED_CONFIG_SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ([], "project config must be a JSON object"),
+        ({}, "config field 'project_id' is required"),
+        ({"project_id": ""}, "config field 'project_id' must be non-empty"),
+        ({"project_id": 123}, "config field 'project_id' must be a string"),
+        (
+            {"project_id": "toy", "config_schema_version": "1"},
+            "config_schema_version must be an integer",
+        ),
+        (
+            {"project_id": "toy", "config_schema_version": 2},
+            "unsupported config_schema_version 2",
+        ),
+        (
+            {"project_id": "toy", "state_root": {}},
+            "config field 'state_root' must be a string",
+        ),
+        ({"project_id": "toy", "spool": []}, "config field 'spool' must be an object"),
+        (
+            {"project_id": "toy", "spool": {"inbox": 1}},
+            "config field 'spool.inbox' must be a string",
+        ),
+    ],
+)
+def test_cli_reports_malformed_config_errors_without_traceback(
+    tmp_path: Path,
+    payload: object,
+    expected: str,
+) -> None:
+    """Malformed project configs fail before touching SQLite state."""
+    config_path = tmp_path / "project.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(["status", "--config", str(config_path)])
+
+    assert code == 1
+    assert expected in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+    assert not (tmp_path / ".agent-tracker" / "state.sqlite").exists()
+    assert not (tmp_path / "state.sqlite").exists()
+
+
 def test_import_evaluates_ready_blocked_and_deferred_tasks(tmp_path: Path) -> None:
     """Imported task dependencies determine computed state."""
     config = load_config(write_project(tmp_path))
@@ -125,6 +181,24 @@ def test_claim_heartbeat_complete_and_unblock_downstream(tmp_path: Path) -> None
     assert states["ready"].state == "done"
     assert states["ready"].evidence == ["evidence://ready"]
     assert states["blocked"].state == "ready"
+
+
+def test_database_schema_metadata_is_created(tmp_path: Path) -> None:
+    """Schema initialization records the current database schema version."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with coord.store.transaction(read_only=True) as conn:
+        row = conn.execute(
+            "SELECT value, created_at, updated_at FROM schema_metadata WHERE key = ?",
+            (DB_SCHEMA_VERSION_KEY,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["value"] == str(DB_SCHEMA_VERSION)
+    assert row["created_at"]
+    assert row["updated_at"]
 
 
 def test_stale_claim_is_recovered(tmp_path: Path) -> None:

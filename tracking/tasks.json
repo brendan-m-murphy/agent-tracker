@@ -94,7 +94,7 @@
       "id": "config-schema-versioning",
       "title": "Add config validation and schema versioning",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 20,
       "prompt_key": "config-schema-versioning",
       "prompt_path": "docs/next-feature-tasks.md",

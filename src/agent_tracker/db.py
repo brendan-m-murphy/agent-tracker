@@ -24,6 +24,9 @@ from agent_tracker.models import (
     TaskState,
 )
 
+DB_SCHEMA_VERSION = 1
+DB_SCHEMA_VERSION_KEY = "db_schema_version"
+
 
 def utcnow() -> datetime:
     """Return timezone-aware UTC now."""
@@ -104,6 +107,13 @@ class Store:
         with self.transaction(immediate=True) as conn:
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS schema_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS projects (
                     project_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -190,6 +200,7 @@ class Store:
                 );
                 """
             )
+            self._record_schema_metadata(conn)
 
     def upsert_project(self, config: ProjectConfig) -> None:
         """Create or update a project row."""
@@ -972,6 +983,29 @@ class Store:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (project_id, task_id, action, actor, dumps(payload), iso()),
+        )
+
+    def _record_schema_metadata(self, conn: sqlite3.Connection) -> None:
+        """Record and verify the database schema version."""
+        row = conn.execute(
+            "SELECT value FROM schema_metadata WHERE key = ?",
+            (DB_SCHEMA_VERSION_KEY,),
+        ).fetchone()
+        if row is not None and str(row["value"]) != str(DB_SCHEMA_VERSION):
+            raise ValueError(
+                "unsupported database schema version "
+                f"{row['value']}; supported version is {DB_SCHEMA_VERSION}"
+            )
+        now = iso()
+        conn.execute(
+            """
+            INSERT INTO schema_metadata (key, value, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+            """,
+            (DB_SCHEMA_VERSION_KEY, str(DB_SCHEMA_VERSION), now, now),
         )
 
 
