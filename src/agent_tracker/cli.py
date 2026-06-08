@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -238,9 +240,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI."""
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (
+        FileNotFoundError,
+        ImportError,
+        json.JSONDecodeError,
+        KeyError,
+        sqlite3.Error,
+        ValueError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

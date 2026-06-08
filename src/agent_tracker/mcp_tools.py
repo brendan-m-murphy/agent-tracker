@@ -115,4 +115,3 @@ class AgentTrackerTools:
     def record_evidence(self, task_id: str, uri: str, actor: str = "system") -> dict[str, bool]:
         """Record evidence."""
         return {"inserted": self.coordinator.record_evidence(task_id, uri, actor=actor)}
-

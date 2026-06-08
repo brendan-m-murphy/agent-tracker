@@ -5,18 +5,19 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from agent_tracker.config import ProjectConfig
 from agent_tracker.models import (
     ACTIVE_STATES,
-    DependencyRecord,
-    EventRecord,
     MANUAL_STATES,
     Claim,
+    DependencyRecord,
+    EventRecord,
     RequirementState,
     TaskRecord,
     TaskState,
@@ -210,20 +211,43 @@ class Store:
         dependencies: list[DependencyRecord],
     ) -> None:
         """Import tasks and dependencies into the store."""
+        self._validate_import(tasks, dependencies)
         self.upsert_project(config)
         now = iso()
         with self.transaction(immediate=True) as conn:
+            existing_rows = {
+                str(row["task_id"]): row
+                for row in conn.execute(
+                    "SELECT * FROM tasks WHERE project_id = ?",
+                    (config.project_id,),
+                )
+            }
+            imported_task_ids = [task.task_id for task in tasks]
             for task in tasks:
-                if task.status not in MANUAL_STATES:
-                    raise ValueError(f"invalid task status for {task.task_id}: {task.status}")
+                existing = existing_rows.get(task.task_id)
+                preserve_lease = _should_preserve_lease(existing, task.status)
+                if preserve_lease:
+                    assert existing is not None
+                    status = str(existing["status"]) if task.status == "pending" else task.status
+                    lease_agent_id = str(existing["lease_agent_id"])
+                    lease_token = str(existing["lease_token"])
+                    lease_expires_at = str(existing["lease_expires_at"])
+                    claimed_at = str(existing["claimed_at"])
+                else:
+                    status = task.status
+                    lease_agent_id = ""
+                    lease_token = ""
+                    lease_expires_at = ""
+                    claimed_at = ""
                 conn.execute(
                     """
                     INSERT INTO tasks (
                         project_id, task_id, title, repo, status, priority, prompt_key,
                         prompt_path, summary, execution_json, validation_json, next_action,
-                        metadata_json, created_at, updated_at
+                        metadata_json, lease_agent_id, lease_token, lease_expires_at,
+                        claimed_at, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_id, task_id) DO UPDATE SET
                         title=excluded.title,
                         repo=excluded.repo,
@@ -236,6 +260,10 @@ class Store:
                         validation_json=excluded.validation_json,
                         next_action=excluded.next_action,
                         metadata_json=excluded.metadata_json,
+                        lease_agent_id=excluded.lease_agent_id,
+                        lease_token=excluded.lease_token,
+                        lease_expires_at=excluded.lease_expires_at,
+                        claimed_at=excluded.claimed_at,
                         updated_at=excluded.updated_at
                     """,
                     (
@@ -243,7 +271,7 @@ class Store:
                         task.task_id,
                         task.title,
                         task.repo,
-                        task.status,
+                        status,
                         task.priority,
                         task.prompt_key,
                         task.prompt_path,
@@ -252,6 +280,10 @@ class Store:
                         dumps(task.validation_checks),
                         task.next_action,
                         dumps(task.metadata),
+                        lease_agent_id,
+                        lease_token,
+                        lease_expires_at,
+                        claimed_at,
                         now,
                         now,
                     ),
@@ -264,6 +296,17 @@ class Store:
                         """,
                         (config.project_id, task.task_id, uri, now),
                     )
+            if imported_task_ids:
+                placeholders = ", ".join("?" for _ in imported_task_ids)
+                conn.execute(
+                    f"""
+                    DELETE FROM tasks
+                    WHERE project_id = ? AND task_id NOT IN ({placeholders})
+                    """,
+                    (config.project_id, *imported_task_ids),
+                )
+            else:
+                conn.execute("DELETE FROM tasks WHERE project_id = ?", (config.project_id,))
             conn.execute("DELETE FROM dependencies WHERE project_id = ?", (config.project_id,))
             for dependency in dependencies:
                 conn.execute(
@@ -289,6 +332,37 @@ class Store:
                 {"tasks": len(tasks), "dependencies": len(dependencies)},
             )
 
+    def _validate_import(
+        self,
+        tasks: list[TaskRecord],
+        dependencies: list[DependencyRecord],
+    ) -> None:
+        """Validate task import payloads before mutating storage."""
+        task_ids: set[str] = set()
+        for task in tasks:
+            if not task.task_id:
+                raise ValueError("task id is required")
+            if task.task_id in task_ids:
+                raise ValueError(f"duplicate task id: {task.task_id}")
+            if task.status not in MANUAL_STATES:
+                raise ValueError(f"invalid task status for {task.task_id}: {task.status}")
+            task_ids.add(task.task_id)
+        for dependency in dependencies:
+            if not dependency.task_id:
+                raise ValueError("dependency task id is required")
+            if not dependency.dependency_task_id:
+                raise ValueError(f"dependency for {dependency.task_id} is missing a task id")
+            if dependency.task_id not in task_ids:
+                raise ValueError(
+                    f"dependency references unknown task {dependency.task_id}: "
+                    f"{dependency.dependency_task_id}"
+                )
+            if dependency.dependency_task_id not in task_ids:
+                raise ValueError(
+                    f"task {dependency.task_id} references unknown dependency "
+                    f"{dependency.dependency_task_id}"
+                )
+
     def task_states(self, project_id: str) -> list[TaskState]:
         """Return evaluated task states ordered by priority."""
         with self.transaction() as conn:
@@ -307,7 +381,12 @@ class Store:
             )
             evidence_rows = list(
                 conn.execute(
-                    "SELECT task_id, uri FROM evidence WHERE project_id = ? ORDER BY created_at, uri",
+                    """
+                    SELECT task_id, uri
+                    FROM evidence
+                    WHERE project_id = ?
+                    ORDER BY created_at, uri
+                    """,
                     (project_id,),
                 )
             )
@@ -318,7 +397,9 @@ class Store:
             dependencies_by_task.setdefault(str(dep_row["task_id"]), []).append(dep_row)
         evidence_by_task: dict[str, list[str]] = {}
         for evidence_row in evidence_rows:
-            evidence_by_task.setdefault(str(evidence_row["task_id"]), []).append(str(evidence_row["uri"]))
+            evidence_by_task.setdefault(str(evidence_row["task_id"]), []).append(
+                str(evidence_row["uri"])
+            )
 
         states: list[TaskState] = []
         rows_by_id = {str(row["task_id"]): row for row in rows}
@@ -367,6 +448,7 @@ class Store:
         lease_seconds: int = 3600,
     ) -> Claim:
         """Claim a ready task atomically."""
+        _validate_lease_seconds(lease_seconds)
         now = utcnow()
         expires = now + timedelta(seconds=lease_seconds)
         token = uuid.uuid4().hex
@@ -436,9 +518,18 @@ class Store:
         agent_id: str = "",
     ) -> Claim:
         """Extend a task lease and mark it in progress."""
-        expires = utcnow() + timedelta(seconds=lease_seconds)
+        _validate_lease_seconds(lease_seconds)
+        now = utcnow()
+        expires = now + timedelta(seconds=lease_seconds)
         with self.transaction(immediate=True) as conn:
-            row = self._locked_task(conn, project_id, task_id, lease_token)
+            row = self._locked_task(
+                conn,
+                project_id,
+                task_id,
+                lease_token,
+                agent_id=agent_id,
+                now=now,
+            )
             conn.execute(
                 """
                 UPDATE tasks SET
@@ -447,7 +538,7 @@ class Store:
                     updated_at = ?
                 WHERE project_id = ? AND task_id = ?
                 """,
-                (iso(expires), iso(), project_id, task_id),
+                (iso(expires), iso(now), project_id, task_id),
             )
             actor = agent_id or str(row["lease_agent_id"])
             self._audit(
@@ -606,10 +697,18 @@ class Store:
         agent_id: str,
         payload: dict[str, Any] | None = None,
     ) -> None:
+        now_dt = utcnow()
         with self.transaction(immediate=True) as conn:
-            row = self._locked_task(conn, project_id, task_id, lease_token)
+            row = self._locked_task(
+                conn,
+                project_id,
+                task_id,
+                lease_token,
+                agent_id=agent_id,
+                now=now_dt,
+            )
             actor = agent_id or str(row["lease_agent_id"])
-            now = iso()
+            now = iso(now_dt)
             conn.execute(
                 """
                 UPDATE tasks SET
@@ -617,6 +716,7 @@ class Store:
                     lease_agent_id = '',
                     lease_token = '',
                     lease_expires_at = '',
+                    claimed_at = '',
                     updated_at = ?
                 WHERE project_id = ? AND task_id = ?
                 """,
@@ -645,17 +745,30 @@ class Store:
         project_id: str,
         task_id: str,
         lease_token: str,
+        *,
+        agent_id: str = "",
+        now: datetime | None = None,
     ) -> sqlite3.Row:
+        if not lease_token:
+            raise ValueError("lease token is required")
         row = conn.execute(
             "SELECT * FROM tasks WHERE project_id = ? AND task_id = ?",
             (project_id, task_id),
         ).fetchone()
         if row is None:
             raise KeyError(f"unknown task: {task_id}")
-        if str(row["lease_token"]) != lease_token or str(row["status"]) not in ACTIVE_STATES:
+        stored_agent_id = str(row["lease_agent_id"])
+        stored_token = str(row["lease_token"])
+        if agent_id and stored_agent_id and agent_id != stored_agent_id:
+            raise ValueError("task lease belongs to a different agent")
+        if (
+            not stored_token
+            or stored_token != lease_token
+            or str(row["status"]) not in ACTIVE_STATES
+        ):
             raise ValueError("task lease token is invalid or task is not active")
         expires_at = parse_time(str(row["lease_expires_at"]))
-        if expires_at is not None and expires_at <= utcnow():
+        if expires_at is None or expires_at <= (now or utcnow()):
             raise ValueError("task lease is expired")
         return row
 
@@ -695,7 +808,7 @@ class Store:
         rows = list(
             conn.execute(
                 """
-                SELECT task_id, lease_expires_at
+                SELECT task_id, lease_token, lease_expires_at
                 FROM tasks
                 WHERE project_id = ? AND status IN ('claimed', 'in_progress', 'waiting_evidence')
                 """,
@@ -704,7 +817,8 @@ class Store:
         )
         for row in rows:
             expires_at = parse_time(str(row["lease_expires_at"]))
-            if expires_at is not None and expires_at <= current:
+            has_lease = bool(str(row["lease_token"]))
+            if has_lease and (expires_at is None or expires_at <= current):
                 conn.execute(
                     """
                     UPDATE tasks SET
@@ -712,6 +826,7 @@ class Store:
                         lease_agent_id = '',
                         lease_token = '',
                         lease_expires_at = '',
+                        claimed_at = '',
                         updated_at = ?
                     WHERE project_id = ? AND task_id = ?
                     """,
@@ -733,6 +848,8 @@ class Store:
         roles = metadata.get("roles") or metadata.get("allowed_roles") or []
         if isinstance(roles, str):
             roles = [roles]
+        if not isinstance(roles, (list, tuple, set)):
+            return False
         return role in roles
 
     def _task_from_row(self, row: sqlite3.Row) -> TaskRecord:
@@ -772,6 +889,21 @@ class Store:
             """,
             (project_id, task_id, action, actor, dumps(payload), iso()),
         )
+
+
+def _should_preserve_lease(row: sqlite3.Row | None, imported_status: str) -> bool:
+    """Return whether an import should preserve an existing live lease."""
+    if row is None:
+        return False
+    if imported_status not in ACTIVE_STATES and imported_status != "pending":
+        return False
+    return str(row["status"]) in ACTIVE_STATES and bool(str(row["lease_token"]))
+
+
+def _validate_lease_seconds(lease_seconds: int) -> None:
+    """Reject leases that would be immediately stale."""
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be greater than zero")
 
 
 def state_to_dict(state: TaskState) -> dict[str, Any]:

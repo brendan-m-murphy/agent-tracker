@@ -9,7 +9,9 @@ from agent_tracker.models import TaskState
 class DefaultPromptRenderer:
     """Render a generic task prompt from stored task context."""
 
-    def render_prompt(self, config: ProjectConfig, state: TaskState, *, markdown: bool = False) -> str:
+    def render_prompt(
+        self, config: ProjectConfig, state: TaskState, *, markdown: bool = False
+    ) -> str:
         """Render a compact handoff prompt."""
         task = state.task
         lines = [
@@ -38,4 +40,3 @@ class DefaultPromptRenderer:
         if task.next_action:
             lines.extend(["", "## Next Action", task.next_action])
         return "\n".join(lines).rstrip() + "\n"
-

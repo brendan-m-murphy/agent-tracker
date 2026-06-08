@@ -16,4 +16,3 @@ class JsonSnapshotExporter:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         return [str(path)]
-

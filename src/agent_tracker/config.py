@@ -45,4 +45,3 @@ def load_config(path: str | Path) -> ProjectConfig:
     name = str(data.get("name") or project_id)
     db_path = _resolve(root, str(data.get("db_path", ".agent-tracker/state.sqlite")))
     return ProjectConfig(project_id=project_id, name=name, root=root, db_path=db_path, raw=data)
-

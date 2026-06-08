@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from typing import Any, Protocol
 
 from agent_tracker.config import ProjectConfig
@@ -19,7 +20,9 @@ class TaskImporter(Protocol):
 class PromptRenderer(Protocol):
     """Render task prompts for agents."""
 
-    def render_prompt(self, config: ProjectConfig, state: TaskState, *, markdown: bool = False) -> str:
+    def render_prompt(
+        self, config: ProjectConfig, state: TaskState, *, markdown: bool = False
+    ) -> str:
         """Render prompt text for a task."""
 
 
@@ -61,6 +64,8 @@ def load_plugin(config: ProjectConfig, key: str, default: str | None = None) -> 
     spec = str(config.raw.get(key, default or "")).strip()
     if not spec:
         return None
+    root = str(config.root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
     obj = load_object(spec)
     return obj() if isinstance(obj, type) else obj
-

@@ -8,6 +8,9 @@ and plugins.
 The package intentionally does not know about any particular project, scheduler,
 HPC environment, repository layout, or validation convention.
 
+See [docs/planning.md](docs/planning.md) for the roadmap, missing pieces,
+future architecture options, and recommendations from the transcript review.
+
 ## First Local Flow
 
 ```bash
@@ -16,6 +19,18 @@ agent-tracker import --config path/to/project.json
 agent-tracker status --config path/to/project.json
 agent-tracker next --config path/to/project.json
 agent-tracker claim --config path/to/project.json --agent codex
+```
+
+## Development
+
+This package uses `uv` for local development:
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
 ```
 
 ## Project Config
@@ -35,4 +50,3 @@ absolute.
   "export_path": "exports/agent-tracker-snapshot.json"
 }
 ```
-

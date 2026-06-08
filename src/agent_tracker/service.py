@@ -28,6 +28,8 @@ class Coordinator:
     def import_tasks(self) -> int:
         """Import configured tasks through the configured importer."""
         importer = load_plugin(self.config, "importer", "agent_tracker.importers:JsonTaskImporter")
+        if importer is None:
+            raise RuntimeError("task importer is not configured")
         tasks, dependencies = importer.load_tasks(self.config)
         self.store.import_tasks(self.config, tasks, dependencies)
         return len(tasks)
@@ -38,6 +40,8 @@ class Coordinator:
 
     def ready_tasks(self, *, limit: int = 0, repo: str = "", role: str = "") -> list[TaskState]:
         """Return ready tasks matching optional filters."""
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
         states = [state for state in self.task_states() if state.state == "ready"]
         if repo:
             states = [state for state in states if state.task.repo == repo]
@@ -118,35 +122,43 @@ class Coordinator:
 
     def record_event(self, payload: dict[str, Any], *, actor: str = "system") -> bool:
         """Normalize and record an event."""
+        if not isinstance(payload, dict):
+            raise ValueError("event payload must be a JSON object")
         adapter = load_plugin(self.config, "event_adapter")
         if adapter is None:
             event = EventRecord(
-                event_id=str(payload.get("event_id") or payload.get("id")),
-                kind=str(payload.get("kind", "event")),
-                task_id=str(payload.get("task_id", "")),
+                event_id=_first_text(payload.get("event_id"), payload.get("id")),
+                kind=_first_text(payload.get("kind")) or "event",
+                task_id=_first_text(payload.get("task_id")),
                 payload=payload,
             )
         else:
             event = adapter.normalize_event(self.config, payload)
-        if not event.event_id:
+        event_id = event.event_id.strip()
+        if not event_id:
             raise ValueError("event payload must include event_id or id")
+        kind = event.kind.strip() or "event"
+        task_id = event.task_id.strip()
+        event = EventRecord(event_id=event_id, kind=kind, task_id=task_id, payload=event.payload)
         return self.store.record_event(self.config.project_id, event, actor=actor)
 
     def ingest_event_file(self, path: str | Path, *, actor: str = "system") -> bool:
         """Record an event from a JSON file."""
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("event file must contain a JSON object")
         return self.record_event(payload, actor=actor)
 
     def ingest_spool(self, *, actor: str = "system") -> dict[str, int]:
         """Ingest configured spool JSON files."""
         spool = self.config.raw.get("spool", {})
-        inbox = self.config.resolve_path("spool_inbox", "") if "spool_inbox" in self.config.raw else None
-        done = self.config.resolve_path("spool_done", "") if "spool_done" in self.config.raw else None
-        error = self.config.resolve_path("spool_error", "") if "spool_error" in self.config.raw else None
+        inbox = _top_level_path(self.config, "spool_inbox")
+        done = _top_level_path(self.config, "spool_done")
+        error = _top_level_path(self.config, "spool_error")
         if isinstance(spool, dict) and spool:
-            inbox = self.config.root / spool.get("inbox", "") if not Path(spool.get("inbox", "")).is_absolute() else Path(spool.get("inbox", ""))
-            done = self.config.root / spool.get("done", "") if not Path(spool.get("done", "")).is_absolute() else Path(spool.get("done", ""))
-            error = self.config.root / spool.get("error", "") if not Path(spool.get("error", "")).is_absolute() else Path(spool.get("error", ""))
+            inbox = _spool_path(self.config, spool.get("inbox"))
+            done = _spool_path(self.config, spool.get("done"))
+            error = _spool_path(self.config, spool.get("error"))
         if inbox is None or not inbox.exists():
             return {"processed": 0, "inserted": 0, "errors": 0}
         if done is None:
@@ -183,7 +195,11 @@ class Coordinator:
 
     def export(self) -> list[str]:
         """Export an audit snapshot through the configured exporter."""
-        exporter = load_plugin(self.config, "exporter", "agent_tracker.exporters:JsonSnapshotExporter")
+        exporter = load_plugin(
+            self.config, "exporter", "agent_tracker.exporters:JsonSnapshotExporter"
+        )
+        if exporter is None:
+            raise RuntimeError("exporter is not configured")
         snapshot = self.store.snapshot(self.config.project_id)
         return exporter.export(self.config, snapshot)
 
@@ -209,5 +225,34 @@ def _role_matches(state: TaskState, role: str) -> bool:
     roles = state.task.metadata.get("roles") or state.task.metadata.get("allowed_roles") or []
     if isinstance(roles, str):
         roles = [roles]
+    if not isinstance(roles, (list, tuple, set)):
+        return False
     return role in roles
 
+
+def _first_text(*values: Any) -> str:
+    """Return the first non-empty text value."""
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _top_level_path(config: ProjectConfig, key: str) -> Path | None:
+    """Resolve an optional top-level path config value."""
+    if key not in config.raw:
+        return None
+    value = _first_text(config.raw.get(key))
+    return config.resolve_path(key) if value else None
+
+
+def _spool_path(config: ProjectConfig, value: Any) -> Path | None:
+    """Resolve an optional path from the `spool` config block."""
+    text = _first_text(value)
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else config.root / path
