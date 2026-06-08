@@ -74,7 +74,14 @@ from agent_tracker.models import DependencyRecord, EventRecord, TaskRecord, Task
 - `db_path`: resolved SQLite path;
 - `raw`: original config dictionary.
 
-Use `config.resolve_path("field_name")` for path-valued config fields.
+Use the resolver that matches the kind of path:
+
+- `config.resolve_task_source_path("field_name")` for task definitions and other
+  durable planning sources;
+- `config.resolve_state_path("field_name")` for runtime state, spool files, and
+  exports;
+- `config.resolve_path("field_name")` for project-local plugin files that should
+  stay relative to the config file itself.
 
 ## Task Importers
 
@@ -107,7 +114,7 @@ class ProjectImporter:
     def load_tasks(
         self, config: ProjectConfig
     ) -> tuple[list[TaskRecord], list[DependencyRecord]]:
-        path = config.resolve_path("task_plan_path")
+        path = config.resolve_task_source_path("task_plan_path")
         data = json.loads(path.read_text(encoding="utf-8"))
         tasks = [
             TaskRecord(
@@ -260,7 +267,7 @@ from agent_tracker.config import ProjectConfig
 
 class ProjectExporter:
     def export(self, config: ProjectConfig, snapshot: dict) -> list[str]:
-        path = config.resolve_path("export_path", "exports/snapshot.json")
+        path = config.resolve_state_path("export_path", "exports/snapshot.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         return [str(path)]

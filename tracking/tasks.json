@@ -41,7 +41,7 @@
       "id": "canonical-state-and-task-source-contract",
       "title": "Define canonical state and task source contract",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 15,
       "prompt_key": "canonical-state-and-task-source-contract",
       "prompt_path": "docs/next-feature-tasks.md",

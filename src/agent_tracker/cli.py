@@ -26,8 +26,25 @@ def print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2))
 
 
+def print_path_report(coord: Coordinator) -> None:
+    """Report resolved paths before a mutating command."""
+    paths = coord.path_summary()
+    print("agent-tracker paths:", file=sys.stderr)
+    for key in (
+        "config_path",
+        "canonical_config_path",
+        "state_root",
+        "task_source_root",
+        "task_source_path",
+        "db_path",
+    ):
+        if key in paths:
+            print(f"  {key}: {paths[key]}", file=sys.stderr)
+
+
 def command_init(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     coord.init()
     print(f"Initialized {coord.config.project_id} at {coord.store.path}")
     return 0
@@ -35,19 +52,26 @@ def command_init(args: argparse.Namespace) -> int:
 
 def command_import(args: argparse.Namespace) -> int:
     coord = coordinator(args)
-    count = coord.import_tasks()
-    print(f"Imported {count} tasks for {coord.config.project_id}")
+    print_path_report(coord)
+    count = coord.import_tasks(reconcile_runtime_state=args.reconcile_runtime_state)
+    policy = (
+        "with runtime-state reconciliation" if args.reconcile_runtime_state else "definitions only"
+    )
+    print(f"Imported {count} task definitions for {coord.config.project_id} ({policy})")
     return 0
 
 
 def command_status(args: argparse.Namespace) -> int:
     coord = coordinator(args)
-    payload = coord.status_payload()
+    payload = coord.status_payload(recover_stale_leases=args.recover_stale_leases)
     if args.json:
         print_json(payload)
         return 0
     print(f"{payload['name']} ({payload['project_id']})")
+    print(f"  config: {payload['config_path']}")
     print(f"  db: {payload['db_path']}")
+    if payload.get("task_source_path"):
+        print(f"  task source: {payload['task_source_path']}")
     print(f"  ready: {len(payload['ready'])}")
     print(f"  active: {len(payload['active'])}")
     print(f"  blocked: {len(payload['blocked'])}")
@@ -56,7 +80,12 @@ def command_status(args: argparse.Namespace) -> int:
 
 def command_next(args: argparse.Namespace) -> int:
     coord = coordinator(args)
-    ready = coord.ready_tasks(limit=args.limit, repo=args.repo, role=args.role)
+    ready = coord.ready_tasks(
+        limit=args.limit,
+        repo=args.repo,
+        role=args.role,
+        recover_stale_leases=args.recover_stale_leases,
+    )
     if args.json:
         print_json([state_to_dict(state) for state in ready])
         return 0
@@ -75,16 +104,24 @@ def command_next(args: argparse.Namespace) -> int:
 
 def command_task(args: argparse.Namespace) -> int:
     coord = coordinator(args)
-    state = coord.get_task(args.task_id)
+    state = coord.get_task(args.task_id, recover_stale_leases=args.recover_stale_leases)
     if args.json:
         print_json(state_to_dict(state))
         return 0
-    print(coord.render_prompt(args.task_id, markdown=args.markdown), end="")
+    print(
+        coord.render_prompt(
+            args.task_id,
+            markdown=args.markdown,
+            recover_stale_leases=args.recover_stale_leases,
+        ),
+        end="",
+    )
     return 0
 
 
 def command_claim(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     claim = coord.claim(
         agent_id=args.agent,
         task_id=args.task_id,
@@ -98,6 +135,7 @@ def command_claim(args: argparse.Namespace) -> int:
 
 def command_heartbeat(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     claim = coord.heartbeat(
         args.task_id,
         lease_token=args.lease_token,
@@ -110,6 +148,7 @@ def command_heartbeat(args: argparse.Namespace) -> int:
 
 def command_complete(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     coord.complete(
         args.task_id,
         lease_token=args.lease_token,
@@ -122,6 +161,7 @@ def command_complete(args: argparse.Namespace) -> int:
 
 def command_fail(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     coord.fail(args.task_id, lease_token=args.lease_token, reason=args.reason, agent_id=args.agent)
     print(f"Failed {args.task_id}")
     return 0
@@ -129,6 +169,7 @@ def command_fail(args: argparse.Namespace) -> int:
 
 def command_ingest_event(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     inserted = coord.ingest_event_file(args.event_json, actor=args.actor)
     print("inserted" if inserted else "duplicate")
     return 0
@@ -136,12 +177,14 @@ def command_ingest_event(args: argparse.Namespace) -> int:
 
 def command_ingest_spool(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     print_json(coord.ingest_spool(actor=args.actor))
     return 0
 
 
 def command_export(args: argparse.Namespace) -> int:
     coord = coordinator(args)
+    print_path_report(coord)
     for path in coord.export():
         print(path)
     return 0
@@ -164,11 +207,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     import_cmd = sub.add_parser("import", help="Import configured tasks.")
     add_common(import_cmd)
+    import_cmd.add_argument(
+        "--reconcile-runtime-state",
+        action="store_true",
+        help=(
+            "Apply imported statuses and removals to runtime state. Without this, "
+            "import updates definitions and dependencies while preserving existing "
+            "runtime task status."
+        ),
+    )
     import_cmd.set_defaults(func=command_import)
 
     status = sub.add_parser("status", help="Show project status.")
     add_common(status)
     status.add_argument("--json", action="store_true")
+    status.add_argument("--recover-stale-leases", action="store_true")
     status.set_defaults(func=command_status)
 
     next_cmd = sub.add_parser("next", help="Show ready tasks.")
@@ -177,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_cmd.add_argument("--limit", type=int, default=3)
     next_cmd.add_argument("--repo", default="")
     next_cmd.add_argument("--role", default="")
+    next_cmd.add_argument("--recover-stale-leases", action="store_true")
     next_cmd.set_defaults(func=command_next)
 
     task = sub.add_parser("task", help="Show one task prompt/context.")
@@ -184,6 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     task.add_argument("task_id")
     task.add_argument("--json", action="store_true")
     task.add_argument("--markdown", action="store_true")
+    task.add_argument("--recover-stale-leases", action="store_true")
     task.set_defaults(func=command_task)
 
     claim = sub.add_parser("claim", help="Claim a ready task.")

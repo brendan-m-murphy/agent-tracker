@@ -12,7 +12,7 @@ class JsonSnapshotExporter:
 
     def export(self, config: ProjectConfig, snapshot: dict) -> list[str]:
         """Write the configured export file."""
-        path = config.resolve_path("export_path", "agent-tracker-snapshot.json")
+        path = config.resolve_state_path("export_path", "agent-tracker-snapshot.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         return [str(path)]

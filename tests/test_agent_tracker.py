@@ -176,7 +176,7 @@ def test_lease_validation_rejects_nonpositive_duration_and_wrong_agent(tmp_path:
 def test_reimport_preserves_live_lease_but_clears_when_source_is_terminal(
     tmp_path: Path,
 ) -> None:
-    """Routine imports update task definitions without dropping active leases."""
+    """Runtime reconciliation must be explicit before source statuses clear leases."""
     config_path = write_project(tmp_path)
     config = load_config(config_path)
     coord = Coordinator(config)
@@ -193,17 +193,21 @@ def test_reimport_preserves_live_lease_but_clears_when_source_is_terminal(
             raw_task["status"] = "done"
     task_plan.write_text(json.dumps(data), encoding="utf-8")
     coord.import_tasks()
+    preserved = coord.get_task("ready")
+    coord.import_tasks(reconcile_runtime_state=True)
     completed = coord.get_task("ready")
 
     assert claimed.state == "claimed"
     assert claimed.lease_token == claim.lease_token
+    assert preserved.state == "claimed"
+    assert preserved.lease_token == claim.lease_token
     assert completed.state == "done"
     assert completed.lease_token == ""
     assert completed.lease_agent_id == ""
 
 
-def test_import_removes_tasks_deleted_from_source(tmp_path: Path) -> None:
-    """Re-importing synchronizes the database with the configured task set."""
+def test_import_removes_tasks_deleted_from_source_only_when_reconciling(tmp_path: Path) -> None:
+    """Definition imports preserve live tasks unless reconciliation is explicit."""
     config_path = write_project(tmp_path)
     config = load_config(config_path)
     coord = Coordinator(config)
@@ -214,9 +218,12 @@ def test_import_removes_tasks_deleted_from_source(tmp_path: Path) -> None:
     data["tasks"] = [task for task in data["tasks"] if task["id"] != "deferred"]
     task_plan.write_text(json.dumps(data), encoding="utf-8")
     coord.import_tasks()
-    task_ids = {state.task.task_id for state in coord.task_states()}
+    preserved_task_ids = {state.task.task_id for state in coord.task_states()}
+    coord.import_tasks(reconcile_runtime_state=True)
+    reconciled_task_ids = {state.task.task_id for state in coord.task_states()}
 
-    assert "deferred" not in task_ids
+    assert "deferred" in preserved_task_ids
+    assert "deferred" not in reconciled_task_ids
 
 
 def test_import_rejects_unknown_task_dependency(tmp_path: Path) -> None:
@@ -308,6 +315,113 @@ def test_project_root_plugin_loads_from_config_directory(tmp_path: Path) -> None
     assert imported == 1
 
 
+def test_state_and_task_source_roots_are_scoped_independently(tmp_path: Path) -> None:
+    """Runtime state can live outside the task-definition source tree."""
+    definition_root = tmp_path / "definitions"
+    definition_root.mkdir()
+    config_path = write_project(definition_root)
+    state_root = tmp_path / "runtime"
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["state_root"] = str(state_root)
+    data["task_source_root"] = str(definition_root)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    assert config.db_path == state_root / "state.sqlite"
+    assert (state_root / "state.sqlite").exists()
+    assert not (definition_root / "state.sqlite").exists()
+    assert coord.get_task("ready").state == "ready"
+
+
+def test_noncanonical_config_refuses_mutating_commands(tmp_path: Path) -> None:
+    """Copied configs cannot silently mutate an independent project database."""
+    canonical_root = tmp_path / "canonical"
+    canonical_root.mkdir()
+    config_path = write_project(canonical_root)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["canonical_config_path"] = str(config_path)
+    data["state_root"] = str(canonical_root)
+    data["task_source_root"] = str(canonical_root)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    copied_root = tmp_path / "copied"
+    copied_root.mkdir()
+    copied_config = copied_root / "project.json"
+    copied_config.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "claim",
+                "--config",
+                str(copied_config),
+                "--agent",
+                "agent-1",
+                "--role",
+                "worker",
+            ]
+        )
+
+    assert code == 1
+    assert "canonical config" in stderr.getvalue()
+    assert not (copied_root / "state.sqlite").exists()
+
+
+def test_relative_canonical_config_path_is_rejected(tmp_path: Path) -> None:
+    """Relative canonical paths cannot make copied configs self-authoritative."""
+    config_path = write_project(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["canonical_config_path"] = "project.json"
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(["status", "--config", str(config_path)])
+
+    assert code == 1
+    assert "canonical_config_path must be absolute" in stderr.getvalue()
+    assert not (tmp_path / "state.sqlite").exists()
+
+
+def test_status_inspection_does_not_recover_stale_leases_without_flag(tmp_path: Path) -> None:
+    """Read-only status can inspect stale leases without mutating storage."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET lease_expires_at = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            ("2000-01-01T00:00:00+00:00", config.project_id, "ready"),
+        )
+
+    assert cli.main(["status", "--config", str(config_path)]) == 0
+    with coord.store.transaction() as conn:
+        inspected = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+    assert inspected["status"] == "claimed"
+    assert inspected["lease_token"] == claim.lease_token
+
+    assert cli.main(["status", "--config", str(config_path), "--recover-stale-leases"]) == 0
+    with coord.store.transaction() as conn:
+        recovered = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+    assert recovered["status"] == "pending"
+    assert recovered["lease_token"] == ""
+
+
 def test_mcp_handlers_claim_and_complete(tmp_path: Path) -> None:
     """MCP-friendly handlers expose the same queue operations."""
     config_path = write_project(tmp_path)
@@ -367,8 +481,8 @@ def test_cli_reports_validation_errors_without_traceback(tmp_path: Path) -> None
     assert "Traceback" not in stderr.getvalue()
 
 
-def test_cli_reports_sqlite_errors_without_traceback(tmp_path: Path) -> None:
-    """CLI storage setup failures are concise command errors."""
+def test_read_only_cli_missing_database_does_not_create_state(tmp_path: Path) -> None:
+    """Read-only CLI storage failures are concise and do not create SQLite files."""
     config_path = write_project(tmp_path)
     stderr = StringIO()
 
@@ -376,8 +490,9 @@ def test_cli_reports_sqlite_errors_without_traceback(tmp_path: Path) -> None:
         code = cli.main(["status", "--config", str(config_path)])
 
     assert code == 1
-    assert "no such table: tasks" in stderr.getvalue()
+    assert "unable to open database file" in stderr.getvalue()
     assert "Traceback" not in stderr.getvalue()
+    assert not (tmp_path / "state.sqlite").exists()
 
 
 def test_export_writes_snapshot(tmp_path: Path) -> None:

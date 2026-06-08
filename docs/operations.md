@@ -6,6 +6,8 @@ and export audit state.
 
 Every command takes `--config <project.json>`. Every command also accepts
 `--db <path>` when you need to override the configured SQLite path temporarily.
+When `canonical_config_path` is set, mutating commands refuse copied configs and
+database overrides so live state stays attached to the canonical project.
 
 ## First Run Checklist
 
@@ -21,7 +23,8 @@ agent-tracker status --config tracking/project.json
 Use `init` to create or refresh the project row and database schema. Use
 `import` whenever the committed task plan changes. `import` also initializes the
 schema if needed, so automation can run it as the first command in a pull
-workflow.
+workflow. Mutating commands print the resolved config, task source, and database
+paths to stderr before changing state.
 
 ## Initialize Storage
 
@@ -43,9 +46,20 @@ agent-tracker import --config project.json
 ```
 
 The importer is the bridge from durable project planning files into live queue
-state. Re-run import whenever the task plan changes. Because imported task
-statuses are authoritative, make sure completed tasks are marked `done` in the
-source task plan before re-importing over live completed state.
+state. The default import mode updates task definitions and dependencies while
+preserving existing runtime status, leases, evidence, audit entries, and tasks
+that are absent from the source. This keeps SQLite as the live queue authority.
+
+When the task plan is intentionally being reconciled with runtime state, make
+that explicit:
+
+```bash
+agent-tracker import --config project.json --reconcile-runtime-state
+```
+
+Runtime reconciliation applies imported statuses and removes tasks absent from
+the task source. Use it only when the source task plan is known to be the desired
+runtime policy.
 
 ## Check Status
 
@@ -69,7 +83,13 @@ The JSON payload contains:
 - `blocked`: blocked task IDs;
 - `db_path`: resolved SQLite path.
 
-Status reads recover stale leases before reporting state.
+By default, `status` is read-only and reports the effective state without
+writing stale-lease recovery back to SQLite. To perform recovery during status
+inspection, opt in:
+
+```bash
+agent-tracker status --config project.json --recover-stale-leases
+```
 
 ## List Ready Tasks
 
@@ -92,6 +112,9 @@ agent-tracker next --config project.json --role maintainer --json
 ```
 
 Ready tasks are ordered by `priority`, then task ID.
+`next` is read-only by default. Use `claim` to recover stale leases and claim
+work atomically, or pass `--recover-stale-leases` when inspection should also
+write stale-lease recovery to SQLite.
 
 ## Claim Work
 
@@ -241,8 +264,9 @@ If `main` cannot be updated directly, open a PR and use `pr:<url>` evidence
 instead of marking the task complete from an isolated worktree.
 
 When the committed task plan is the authoritative source, include the terminal
-task-plan status update in the integrated branch. Otherwise a future `import`
-can reopen the completed live task from a stale `pending` entry.
+task-plan status update in the integrated branch and use
+`import --reconcile-runtime-state` deliberately. A normal import preserves the
+live SQLite terminal status even if the source task entry still says `pending`.
 
 ## Fail Work
 

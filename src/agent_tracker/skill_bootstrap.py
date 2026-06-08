@@ -13,7 +13,7 @@ DEFAULT_SKILL = "project-manager"
 
 def vendored_skill_path(name: str = DEFAULT_SKILL) -> Path:
     """Return the path to a vendored skill directory."""
-    path = resources.files("agent_tracker.vendor").joinpath("skills", name)
+    path = resources.files("agent_tracker.vendor").joinpath("skills").joinpath(name)
     if not path.is_dir():
         raise ValueError(f"unknown vendored skill: {name}")
     return Path(str(path))

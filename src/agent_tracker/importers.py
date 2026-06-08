@@ -14,7 +14,7 @@ class JsonTaskImporter:
 
     def load_tasks(self, config: ProjectConfig) -> tuple[list[TaskRecord], list[DependencyRecord]]:
         """Load generic task records from `task_plan_path`."""
-        path = config.resolve_path("task_plan_path")
+        path = config.resolve_task_source_path("task_plan_path")
         data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         tasks: list[TaskRecord] = []
         dependencies: list[DependencyRecord] = []

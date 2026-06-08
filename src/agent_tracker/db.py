@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -64,19 +65,30 @@ class Store:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def connect(self) -> sqlite3.Connection:
+    def connect(self, *, read_only: bool = False) -> sqlite3.Connection:
         """Open a configured SQLite connection."""
-        conn = sqlite3.connect(self.path)
+        if read_only:
+            uri = f"{self.path.expanduser().resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     @contextmanager
-    def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self,
+        *,
+        immediate: bool = False,
+        read_only: bool = False,
+    ) -> Iterator[sqlite3.Connection]:
         """Open a transaction."""
-        conn = self.connect()
+        if immediate and read_only:
+            raise ValueError("read-only transactions cannot be immediate")
+        conn = self.connect(read_only=read_only)
         try:
             conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             yield conn
@@ -209,6 +221,8 @@ class Store:
         config: ProjectConfig,
         tasks: list[TaskRecord],
         dependencies: list[DependencyRecord],
+        *,
+        reconcile_runtime_state: bool = False,
     ) -> None:
         """Import tasks and dependencies into the store."""
         self._validate_import(tasks, dependencies)
@@ -225,20 +239,34 @@ class Store:
             imported_task_ids = [task.task_id for task in tasks]
             for task in tasks:
                 existing = existing_rows.get(task.task_id)
-                preserve_lease = _should_preserve_lease(existing, task.status)
-                if preserve_lease:
-                    assert existing is not None
-                    status = str(existing["status"]) if task.status == "pending" else task.status
-                    lease_agent_id = str(existing["lease_agent_id"])
-                    lease_token = str(existing["lease_token"])
-                    lease_expires_at = str(existing["lease_expires_at"])
-                    claimed_at = str(existing["claimed_at"])
-                else:
+                if existing is None:
                     status = task.status
                     lease_agent_id = ""
                     lease_token = ""
                     lease_expires_at = ""
                     claimed_at = ""
+                elif reconcile_runtime_state:
+                    preserve_lease = _should_preserve_lease(existing, task.status)
+                    if preserve_lease:
+                        status = (
+                            str(existing["status"]) if task.status == "pending" else task.status
+                        )
+                        lease_agent_id = str(existing["lease_agent_id"])
+                        lease_token = str(existing["lease_token"])
+                        lease_expires_at = str(existing["lease_expires_at"])
+                        claimed_at = str(existing["claimed_at"])
+                    else:
+                        status = task.status
+                        lease_agent_id = ""
+                        lease_token = ""
+                        lease_expires_at = ""
+                        claimed_at = ""
+                else:
+                    status = str(existing["status"])
+                    lease_agent_id = str(existing["lease_agent_id"])
+                    lease_token = str(existing["lease_token"])
+                    lease_expires_at = str(existing["lease_expires_at"])
+                    claimed_at = str(existing["claimed_at"])
                 conn.execute(
                     """
                     INSERT INTO tasks (
@@ -296,18 +324,28 @@ class Store:
                         """,
                         (config.project_id, task.task_id, uri, now),
                     )
-            if imported_task_ids:
+            if reconcile_runtime_state:
+                if imported_task_ids:
+                    placeholders = ", ".join("?" for _ in imported_task_ids)
+                    conn.execute(
+                        f"""
+                        DELETE FROM tasks
+                        WHERE project_id = ? AND task_id NOT IN ({placeholders})
+                        """,
+                        (config.project_id, *imported_task_ids),
+                    )
+                else:
+                    conn.execute("DELETE FROM tasks WHERE project_id = ?", (config.project_id,))
+                conn.execute("DELETE FROM dependencies WHERE project_id = ?", (config.project_id,))
+            elif imported_task_ids:
                 placeholders = ", ".join("?" for _ in imported_task_ids)
                 conn.execute(
                     f"""
-                    DELETE FROM tasks
-                    WHERE project_id = ? AND task_id NOT IN ({placeholders})
+                    DELETE FROM dependencies
+                    WHERE project_id = ? AND task_id IN ({placeholders})
                     """,
                     (config.project_id, *imported_task_ids),
                 )
-            else:
-                conn.execute("DELETE FROM tasks WHERE project_id = ?", (config.project_id,))
-            conn.execute("DELETE FROM dependencies WHERE project_id = ?", (config.project_id,))
             for dependency in dependencies:
                 conn.execute(
                     """
@@ -329,7 +367,11 @@ class Store:
                 "",
                 "tasks.import",
                 "system",
-                {"tasks": len(tasks), "dependencies": len(dependencies)},
+                {
+                    "tasks": len(tasks),
+                    "dependencies": len(dependencies),
+                    "reconcile_runtime_state": reconcile_runtime_state,
+                },
             )
 
     def _validate_import(
@@ -363,10 +405,20 @@ class Store:
                     f"{dependency.dependency_task_id}"
                 )
 
-    def task_states(self, project_id: str) -> list[TaskState]:
+    def task_states(
+        self,
+        project_id: str,
+        *,
+        recover_stale_leases: bool = False,
+    ) -> list[TaskState]:
         """Return evaluated task states ordered by priority."""
-        with self.transaction() as conn:
-            self._recover_stale_leases(conn, project_id)
+        now = utcnow()
+        with self.transaction(
+            immediate=recover_stale_leases,
+            read_only=not recover_stale_leases,
+        ) as conn:
+            if recover_stale_leases:
+                self._recover_stale_leases(conn, project_id, now=now)
             rows = list(
                 conn.execute(
                     "SELECT * FROM tasks WHERE project_id = ? ORDER BY priority, task_id",
@@ -390,7 +442,14 @@ class Store:
                     (project_id,),
                 )
             )
-        tasks_by_id = {str(row["task_id"]): self._task_from_row(row) for row in rows}
+        tasks_by_id = {
+            str(row["task_id"]): self._effective_task_from_row(
+                row,
+                now=now,
+                recover_stale_leases=recover_stale_leases,
+            )
+            for row in rows
+        }
         status_by_id = {task_id: task.status for task_id, task in tasks_by_id.items()}
         dependencies_by_task: dict[str, list[sqlite3.Row]] = {}
         for dep_row in dep_rows:
@@ -417,22 +476,33 @@ class Store:
                 )
             state = self._computed_state(task.status, requirements)
             row = rows_by_id[task_id]
+            stale_lease = (
+                not recover_stale_leases
+                and _row_has_stale_lease(row, now=now)
+                and str(row["status"]) in ACTIVE_STATES
+            )
             states.append(
                 TaskState(
                     task=task,
                     state=state,
                     requirements=requirements,
-                    lease_agent_id=str(row["lease_agent_id"]),
-                    lease_token=str(row["lease_token"]),
-                    lease_expires_at=str(row["lease_expires_at"]),
+                    lease_agent_id="" if stale_lease else str(row["lease_agent_id"]),
+                    lease_token="" if stale_lease else str(row["lease_token"]),
+                    lease_expires_at="" if stale_lease else str(row["lease_expires_at"]),
                     evidence=evidence_by_task.get(task_id, []),
                 )
             )
         return states
 
-    def get_task_state(self, project_id: str, task_id: str) -> TaskState:
+    def get_task_state(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        recover_stale_leases: bool = False,
+    ) -> TaskState:
         """Return one evaluated task state."""
-        for state in self.task_states(project_id):
+        for state in self.task_states(project_id, recover_stale_leases=recover_stale_leases):
             if state.task.task_id == task_id:
                 return state
         raise KeyError(f"unknown task: {task_id}")
@@ -649,7 +719,7 @@ class Store:
     def snapshot(self, project_id: str) -> dict[str, Any]:
         """Return a JSON-friendly project snapshot."""
         states = self.task_states(project_id)
-        with self.transaction() as conn:
+        with self.transaction(read_only=True) as conn:
             events = [
                 {
                     "event_id": row["event_id"],
@@ -868,6 +938,20 @@ class Store:
             metadata=loads(str(row["metadata_json"]), {}),
         )
 
+    def _effective_task_from_row(
+        self,
+        row: sqlite3.Row,
+        *,
+        now: datetime,
+        recover_stale_leases: bool,
+    ) -> TaskRecord:
+        task = self._task_from_row(row)
+        if recover_stale_leases:
+            return task
+        if str(row["status"]) in ACTIVE_STATES and _row_has_stale_lease(row, now=now):
+            return replace(task, status="pending")
+        return task
+
     def _computed_state(self, status: str, requirements: list[RequirementState]) -> str:
         if status == "pending":
             return "blocked" if any(not item.satisfied for item in requirements) else "ready"
@@ -898,6 +982,14 @@ def _should_preserve_lease(row: sqlite3.Row | None, imported_status: str) -> boo
     if imported_status not in ACTIVE_STATES and imported_status != "pending":
         return False
     return str(row["status"]) in ACTIVE_STATES and bool(str(row["lease_token"]))
+
+
+def _row_has_stale_lease(row: sqlite3.Row, *, now: datetime) -> bool:
+    """Return whether a row has an expired or invalid live lease."""
+    if not str(row["lease_token"]):
+        return False
+    expires_at = parse_time(str(row["lease_expires_at"]))
+    return expires_at is None or expires_at <= now
 
 
 def _validate_lease_seconds(lease_seconds: int) -> None:

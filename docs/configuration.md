@@ -11,6 +11,12 @@ All relative paths in the config are resolved relative to the directory
 containing the config file. This keeps commands stable no matter where they are
 run from.
 
+Projects that have multiple copied worktrees can separate task-definition files
+from live runtime state. `task_source_root` controls where task plans are read
+from. `state_root` controls where SQLite, spool, and exports are written.
+`canonical_config_path` can require mutating commands to use one specific config
+file.
+
 ## Create A Project Layout
 
 Keep project coordination files together when possible:
@@ -61,6 +67,9 @@ agent-tracker status --config tracking/project.json
 {
   "project_id": "demo",
   "name": "Demo Tracker",
+  "canonical_config_path": "~/Documents/demo/tracking/project.json",
+  "state_root": "~/Documents/demo/tracking",
+  "task_source_root": "~/Documents/demo/tracking",
   "db_path": ".agent-tracker/state.sqlite",
   "task_plan_path": "tasks.json",
   "importer": "agent_tracker.importers:JsonTaskImporter",
@@ -82,22 +91,25 @@ agent-tracker status --config tracking/project.json
 | --- | --- | --- | --- |
 | `project_id` | Yes | None | Stable identifier for the project in SQLite, events, evidence, and snapshots. |
 | `name` | No | `project_id` | Human-readable project name used in status and rendered prompts. |
-| `db_path` | No | `.agent-tracker/state.sqlite` | SQLite database path for live state. Relative paths resolve beside the config file. |
+| `canonical_config_path` | No | None | Absolute or `~`-based config path required for mutating commands. Copied configs can still be used for read-only inspection. |
+| `state_root` | No | Config directory | Base directory for runtime state paths such as SQLite, spool, and exports. |
+| `task_source_root` | No | Config directory | Base directory for task-definition paths such as `task_plan_path`. |
+| `db_path` | No | `.agent-tracker/state.sqlite` | SQLite database path for live state. Relative paths resolve below `state_root`. |
 | `task_plan_path` | For built-in importer | None | JSON task plan path used by `JsonTaskImporter`. |
 | `importer` | No | `agent_tracker.importers:JsonTaskImporter` | Plugin that returns task and dependency records. |
 | `prompt_renderer` | No | `agent_tracker.rendering:DefaultPromptRenderer` | Plugin that renders task context for agents. |
 | `event_adapter` | No | Built-in generic event normalization | Plugin that converts incoming event JSON into an `EventRecord`. |
 | `exporter` | No | `agent_tracker.exporters:JsonSnapshotExporter` | Plugin that writes audit snapshots. |
-| `export_path` | No | `agent-tracker-snapshot.json` | Output path used by the default JSON exporter. |
-| `spool` | No | None | Local spool paths for `ingest-spool`. |
-| `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. |
+| `export_path` | No | `agent-tracker-snapshot.json` | Output path used by the default JSON exporter. Relative paths resolve below `state_root`. |
+| `spool` | No | None | Local spool paths for `ingest-spool`. Relative paths resolve below `state_root`. |
+| `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
 | `spool_error` | No | `<inbox>/error` | Legacy top-level error path used when `spool` is absent. |
 
 Use stable `project_id` values. Evidence, events, audit entries, and snapshots
 are all tied to that identifier.
 
-## Path Resolution
+## Path Resolution And Authority
 
 If `tracking/project.json` contains:
 
@@ -115,6 +127,22 @@ Then the resolved paths are:
 - `tracking/state.sqlite`
 - `tracking/tasks.json`
 - `tracking/exports/snapshot.json`
+
+If the same config also contains:
+
+```json
+{
+  "state_root": "~/Documents/demo/tracking",
+  "task_source_root": "~/Documents/demo/tracking",
+  "canonical_config_path": "~/Documents/demo/tracking/project.json"
+}
+```
+
+then runtime state and task definitions resolve through that canonical tree even
+when an agent reads a copied config from another worktree. Mutating commands run
+through the copied config fail with a concise error naming the canonical config.
+Read-only commands such as `status`, `next`, and `task` can still inspect the
+resolved database path.
 
 Absolute paths and `~` are also supported:
 

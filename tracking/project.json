@@ -1,6 +1,9 @@
 {
   "project_id": "agent-tracker-self",
   "name": "Agent Tracker Self-Dogfood",
+  "canonical_config_path": "~/Documents/agent-tracker/tracking/project.json",
+  "state_root": "~/Documents/agent-tracker/tracking",
+  "task_source_root": "~/Documents/agent-tracker/tracking",
   "db_path": "state.sqlite",
   "task_plan_path": "tasks.json",
   "importer": "agent_tracker.importers:JsonTaskImporter",
