@@ -529,4 +529,21 @@ def test_project_manager_skill_is_vendored_and_installable(tmp_path: Path) -> No
     assert (source / "SKILL.md").exists()
     assert installed == tmp_path / "project-manager"
     assert (installed / "SKILL.md").exists()
+    assert (installed / "agents" / "openai.yaml").exists()
     assert "name: project-manager" in (installed / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_project_manager_skill_has_no_project_specific_terms() -> None:
+    """The vendored skill must stay generic across agent-tracker projects."""
+    source = vendored_skill_path("project-manager")
+    forbidden = ["hpc", "slurm", "test_inversions", "acrg"]
+    offenders = []
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8").lower()
+        for term in forbidden:
+            if term in text:
+                offenders.append(f"{path.relative_to(source)}:{term}")
+
+    assert offenders == []

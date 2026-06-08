@@ -292,8 +292,8 @@ agent-tracker export --config demo-tracker/project.json
 
 ## Codex Project-Manager Skill
 
-The package vendors a reusable Codex skill named `project-manager`. Install it
-with:
+The package vendors a reusable Codex skill named `project-manager`. After
+installing `agent-tracker`, install the skill with:
 
 ```bash
 agent-tracker-install-skill --name project-manager
@@ -302,6 +302,14 @@ agent-tracker-install-skill --name project-manager
 By default, this copies the skill into `$CODEX_HOME/skills` or
 `~/.codex/skills`. Use `--destination-root`, `--overwrite`, or `--dry-run` when
 needed.
+
+Project-specific trackers should consume this skill as the generic workflow and
+put local policy in project-owned files: `tracking/README.md`, project or repo
+notebooks, plugins, or a small wrapper command documented by that repository.
+For example, `hpc-ci-project-tracker` should install or vendor the generic
+`project-manager` skill unchanged, then document any cluster-specific queues,
+validation suites, or wrapper commands in its own tracker repo. Keep those
+details out of the packaged skill so new projects can reuse it safely.
 
 ## Self-Dogfooding
 

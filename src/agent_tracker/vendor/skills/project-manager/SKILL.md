@@ -12,8 +12,9 @@ Use this skill for project-manager work in repositories coordinated by
 
 Prefer repo-local wrappers when they exist:
 
-- If `scripts/hpc_tracker.py` exists, use its `agent-*`, `tasks`, `next`, and
-  `pm-request` commands from the tracker repo.
+- If `tracking/README.md`, a project notebook, or another repo-local guide
+  documents a tracker wrapper, use that wrapper's documented commands for
+  listing, claiming, rendering, and logging work.
 - Otherwise, look for `tracking/project.json`.
 - If neither exists, look for `agent-tracker.config.json`.
 - If no config is discoverable, ask for the tracker config path.
