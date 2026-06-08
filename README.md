@@ -157,11 +157,15 @@ agent-tracker heartbeat --config demo-tracker/project.json write-readme \
 
 Complete the task with evidence:
 
+If the task changed tracked repository files, commit and integrate the work
+before completing it in the tracker. Use a merged commit, pushed branch, or PR
+URL as evidence, not only local file paths or validation commands.
+
 ```bash
 agent-tracker complete --config demo-tracker/project.json write-readme \
   --lease-token <lease-token> \
   --agent agent-1 \
-  --evidence "git:branch-or-commit" \
+  --evidence "git:main-commit-or-merged-branch" \
   --evidence "file:README.md"
 ```
 
@@ -186,7 +190,7 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `task` | Show one task's prompt/context; add `--json` for stored state. | `agent-tracker task --config demo-tracker/project.json write-readme --markdown` |
 | `claim` | Atomically claim a ready task and create a lease token. | `agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200` |
 | `heartbeat` | Extend a live lease and mark the task `in_progress`. | `agent-tracker heartbeat --config demo-tracker/project.json write-readme --lease-token <token> --agent agent-1` |
-| `complete` | Mark a leased task `done` and record evidence URIs. | `agent-tracker complete --config demo-tracker/project.json write-readme --lease-token <token> --evidence "git:<sha>"` |
+| `complete` | Mark a leased task `done` and record evidence URIs. | `agent-tracker complete --config demo-tracker/project.json write-readme --lease-token <token> --evidence "git:<main-sha>"` |
 | `fail` | Mark a leased task `failed` with a reason. | `agent-tracker fail --config demo-tracker/project.json write-readme --lease-token <token> --reason "validation failed"` |
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |

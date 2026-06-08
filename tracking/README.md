@@ -82,19 +82,36 @@ Documentation tasks may also require manual review. For example:
   docs alone;
 - dogfood review: an agent can pull the next task from this runbook alone.
 
+### Integration Gate
+
+For tasks that change tracked code, docs, config, tests, or task plans, do not
+mark the tracker task complete while the work exists only in an unmerged
+worktree. First make the work accessible to others:
+
+- commit the scoped changes on a task branch;
+- merge the task branch into `main` or open a PR when direct merge is not the
+  intended workflow;
+- push the branch or `main` when a remote is configured;
+- use integrated evidence, such as `git:<main-commit>` or `pr:<url>`, in the
+  completion command.
+
+If integration is blocked, keep the task active with heartbeats or fail it with
+an actionable reason. Local validation evidence is necessary, but it is not
+sufficient for completion when the task changed repository files.
+
 Complete the task with concise evidence:
 
 ```bash
 uv run agent-tracker complete --config tracking/project.json <task-id> \
   --lease-token <lease-token> \
   --agent <agent-id> \
-  --evidence "git:<commit-or-branch>" \
+  --evidence "git:<main-commit-or-merged-branch>" \
   --evidence "file:<path>"
 ```
 
 Use evidence that future reviewers can inspect. Good examples:
 
-- `git:<branch-or-commit>`
+- `git:<main-commit>`
 - `file:README.md`
 - `file:docs/operations.md`
 - `pr:https://github.com/<owner>/<repo>/pull/<number>`

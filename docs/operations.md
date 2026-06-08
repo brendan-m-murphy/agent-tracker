@@ -142,13 +142,28 @@ work to the ready queue.
 
 ## Complete Work
 
+If the task changed tracked code, docs, config, tests, or task plans, complete
+integration before marking the tracker task done. The work should be accessible
+to other collaborators first:
+
+- commit the scoped changes on a task branch;
+- merge the task branch into `main` or open a PR when direct merge is not the
+  intended workflow;
+- push the branch or `main` when a remote is configured;
+- include integrated evidence such as `git:<main-commit>` or `pr:<url>`.
+
+Local validation output and file paths are useful supporting evidence, but they
+are not enough by themselves for tasks that modify repository files. If
+integration is blocked, keep the task active with heartbeats or fail it with an
+actionable reason instead of marking it complete.
+
 Mark the task done and attach evidence:
 
 ```bash
 agent-tracker complete --config project.json write-readme \
   --lease-token <lease-token> \
   --agent agent-1 \
-  --evidence "git:<commit-or-branch>" \
+  --evidence "git:<main-commit-or-merged-branch>" \
   --evidence "file:README.md" \
   --evidence "pr:https://github.com/org/repo/pull/123"
 ```
@@ -312,7 +327,7 @@ When done:
 agent-tracker complete --config project.json <task-id> \
   --lease-token <lease-token> \
   --agent <agent-id> \
-  --evidence "git:<commit-or-branch>" \
+  --evidence "git:<main-commit-or-merged-branch>" \
   --evidence "file:<path>"
 ```
 
