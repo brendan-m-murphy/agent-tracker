@@ -313,15 +313,20 @@ Consider as an export/sync target, not as the first source of truth.
 
 1. Create user documentation for installation, configuration, core workflows,
    plugin authoring, spool ingestion, and self-hosted project operation.
-2. Add config validation, DB schema versioning, and migration tests.
-3. Implement pull-based cross-network spool support with dry-run and idempotent
+2. Define canonical state and task-source contracts so copied worktrees and
+   imported task plans cannot act as competing live state authorities.
+3. Add config validation, DB schema versioning, and migration tests for the
+   corrected state/config contract.
+4. Implement pull-based cross-network spool support with dry-run and idempotent
    ingestion.
-4. Add an actual MCP server entrypoint around the existing handler methods.
-5. Add approval gates and role/authority enforcement.
-6. Move HPC tracker Markdown note/result export into the plugin so agents do not
+5. Define task-ingest command request/response semantics separately from raw
+   event spool ingestion.
+6. Add an actual MCP server entrypoint around the existing handler methods.
+7. Add approval gates and role/authority enforcement.
+8. Move HPC tracker Markdown note/result export into the plugin so agents do not
    need to write tracker files.
-7. Add deterministic follow-up task proposal support.
-8. Add an attendant command that can run cheaply on a schedule: ingest spool,
+9. Add deterministic follow-up task proposal support.
+10. Add an attendant command that can run cheaply on a schedule: ingest spool,
    recover stale leases, export snapshots, and propose follow-ups.
 
 ## Non-Goals For Now

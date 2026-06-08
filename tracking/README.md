@@ -13,10 +13,37 @@ repository.
 The SQLite database, spool files, and exports are runtime state unless a task
 explicitly asks you to commit a bounded export.
 
+## Interim State Safety Policy
+
+Until `agent-tracker` has a canonical project-state descriptor or mediated task
+ingest path, only the canonical worktree should run mutating tracker commands for
+this self-dogfood project:
+
+```bash
+cd /Users/bm13805/Documents/agent-tracker
+uv run agent-tracker <command> --config tracking/project.json
+```
+
+Mutating commands include `init`, `import`, `claim`, `heartbeat`, `complete`,
+`fail`, `ingest-event`, `ingest-spool`, and `export`. Do not run those commands
+from Codex worktrees such as `/Users/bm13805/.codex/worktrees/...` because
+relative config paths resolve to a separate local SQLite database.
+
+Agents may still make code and documentation changes in Codex worktrees. After
+those changes are integrated into canonical `main`, run any required tracker
+state updates from the canonical worktree. If an agent cannot access that
+worktree, it should stop and report the exact tracker command it would have run.
+
+For investigation, prefer read-only Git inspection or read-only SQLite queries.
+Avoid `agent-tracker status`, `next`, `task`, and `export` from non-canonical
+worktrees when stale-lease recovery side effects would matter.
+
 ## Pull The Next Available Task
 
 Use this workflow when a user asks an agent to pull the next available task.
 The default role for this repo is `maintainer`.
+Run these commands from the canonical worktree under the interim state safety
+policy above.
 
 ```bash
 uv run agent-tracker import --config tracking/project.json

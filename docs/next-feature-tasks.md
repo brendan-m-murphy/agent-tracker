@@ -31,6 +31,57 @@ Acceptance criteria:
 - Plugin authors can implement a project-local importer or exporter from the
   documented protocol.
 
+### Safety Task: Define Canonical State And Task Source Contract
+
+Goal:
+
+- Prevent copied worktrees and imported task plans from acting as competing live
+  state authorities.
+
+Scope:
+
+- Define how a project identifies canonical SQLite state when commands run from
+  copied worktrees or generated agent worktrees.
+- Split task definition import from runtime state reconciliation.
+- Prevent imported task descriptions from casually overwriting leases, evidence,
+  audit records, or terminal task status.
+- Make mutating commands report or refuse ambiguous resolved config, database,
+  task-source, and spool paths.
+- Split read-only inspection from stale-lease recovery where needed.
+
+Acceptance criteria:
+
+- A copied worktree config cannot silently mutate an independent SQLite database
+  for the same project.
+- Task definitions can be human/agent-readable without making git the live
+  queue state source.
+- Reconciliation of imported statuses is explicit and tested.
+
+### Safety Task: Define Task-Ingest Command Contract
+
+Goal:
+
+- Define mediated request/response ingestion for queue mutations so remote or
+  worktree agents do not write SQLite directly.
+
+Scope:
+
+- Define command messages for claim, heartbeat, complete, fail, task
+  creation/promotion, and any state-changing follow-up operations.
+- Keep command ingest distinct from raw intake and event spool ingestion.
+- Include response payloads, idempotency keys, actor identity, errors, and lease
+  token handling.
+- Decide how command files move through inbox, processing, done, error, and
+  response paths.
+
+Acceptance criteria:
+
+- Agents can request state mutations and receive results without direct SQLite
+  writes.
+- Events, raw intake, task proposals, and queue mutation commands have separate
+  schemas and responsibilities.
+- The design works for local worktrees and the planned HPC pull-spool transport.
+
 ### 2. Add Config Validation And Schema Versioning
 
 Goal:
@@ -156,11 +207,16 @@ Scope:
 - Add a command that ingests spool files, recovers stale leases, exports
   snapshots, and proposes follow-ups.
 - Keep it idempotent so it can run safely from cron or launchd.
+- Keep canonical state connection policy and task-ingest/request-response
+  semantics out of this task; those need their own design so the attendant stays
+  a scheduled maintenance command rather than the general queue mutation API.
 
 Acceptance criteria:
 
 - Repeated attendant runs do not duplicate events or proposals.
 - The command reports concise counts for each action.
+- The command refuses ambiguous project state paths or reports resolved config,
+  database, and spool paths before mutation.
 
 ## Additional Coordination Tasks
 

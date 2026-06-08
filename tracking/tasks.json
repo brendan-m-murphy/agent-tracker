@@ -38,6 +38,59 @@
       }
     },
     {
+      "id": "canonical-state-and-task-source-contract",
+      "title": "Define canonical state and task source contract",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 15,
+      "prompt_key": "canonical-state-and-task-source-contract",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Prevent copied worktrees and imported task plans from acting as competing live state authorities.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/config.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/service.py",
+          "tests/test_agent_tracker.py",
+          "docs/",
+          "tracking/README.md"
+        ],
+        "notes": "SQLite should own runtime task state. Imported task sources should define durable task descriptions and dependencies without casually overwriting leases, evidence, audit, or terminal state."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: copied worktree configs cannot silently mutate an independent SQLite state for the same project.",
+        "Manual check: task definition import is separated from runtime state reconciliation or requires an explicit reconciliation policy."
+      ],
+      "next_action": "Define and implement canonical project-state path handling, task-definition versus runtime-state import semantics, mutating-command path reporting/refusal, and read-only inspection behavior.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "user-documentation",
+          "description": "The current docs and dogfood workflow expose the state-source ambiguity that this task must fix."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "architecture"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/config.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/service.py",
+          "tests/test_agent_tracker.py",
+          "docs/",
+          "tracking/README.md"
+        ],
+        "dogfood": true
+      }
+    },
+    {
       "id": "config-schema-versioning",
       "title": "Add config validation and schema versioning",
       "repo": "agent-tracker",
@@ -62,8 +115,8 @@
       "requirements": [
         {
           "kind": "task",
-          "task": "user-documentation",
-          "description": "Documentation should define the current user-facing config and task-plan contracts before versioning them."
+          "task": "canonical-state-and-task-source-contract",
+          "description": "Config/schema versioning should validate the corrected canonical state and task-source contract rather than preserving the copied-worktree ambiguity."
         }
       ],
       "metadata": {
@@ -124,6 +177,57 @@
       }
     },
     {
+      "id": "task-ingest-command-contract",
+      "title": "Define task-ingest command contract",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 35,
+      "prompt_key": "task-ingest-command-contract",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Define mediated request/response ingestion for queue mutations so remote or worktree agents do not write SQLite directly.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "notes": "This is distinct from raw intake and event spool ingestion. It should cover command messages such as claim, heartbeat, complete, fail, and task creation/promotion, including response payloads and idempotency."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: command ingest distinguishes events, raw intake, task proposals, and state-mutating queue commands.",
+        "Manual check: agents can obtain claim/complete responses without direct SQLite writes."
+      ],
+      "next_action": "Design the serializable task-ingest request and response schema, idempotency rules, actor identity, error handling, and promotion path into canonical SQLite state.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "pull-spool-command",
+          "description": "Task-ingest command files should build on the safe local/cross-directory spool transport."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "architecture"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "dogfood": true
+      }
+    },
+    {
       "id": "mcp-server-entrypoint",
       "title": "Add an MCP server entrypoint",
       "repo": "agent-tracker",
@@ -149,8 +253,8 @@
       "requirements": [
         {
           "kind": "task",
-          "task": "pull-spool-command",
-          "description": "Keep local-first spool and config contracts stable before packaging another adapter."
+          "task": "task-ingest-command-contract",
+          "description": "Mutating adapter semantics should be clear before exposing claim/complete/fail through MCP."
         }
       ],
       "metadata": {
@@ -322,13 +426,15 @@
           "src/agent_tracker/cli.py",
           "tests/test_agent_tracker.py",
           "docs/"
-        ]
+        ],
+        "notes": "Keep canonical state connection policy and task-ingest/request-response semantics out of this task; attendant is scheduled maintenance, not the general queue mutation API."
       },
       "validation_checks": [
         "uv run pytest",
-        "uv run ruff check ."
+        "uv run ruff check .",
+        "Manual check: attendant reports or refuses ambiguous resolved config, database, and spool paths before mutation."
       ],
-      "next_action": "Add an idempotent command that ingests spool files, recovers stale leases, exports snapshots, proposes follow-ups, and reports concise counts.",
+      "next_action": "Add an idempotent scheduled maintenance command that ingests spool files, recovers stale leases, exports snapshots, proposes follow-ups, reports concise counts, and does not become the general task-ingest API.",
       "requirements": [
         {
           "kind": "task",
