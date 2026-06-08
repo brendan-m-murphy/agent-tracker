@@ -11,6 +11,29 @@ All relative paths in the config are resolved relative to the directory
 containing the config file. This keeps commands stable no matter where they are
 run from.
 
+## Create A Project Layout
+
+Keep project coordination files together when possible:
+
+```bash
+mkdir -p tracking/spool/inbox tracking/spool/done tracking/spool/error tracking/exports
+```
+
+Commit the config and task plan:
+
+- `tracking/project.json`
+- `tracking/tasks.json`
+
+Leave runtime files out of git unless a project explicitly asks for an exported
+artifact:
+
+- `tracking/.agent-tracker/state.sqlite` for the minimal config below, or
+  `tracking/state.sqlite` when a project chooses that `db_path`;
+- `tracking/spool/inbox/*.json`
+- `tracking/spool/done/*.json`
+- `tracking/spool/error/*.json`
+- `tracking/exports/*.json`
+
 ## Minimal Config
 
 ```json
@@ -24,6 +47,13 @@ run from.
 
 With this config, `agent-tracker` uses the built-in JSON task importer, default
 prompt renderer, and JSON snapshot exporter.
+
+Run it with:
+
+```bash
+agent-tracker import --config tracking/project.json
+agent-tracker status --config tracking/project.json
+```
 
 ## Full Local Config
 
@@ -63,6 +93,9 @@ prompt renderer, and JSON snapshot exporter.
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
 | `spool_error` | No | `<inbox>/error` | Legacy top-level error path used when `spool` is absent. |
+
+Use stable `project_id` values. Evidence, events, audit entries, and snapshots
+are all tied to that identifier.
 
 ## Path Resolution
 

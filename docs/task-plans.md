@@ -28,6 +28,21 @@ The built-in `JsonTaskImporter` reads a project task plan from the config field
 }
 ```
 
+## Design A Claimable Task
+
+A useful task should answer five questions before an agent claims it:
+
+- what stable `id` identifies the work;
+- which `repo` or component owns the change;
+- what concrete result is required in `summary` and `next_action`;
+- which files or directories are expected in `execution.primary_files` or
+  `metadata.write_scopes`;
+- which validation checks prove the work is complete.
+
+Keep task entries small and deterministic. Put durable planning context in docs
+or notebook files and link to it with `prompt_path`; avoid pasting large logs or
+raw artifacts into the task plan.
+
 ## Task Fields
 
 | Field | Required | Default | Description |
@@ -122,6 +137,10 @@ Either can be a string or a list:
 If no role is provided, all ready tasks can match. If a role is provided and the
 task metadata does not include it, the task is skipped.
 
+Use role filters to keep specialized queues clear. For example, documentation
+work can include `["maintainer", "docs"]`, while implementation work can
+include `["maintainer", "python"]`.
+
 ## Suggested Metadata
 
 The core package does not enforce authority or write scopes yet, but including
@@ -146,6 +165,10 @@ Recommended metadata keys:
 - `validation`: Extra project-specific validation notes.
 - `dogfood`: Boolean marker for tasks used to validate `agent-tracker` itself.
 
+Metadata is advisory in the current core package, except for role filtering.
+It is still worth keeping accurate because rendered prompts, reviews, and
+project-local plugins can use it to enforce local conventions.
+
 ## Import Semantics
 
 Importing synchronizes the live SQLite state with the task plan:
@@ -165,7 +188,15 @@ During import:
   live lease.
 
 Do not delete task entries casually. The import is authoritative for the active
-task set.
+task set and for imported manual statuses. If live SQLite state says a task is
+`done` but the imported task plan still says `pending`, the next import can
+reopen that task as pending.
+
+When a task changes tracked repository files, do not mark it complete until the
+work has been integrated or made reviewable. Store that evidence on completion,
+for example `git:<main-sha>` or `pr:https://github.com/org/repo/pull/123`.
+If the task plan is the authoritative source for your project, update the
+completed task's imported status to `done` in the same integrated change.
 
 ## Prompt Rendering
 

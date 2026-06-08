@@ -25,6 +25,16 @@ uv run agent-tracker claim --config tracking/project.json --agent <agent-id> --r
 uv run agent-tracker task --config tracking/project.json <task-id> --markdown
 ```
 
+After claim, start scoped work on a branch from `main`:
+
+```bash
+git switch -c codex/<task-id> main
+```
+
+If the current Codex worktree is detached, the same command is still the
+expected starting point. If `main` is checked out in another worktree, finish
+the task branch here and merge from the `main` worktree during integration.
+
 Use a clear `agent-id`, such as `codex-<worktree-name>` or a short thread ID.
 The claim command prints a `lease_token`. Keep that token for `heartbeat`,
 `complete`, or `fail`.
@@ -41,7 +51,8 @@ uv run agent-tracker heartbeat --config tracking/project.json <task-id> \
 ```
 
 Record concise work logs through the local spool when useful. Write a JSON file
-to `tracking/spool/inbox/`:
+to `tracking/spool/inbox/` with the task ID, changed files, validation commands,
+and next known action:
 
 ```json
 {
@@ -89,6 +100,8 @@ mark the tracker task complete while the work exists only in an unmerged
 worktree. First make the work accessible to others:
 
 - commit the scoped changes on a task branch;
+- when this committed task plan is the authoritative source, update the
+  completed task's `tracking/tasks.json` status to `done` in that branch;
 - merge the task branch into `main` or open a PR when direct merge is not the
   intended workflow;
 - push the branch or `main` when a remote is configured;
@@ -98,6 +111,9 @@ worktree. First make the work accessible to others:
 If integration is blocked, keep the task active with heartbeats or fail it with
 an actionable reason. Local validation evidence is necessary, but it is not
 sufficient for completion when the task changed repository files.
+Do not re-import after completing a live task unless the committed task plan
+also records that terminal status; otherwise the import can reopen completed
+work from a stale `pending` entry.
 
 Complete the task with concise evidence:
 

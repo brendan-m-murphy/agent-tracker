@@ -8,6 +8,19 @@ The package is deliberately project-agnostic. Project-specific task formats,
 prompt text, event normalization, and exports are provided by config and
 plugins.
 
+## How The Pieces Fit
+
+An `agent-tracker` project has three durable inputs:
+
+- a project config JSON file, passed to every CLI command with `--config`;
+- a task plan, usually committed as JSON and imported into live state;
+- optional project-local plugins for task import, prompt rendering, event
+  normalization, and exports.
+
+The live queue is a SQLite database. Treat it as runtime state: import from the
+committed task plan, claim work with leases, record events and evidence while
+agents work, and export snapshots when another system needs an audit artifact.
+
 ## What You Get
 
 - A small CLI for initializing a project, importing tasks, claiming work,
@@ -48,13 +61,15 @@ agent-tracker --help
 
 ## Quickstart
 
-Create a minimal project directory:
+The quickest way to try the queue is to create a small tracker directory with a
+config, task plan, local spool, and export directory:
 
 ```bash
 mkdir -p demo-tracker/spool/inbox demo-tracker/spool/done demo-tracker/spool/error demo-tracker/exports
 ```
 
-Create `demo-tracker/project.json`:
+Create `demo-tracker/project.json`. Relative paths resolve beside this file, so
+the commands work from any current directory:
 
 ```json
 {
@@ -74,7 +89,8 @@ Create `demo-tracker/project.json`:
 }
 ```
 
-Create `demo-tracker/tasks.json`:
+Create `demo-tracker/tasks.json` with one ready task and one dependent review
+task:
 
 ```json
 {
@@ -130,6 +146,12 @@ agent-tracker import --config demo-tracker/project.json
 agent-tracker status --config demo-tracker/project.json
 ```
 
+`import` is safe to re-run after task-plan edits. It creates the project row and
+schema if needed, updates task definitions, preserves active leases for imported
+active work, and recomputes which pending tasks are ready or blocked. The task
+plan is authoritative: if you re-import a task plan that still says a completed
+task is `pending`, the live task can become pending again.
+
 Find and claim ready work:
 
 ```bash
@@ -145,6 +167,10 @@ Render the task prompt:
 ```bash
 agent-tracker task --config demo-tracker/project.json write-readme --markdown
 ```
+
+The rendered prompt contains the summary, execution notes, dependency state,
+validation checks, and next action. For automation, add `--json` to `next`,
+`status`, or `task`.
 
 Extend a lease while working:
 
@@ -169,11 +195,21 @@ agent-tracker complete --config demo-tracker/project.json write-readme \
   --evidence "file:README.md"
 ```
 
-Re-import after editing the task plan, then check what unblocked:
+Check what unblocked in live state:
 
 ```bash
-agent-tracker import --config demo-tracker/project.json
 agent-tracker next --config demo-tracker/project.json --limit 5
+```
+
+Before a future `import`, update the completed task's status in `tasks.json` to
+`done` or keep terminal status in another authoritative importer source. This
+keeps completed work from being reopened by the next sync.
+
+Export an audit snapshot when you need a bounded artifact for review or another
+system:
+
+```bash
+agent-tracker export --config demo-tracker/project.json
 ```
 
 ## CLI Reference
@@ -208,6 +244,10 @@ fields and task-plan format are documented in:
 - [docs/configuration.md](docs/configuration.md)
 - [docs/task-plans.md](docs/task-plans.md)
 
+Commit config and task plans. Ignore local runtime files such as SQLite
+databases, spool contents, virtual environments, and generated snapshots unless
+a project explicitly asks for a bounded export.
+
 ## Plugins
 
 Plugin specs use `module:object` strings. Before loading project plugins,
@@ -228,6 +268,17 @@ adapter, follow-up planner, and exporter contracts.
 Events are idempotent by `event_id`. The default event adapter accepts JSON
 objects with `event_id` or `id`, optional `kind`, optional `task_id`, and any
 additional payload fields.
+
+Local spool ingestion is the simplest way to bridge asynchronous tools into the
+queue. Write one event JSON object per file into the configured spool inbox and
+run:
+
+```bash
+agent-tracker ingest-spool --config demo-tracker/project.json --actor ci
+```
+
+Valid or duplicate JSON files move to `done`; files that cannot be parsed or
+normalized move to `error`.
 
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,
 `pr:https://github.com/org/repo/pull/123`, or `artifact:s3://bucket/key`.

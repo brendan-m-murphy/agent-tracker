@@ -7,6 +7,22 @@ and export audit state.
 Every command takes `--config <project.json>`. Every command also accepts
 `--db <path>` when you need to override the configured SQLite path temporarily.
 
+## First Run Checklist
+
+For a new local project:
+
+```bash
+mkdir -p tracking/spool/inbox tracking/spool/done tracking/spool/error tracking/exports
+agent-tracker init --config tracking/project.json
+agent-tracker import --config tracking/project.json
+agent-tracker status --config tracking/project.json
+```
+
+Use `init` to create or refresh the project row and database schema. Use
+`import` whenever the committed task plan changes. `import` also initializes the
+schema if needed, so automation can run it as the first command in a pull
+workflow.
+
 ## Initialize Storage
 
 Create the project row and database schema:
@@ -27,7 +43,9 @@ agent-tracker import --config project.json
 ```
 
 The importer is the bridge from durable project planning files into live queue
-state. Re-run import whenever the task plan changes.
+state. Re-run import whenever the task plan changes. Because imported task
+statuses are authoritative, make sure completed tasks are marked `done` in the
+source task plan before re-importing over live completed state.
 
 ## Check Status
 
@@ -140,6 +158,34 @@ agent-tracker heartbeat --config project.json write-readme \
 Use heartbeats for longer tasks so stale-lease recovery does not return active
 work to the ready queue.
 
+## Log Work While Active
+
+Use concise events or spool records for durable progress that another agent or
+project manager should see. Keep raw logs in files, build systems, or external
+artifacts; store only summaries and links in the tracker.
+
+One direct event file:
+
+```json
+{
+  "event_id": "worklog-write-readme-20260608T143000Z",
+  "kind": "worklog",
+  "task_id": "write-readme",
+  "summary": "Drafted install and quickstart docs.",
+  "files": ["README.md", "docs/operations.md"],
+  "commands": ["agent-tracker task --config tracking/project.json write-readme --markdown"]
+}
+```
+
+Ingest it:
+
+```bash
+agent-tracker ingest-event --config project.json worklog.json --actor agent-1
+```
+
+For asynchronous producers, write the same kind of JSON object into the
+configured spool inbox and run `ingest-spool`.
+
 ## Complete Work
 
 If the task changed tracked code, docs, config, tests, or task plans, complete
@@ -173,6 +219,30 @@ or bounded summaries over large raw outputs.
 
 Completing a task clears its lease. Downstream pending tasks become ready after
 their dependencies are done.
+
+For branch-backed local work, a typical direct-merge flow is:
+
+```bash
+git switch -c codex/write-readme main
+# edit files and run validation
+git add README.md docs/operations.md
+git commit -m "Document agent-tracker quickstart"
+git switch main
+git merge --ff-only codex/write-readme
+main_sha=$(git rev-parse HEAD)
+agent-tracker complete --config tracking/project.json write-readme \
+  --lease-token <lease-token> \
+  --agent agent-1 \
+  --evidence "git:${main_sha}" \
+  --evidence "file:README.md"
+```
+
+If `main` cannot be updated directly, open a PR and use `pr:<url>` evidence
+instead of marking the task complete from an isolated worktree.
+
+When the committed task plan is the authoritative source, include the terminal
+task-plan status update in the integrated branch. Otherwise a future `import`
+can reopen the completed live task from a stale `pending` entry.
 
 ## Fail Work
 

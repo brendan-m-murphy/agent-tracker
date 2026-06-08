@@ -19,6 +19,44 @@ Before importing a plugin, `agent-tracker` adds the config directory to
 If the loaded object is a class, `agent-tracker` instantiates it with no
 arguments. If it is already an object, that object is used directly.
 
+## When To Write A Plugin
+
+Start with the built-in JSON importer and default renderer when your project can
+store tasks in `tasks.json`. Add a plugin when you need to:
+
+- import tasks from an existing tracker, issue system, spreadsheet, or custom
+  planning format;
+- render richer task prompts with project notebooks, runbooks, or local context;
+- normalize callback payloads into stable event IDs;
+- export snapshots into a project-specific report format.
+
+Keep plugins small and deterministic. They should adapt project data into core
+records, not duplicate the SQLite queue or mutate unrelated files.
+
+## Project-Local Layout
+
+Plugin modules are resolved relative to the config directory. A common layout is:
+
+```text
+tracking/
+  project.json
+  tasks.json
+  plugins/
+    __init__.py
+    tasks.py
+    prompts.py
+    events.py
+    exports.py
+```
+
+With `tracking/project.json`, this config loads `tracking/plugins/tasks.py`:
+
+```json
+{
+  "importer": "plugins.tasks:ProjectImporter"
+}
+```
+
 ## Shared Types
 
 Plugins receive a `ProjectConfig` and return records from `agent_tracker.models`.
@@ -79,7 +117,7 @@ class ProjectImporter:
                 status=str(item.get("status", "pending")),
                 priority=int(item.get("priority", 9999)),
                 summary=str(item.get("summary", "")),
-                validation_checks=[str(check) for check in item.get("checks", [])],
+                validation_checks=[str(check) for check in item.get("validation_checks", [])],
                 next_action=str(item.get("next_action", "")),
                 metadata=dict(item.get("metadata", {})),
             )
