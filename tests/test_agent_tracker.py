@@ -1344,6 +1344,75 @@ def test_pull_spool_copies_complete_files_idempotently_and_ingests(
     assert not (local / "event.json").exists()
 
 
+def test_remote_spooling_harness_models_ssh_codex_project_outbox(
+    tmp_path: Path,
+) -> None:
+    """A separate SSH-style project outbox can feed the canonical event spool."""
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_project = tmp_path / "ssh-codex-project"
+    remote_outbox = remote_project / ".agent-tracker" / "spool" / "outbox"
+    remote_outbox.mkdir(parents=True)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = str(remote_outbox)
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    partial = remote_outbox / "remote-event.json.partial"
+    partial.write_text(
+        json.dumps({"event_id": "ssh-partial", "kind": "codex.remote_spool"}),
+        encoding="utf-8",
+    )
+    remote_event = remote_outbox / "remote-event.json"
+    remote_artifact = (
+        "file:ssh-codex-project/.agent-tracker/spool/outbox/remote-event.json"
+    )
+    remote_event.write_text(
+        json.dumps(
+            {
+                "event_id": "ssh-codex-evt-1",
+                "kind": "codex.remote_spool",
+                "task_id": "ready",
+                "artifact": remote_artifact,
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    dry_run = coord.pull_spool(dry_run=True)
+    first_pull = coord.pull_spool()
+    ingest = coord.ingest_spool(actor="ssh-codex-spool")
+    repeat_pull = coord.pull_spool()
+    snapshot = coord.store.snapshot(coord.config.project_id)
+
+    local_event = canonical / "spool" / "inbox" / "remote-event.json"
+    done_event = canonical / "spool" / "done" / "remote-event.json"
+    assert dry_run["dry_run"] is True
+    assert dry_run["processed"] == 1
+    assert dry_run["skipped"] == 1
+    assert not local_event.exists()
+    assert first_pull["processed"] == 1
+    assert first_pull["copied"] == 1
+    assert remote_event.exists()
+    assert partial.exists()
+    assert ingest == {"processed": 1, "inserted": 1, "errors": 0}
+    assert done_event.exists()
+    assert repeat_pull["processed"] == 0
+    assert repeat_pull["copied"] == 0
+    assert repeat_pull["skipped"] == 2
+    assert repeat_pull["files"] == [
+        {
+            "source": str(remote_event),
+            "target": str(local_event),
+            "existing": str(done_event),
+            "action": "skip_done",
+        }
+    ]
+    assert snapshot["events"][0]["event_id"] == "ssh-codex-evt-1"
+    assert snapshot["events"][0]["payload"]["artifact"] == remote_artifact
+
+
 def test_pull_spool_uses_temporary_path_before_publishing_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
