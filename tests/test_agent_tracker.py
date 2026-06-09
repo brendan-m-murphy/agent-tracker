@@ -28,6 +28,11 @@ from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import install_skill, vendored_skill_path  # noqa: E402
 
 
+def assert_no_box_drawing(text: str) -> None:
+    """Assert text output is free of Rich-style box-drawing characters."""
+    assert not any(0x2500 <= ord(char) <= 0x257F for char in text)
+
+
 def write_project(root: Path) -> Path:
     """Write a toy non-project-specific config and task plan."""
     (root / "tasks.json").write_text(
@@ -1996,6 +2001,76 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     assert listed["intake"][0]["text"] == "Check whether intake is visible."
 
 
+def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) -> None:
+    """Grouped intake commands preserve the flat command JSON contracts."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "intake",
+                "record",
+                "--config",
+                str(config_path),
+                "--kind",
+                "feature",
+                "--repo",
+                "agent-tracker",
+                "--tag",
+                "ux",
+                "Group intake commands.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["kind"] == "feature"
+    assert recorded["repo"] == "agent-tracker"
+    assert recorded["tags"] == ["ux"]
+    assert recorded["text"] == "Group intake commands."
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "intake",
+                "list",
+                "--config",
+                str(config_path),
+                "--json",
+                "--kind",
+                "feature",
+            ]
+        )
+
+    listed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert [item["id"] for item in listed["intake"]] == [recorded["id"]]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "intake",
+                "update",
+                "--config",
+                str(config_path),
+                recorded["id"],
+                "--status",
+                "closed",
+                "--actor",
+                "pm",
+            ]
+        )
+
+    updated = json.loads(stdout.getvalue())
+    assert code == 0
+    assert updated["id"] == recorded["id"]
+    assert updated["status"] == "closed"
+
+
 def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
     """Human intake listings show status for all intake closeout states."""
     config_path = write_project(tmp_path)
@@ -2019,6 +2094,54 @@ def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
     for status, record in records.items():
         assert f"{record.intake_id}: {status.title()} intake." in output
         assert f"  status {status}; {record.kind}" in output
+
+
+def test_cli_human_status_and_intake_output_are_plain_text(tmp_path: Path) -> None:
+    """Human status and intake output use readable plain text without boxes."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    coord.record_intake("Review the CLI output.", kind="check", repo="agent-tracker")
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        status_code = cli.main(["status", "--config", str(config_path)])
+    status_output = stdout.getvalue()
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        intake_code = cli.main(["intake", "list", "--config", str(config_path)])
+    intake_output = stdout.getvalue()
+
+    assert status_code == 0
+    assert intake_code == 0
+    assert "Paths\n" in status_output
+    assert "Queue\n" in status_output
+    assert "  config       " in status_output
+    assert "  ready        " in status_output
+    assert "Review the CLI output." in intake_output
+    assert "  created: " in intake_output
+    assert_no_box_drawing(status_output)
+    assert_no_box_drawing(intake_output)
+
+
+def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
+    """Root and grouped help output stay copy-paste-safe plain text."""
+    root_help = cli.build_parser().format_help()
+    stdout = StringIO()
+
+    with pytest.raises(SystemExit) as excinfo, redirect_stdout(stdout):
+        cli.main(["intake", "--help"])
+
+    intake_help = stdout.getvalue()
+    assert excinfo.value.code == 0
+    assert "record-intake" in root_help
+    assert "intake" in root_help
+    assert "record" in intake_help
+    assert "list" in intake_help
+    assert "update" in intake_help
+    assert_no_box_drawing(root_help)
+    assert_no_box_drawing(intake_help)
 
 
 def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> None:

@@ -97,6 +97,17 @@ def _print_human_field(label: str, value: object, *, indent: int = 2) -> None:
     _print_human_line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
 
 
+def _print_human_kv_row(label: str, value: object, *, label_width: int = 12) -> None:
+    """Print a compact aligned key/value row."""
+    prefix = f"  {label:<{label_width}} "
+    _print_human_line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
+
+
+def _print_human_section(heading: str) -> None:
+    """Print a plain section heading without box-drawing decoration."""
+    print(heading)
+
+
 def print_path_report(coord: Coordinator) -> None:
     """Report resolved paths before a mutating command."""
     paths = coord.path_summary()
@@ -289,15 +300,17 @@ def command_status(args: argparse.Namespace) -> int:
         print_json(payload)
         return 0
     print(f"{payload['name']} ({payload['project_id']})")
-    _print_human_field("config", payload["config_path"])
-    _print_human_field("db", payload["db_path"])
+    _print_human_section("Paths")
+    _print_human_kv_row("config", payload["config_path"])
+    _print_human_kv_row("db", payload["db_path"])
     if payload.get("task_source_path"):
-        _print_human_field("task source", payload["task_source_path"])
-    _print_human_field("ready", len(payload["ready"]))
-    _print_human_field("active", len(payload["active"]))
-    _print_human_field("review", len(payload["review"]))
-    _print_human_field("integration", len(payload["integration"]))
-    _print_human_field("blocked", len(payload["blocked"]))
+        _print_human_kv_row("task source", payload["task_source_path"])
+    _print_human_section("Queue")
+    _print_human_kv_row("ready", len(payload["ready"]))
+    _print_human_kv_row("active", len(payload["active"]))
+    _print_human_kv_row("review", len(payload["review"]))
+    _print_human_kv_row("integration", len(payload["integration"]))
+    _print_human_kv_row("blocked", len(payload["blocked"]))
     return 0
 
 
@@ -567,10 +580,12 @@ def command_list_intake(args: argparse.Namespace) -> int:
             qualifiers.append(f"repo {item['repo']}")
         if item["source"]:
             qualifiers.append(f"source {item['source']}")
-        print(f"{item['id']}: {item['text']}")
+        _print_human_line(f"{item['id']}: {item['text']}", subsequent_indent="  ")
         print(f"  {'; '.join(qualifiers)}")
         if item["tags"]:
             print(f"  tags: {', '.join(item['tags'])}")
+        if item.get("created_at"):
+            print(f"  created: {item['created_at']}")
     return 0
 
 
@@ -685,6 +700,40 @@ def parse_dependency(value: str) -> dict[str, str]:
         "task": task_id,
         "description": description.strip() if separator else "",
     }
+
+
+def add_record_intake_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for commands that record raw intake."""
+    add_common(parser)
+    parser.add_argument("text")
+    parser.add_argument("--id", default="")
+    parser.add_argument("--kind", default="idea")
+    parser.add_argument("--source", default="")
+    parser.add_argument("--repo", default="")
+    parser.add_argument("--tag", action="append", default=[])
+    parser.add_argument("--metadata-json", default="{}")
+    parser.add_argument("--actor", default="system")
+    parser.set_defaults(func=command_record_intake)
+
+
+def add_list_intake_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for commands that list raw intake."""
+    add_common(parser)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--status", default="")
+    parser.add_argument("--kind", default="")
+    parser.add_argument("--repo", default="")
+    parser.set_defaults(func=command_list_intake)
+
+
+def add_update_intake_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for commands that update raw intake status."""
+    add_common(parser)
+    parser.add_argument("intake_id")
+    parser.add_argument("--status", required=True, choices=sorted(INTAKE_STATES))
+    parser.add_argument("--actor", default="system")
+    parser.set_defaults(func=command_update_intake)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -889,35 +938,31 @@ def build_parser() -> argparse.ArgumentParser:
         "record-intake",
         help="Record raw project intake without creating a task.",
     )
-    add_common(record_intake)
-    record_intake.add_argument("text")
-    record_intake.add_argument("--id", default="")
-    record_intake.add_argument("--kind", default="idea")
-    record_intake.add_argument("--source", default="")
-    record_intake.add_argument("--repo", default="")
-    record_intake.add_argument("--tag", action="append", default=[])
-    record_intake.add_argument("--metadata-json", default="{}")
-    record_intake.add_argument("--actor", default="system")
-    record_intake.set_defaults(func=command_record_intake)
+    add_record_intake_arguments(record_intake)
 
     list_intake = sub.add_parser("list-intake", help="List raw project intake.")
-    add_common(list_intake)
-    list_intake.add_argument("--json", action="store_true")
-    list_intake.add_argument("--limit", type=int, default=0)
-    list_intake.add_argument("--status", default="")
-    list_intake.add_argument("--kind", default="")
-    list_intake.add_argument("--repo", default="")
-    list_intake.set_defaults(func=command_list_intake)
+    add_list_intake_arguments(list_intake)
 
     update_intake = sub.add_parser(
         "update-intake",
         help="Update raw intake status after triage or closeout.",
     )
-    add_common(update_intake)
-    update_intake.add_argument("intake_id")
-    update_intake.add_argument("--status", required=True, choices=sorted(INTAKE_STATES))
-    update_intake.add_argument("--actor", default="system")
-    update_intake.set_defaults(func=command_update_intake)
+    add_update_intake_arguments(update_intake)
+
+    intake = sub.add_parser("intake", help="Record, list, and update raw project intake.")
+    intake_sub = intake.add_subparsers(dest="intake_command", required=True)
+    intake_record = intake_sub.add_parser(
+        "record",
+        help="Record raw project intake without creating a task.",
+    )
+    add_record_intake_arguments(intake_record)
+    intake_list = intake_sub.add_parser("list", help="List raw project intake.")
+    add_list_intake_arguments(intake_list)
+    intake_update = intake_sub.add_parser(
+        "update",
+        help="Update raw intake status after triage or closeout.",
+    )
+    add_update_intake_arguments(intake_update)
 
     propose_task = sub.add_parser(
         "propose-task",

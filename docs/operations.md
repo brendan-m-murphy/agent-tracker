@@ -96,6 +96,10 @@ Print counts:
 agent-tracker status --config project.json
 ```
 
+Human `status` output is plain text grouped into `Paths` and `Queue` sections
+with aligned labels. It avoids Rich panels or box-drawing characters so output
+can be copied into logs and plain-text handoffs.
+
 Print full JSON task state:
 
 ```bash
@@ -292,7 +296,7 @@ Use intake for ideas, feature requests, checks, and planning notes that should
 not become claimable tasks yet:
 
 ```bash
-agent-tracker record-intake --config project.json \
+agent-tracker intake record --config project.json \
   --kind feature \
   --source user \
   --repo agent-tracker \
@@ -303,11 +307,14 @@ agent-tracker record-intake --config project.json \
 List intake for project-manager triage:
 
 ```bash
-agent-tracker list-intake --config project.json --json
+agent-tracker intake list --config project.json --json
 ```
 
-Without `--json`, `list-intake` prints each record with its current status, such
-as `status open`, `status triaged`, `status closed`, or `status deferred`.
+Without `--json`, `intake list` prints each record with its current status, such
+as `status open`, `status triaged`, `status closed`, or `status deferred`, plus
+its creation timestamp when available. The flat aliases `record-intake`,
+`list-intake`, and `update-intake` remain supported for existing scripts and
+produce the same JSON payloads.
 
 Intake records are stored in SQLite, audited as `intake.record`, and included
 in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`
@@ -317,7 +324,7 @@ contracts.
 If an intake item needs no task, close or defer it explicitly:
 
 ```bash
-agent-tracker update-intake --config project.json <intake-id> --status closed
+agent-tracker intake update --config project.json <intake-id> --status closed
 ```
 
 ## Triage Intake
