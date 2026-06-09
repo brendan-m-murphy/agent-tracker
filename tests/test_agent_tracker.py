@@ -1847,7 +1847,7 @@ def test_event_ingestion_rejects_missing_event_id(tmp_path: Path) -> None:
     coord = Coordinator(config)
     coord.import_tasks()
 
-    with pytest.raises(ValueError, match="event_id or id"):
+    with pytest.raises(ValueError, match="event_id, id, run_id, or job_id"):
         coord.record_event({"kind": "sample"})
 
 

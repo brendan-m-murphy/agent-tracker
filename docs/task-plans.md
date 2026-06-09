@@ -53,7 +53,7 @@ raw artifacts into the task plan.
 | `status` | No | `pending` | Imported manual status. See [Statuses](#statuses). |
 | `priority` | No | `9999` | Lower numbers are returned first by `next` and `claim`. |
 | `prompt_key` | No | Empty string | Project-defined prompt lookup key. Stored for plugins. |
-| `prompt_path` | No | Empty string | Project-defined path to source context. Stored for plugins. |
+| `prompt_path` | No | Empty string | Config-relative path to UTF-8 source context. Included by the default prompt renderer when it points to a readable regular file. |
 | `summary` | No | Empty string | Short task purpose included in the default prompt. |
 | `execution` | No | `{}` | Free-form object for work instructions. Included in the default prompt. |
 | `validation_checks` | No | `[]` | Commands or manual checks needed before completion. |
@@ -286,5 +286,11 @@ Render a prompt with:
 agent-tracker task --config project.json write-readme --markdown
 ```
 
-For project-specific prompt text, configure a custom `prompt_renderer`. See
-[plugins.md](plugins.md).
+By convention, `prompt_path` values are relative to the directory containing the
+project config, not the current shell directory. The default renderer includes
+readable UTF-8 regular files under that config directory and renders a clear
+note for missing, directory, unreadable, absolute, home-relative, or parent-path
+values that resolve outside it.
+
+For project-specific prompt assembly beyond this file include, configure a
+custom `prompt_renderer`. See [plugins.md](plugins.md).
