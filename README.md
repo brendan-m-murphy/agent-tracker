@@ -315,8 +315,11 @@ adapter, follow-up planner, and exporter contracts.
 ## Events, Evidence, And Audit Snapshots
 
 Events are idempotent by `event_id`. The default event adapter accepts JSON
-objects with `event_id` or `id`, optional `kind`, optional `task_id`, and any
-additional payload fields.
+objects with `event_id`, `id`, `run_id`, or `job_id` as stable identifiers;
+explicit `event_id` and `id` values take precedence over HPC callback aliases.
+It accepts optional `kind`, or `event_type` when `kind` is absent, optional
+`task_id`, and any additional payload fields. The original payload is stored
+unchanged with the normalized event.
 
 Local spool ingestion is the simplest way to bridge asynchronous tools into the
 queue. Write one event JSON object per file into the configured spool inbox and

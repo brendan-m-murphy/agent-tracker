@@ -159,6 +159,14 @@ Config key: `prompt_renderer`
 
 Default: `agent_tracker.rendering:DefaultPromptRenderer`
 
+The default renderer includes the stored summary, execution fields, dependency
+requirements, validation checks, next action, and optional `task.prompt_path`
+content. `prompt_path` is treated as a config-directory-relative UTF-8 text file
+include. The default renderer only reads regular files that stay under the
+config directory; absolute paths, home-relative paths, parent traversal outside
+that directory, directories, missing files, and unreadable files render a stable
+note in the prompt instead of raising.
+
 Protocol:
 
 ```python
@@ -210,6 +218,12 @@ Renderer responsibilities:
 Config key: `event_adapter`
 
 Default: generic normalization from the event JSON object.
+
+The default adapter preserves the original payload and derives `event_id` from
+`event_id`, `id`, `run_id`, or `job_id`, in that precedence order. `kind`
+defaults to `event`, and `event_type` is used as a kind alias only when `kind`
+is absent. Configure a project adapter when callbacks need richer mapping than
+these generic aliases provide.
 
 Protocol:
 

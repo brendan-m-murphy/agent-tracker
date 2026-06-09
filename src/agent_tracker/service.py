@@ -328,17 +328,12 @@ class Coordinator:
             raise ValueError("event payload must be a JSON object")
         adapter = load_plugin(self.config, "event_adapter")
         if adapter is None:
-            event = EventRecord(
-                event_id=_first_text(payload.get("event_id"), payload.get("id")),
-                kind=_first_text(payload.get("kind")) or "event",
-                task_id=_first_text(payload.get("task_id")),
-                payload=payload,
-            )
+            event = _default_event_record(payload)
         else:
             event = adapter.normalize_event(self.config, payload)
         event_id = event.event_id.strip()
         if not event_id:
-            raise ValueError("event payload must include event_id or id")
+            raise ValueError("event payload must include event_id, id, run_id, or job_id")
         kind = event.kind.strip() or "event"
         task_id = event.task_id.strip()
         event = EventRecord(event_id=event_id, kind=kind, task_id=task_id, payload=event.payload)
@@ -795,6 +790,21 @@ def _first_text(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _default_event_record(payload: dict[str, Any]) -> EventRecord:
+    """Normalize a plugin-free event payload."""
+    return EventRecord(
+        event_id=_first_text(
+            payload.get("event_id"),
+            payload.get("id"),
+            payload.get("run_id"),
+            payload.get("job_id"),
+        ),
+        kind=_first_text(payload.get("kind"), payload.get("event_type")) or "event",
+        task_id=_first_text(payload.get("task_id")),
+        payload=payload,
+    )
 
 
 def _clean_tags(tags: list[str]) -> list[str]:
