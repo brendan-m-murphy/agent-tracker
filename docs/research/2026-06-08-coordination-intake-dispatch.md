@@ -3,6 +3,11 @@
 This note preserves planning context that should be organized into durable
 project or repo notebooks when the notebook feature is designed.
 
+Status: curated project context has been migrated to
+`tracking/notebooks/project.md` and repo-specific conventions to
+`tracking/notebooks/repos/agent-tracker.md`. Keep this file as raw provenance
+for intake, intervention, notification, notebook, and worker-adapter tasks.
+
 ## User Needs
 
 - Capture rough "ideas", "features", "checks", concerns, and planning notes

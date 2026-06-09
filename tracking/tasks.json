@@ -839,10 +839,10 @@
       "id": "repo-project-notebooks",
       "title": "Add repo and project notebook conventions",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 95,
       "prompt_key": "repo-project-notebooks",
-      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "prompt_path": "notebooks/project.md",
       "summary": "Define where project and repo notebooks live, what they contain, how prompt renderers should use them, and where to move currently stashed planning context.",
       "execution": {
         "primary_files": [
@@ -853,7 +853,9 @@
         ],
         "source_context": [
           "docs/research/2026-06-08-coordination-intake-dispatch.md",
-          "/Users/bm13805/Downloads/ChatGPT-Codex_Chat_Communication.md"
+          "/Users/bm13805/Downloads/ChatGPT-Codex_Chat_Communication.md",
+          "tracking/notebooks/project.md",
+          "tracking/notebooks/repos/agent-tracker.md"
         ]
       },
       "validation_checks": [
@@ -879,9 +881,15 @@
         "conflict_risk": "low",
         "write_scopes": [
           "docs/",
+          "tracking/notebooks/",
           "src/agent_tracker/rendering.py",
           "src/agent_tracker/exporters.py",
-          "tests/test_agent_tracker.py"
+          "tests/test_agent_tracker.py",
+          "tests/test_prompt_path_rendering.py",
+          "tracking/tasks.json"
+        ],
+        "notebook_paths": [
+          "notebooks/repos/agent-tracker.md"
         ],
         "dogfood": true
       }

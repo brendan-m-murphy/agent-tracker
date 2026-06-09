@@ -397,6 +397,7 @@ def test_cli_init_project_bootstraps_plugin_free_layout(tmp_path: Path) -> None:
     assert (project_root / "spool" / "done").is_dir()
     assert (project_root / "spool" / "error").is_dir()
     assert (project_root / "exports").is_dir()
+    assert (project_root / "notebooks" / "repos").is_dir()
     assert ".agent-tracker/" in (project_root / ".gitignore").read_text(encoding="utf-8")
 
     assert cli.main(["init", "--config", str(config_path)]) == 0

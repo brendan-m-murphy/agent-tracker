@@ -53,7 +53,7 @@ raw artifacts into the task plan.
 | `status` | No | `pending` | Imported manual status. See [Statuses](#statuses). |
 | `priority` | No | `9999` | Lower numbers are returned first by `next` and `claim`. |
 | `prompt_key` | No | Empty string | Project-defined prompt lookup key. Stored for plugins. |
-| `prompt_path` | No | Empty string | Config-relative path to UTF-8 source context. Included by the default prompt renderer when it points to a readable regular file. |
+| `prompt_path` | No | Empty string | Config-relative path to UTF-8 source context, often a notebook or focused handoff file. Included by the default prompt renderer when it points to a readable regular file. |
 | `summary` | No | Empty string | Short task purpose included in the default prompt. |
 | `execution` | No | `{}` | Free-form object for work instructions. Included in the default prompt. |
 | `validation_checks` | No | `[]` | Commands or manual checks needed before completion. |
@@ -195,6 +195,10 @@ Recommended metadata keys:
 - `write_scopes`: Files or directories the task is expected to touch.
 - `authority`: Short description of what the assignee may do.
 - `validation`: Extra project-specific validation notes.
+- `notebook_paths`: Config-relative notebook files the default prompt renderer
+  should include after `prompt_path`.
+- `notebook_updates`: Notebook files or notebook topics that should be reviewed
+  or updated before the task is closed.
 - `dogfood`: Boolean marker for tasks used to validate `agent-tracker` itself.
 
 Metadata is advisory in the current core package, except for role filtering.
@@ -279,6 +283,7 @@ The default prompt includes:
 - dependency status;
 - validation checks;
 - next action.
+- optional `metadata.notebook_paths` content.
 
 Render a prompt with:
 
@@ -291,6 +296,10 @@ project config, not the current shell directory. The default renderer includes
 readable UTF-8 regular files under that config directory and renders a clear
 note for missing, directory, unreadable, absolute, home-relative, or parent-path
 values that resolve outside it.
+
+`metadata.notebook_paths` accepts a string or list of strings and follows the
+same config-directory-relative safety rules. Use it when a task needs project or
+repo notebooks in addition to its primary `prompt_path`.
 
 For project-specific prompt assembly beyond this file include, configure a
 custom `prompt_renderer`. See [plugins.md](plugins.md).

@@ -43,39 +43,54 @@ class DefaultPromptRenderer:
             lines.extend(["", "## Next Action", task.next_action])
         if task.prompt_path:
             lines.extend(["", "## Prompt Path"])
-            lines.extend(_render_prompt_path(config, task.prompt_path))
+            lines.extend(_render_text_include(config, task.prompt_path, label="prompt_path"))
+        notebook_paths = _metadata_notebook_paths(task.metadata)
+        if notebook_paths:
+            lines.extend(["", "## Notebooks"])
+            for notebook_path in notebook_paths:
+                lines.extend(_render_text_include(config, notebook_path, label="notebook"))
         return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_prompt_path(config: ProjectConfig, prompt_path: str) -> list[str]:
-    """Return prompt_path content or a deterministic note when it cannot be read."""
-    source = prompt_path.strip()
+def _metadata_notebook_paths(metadata: dict) -> list[str]:
+    """Return opt-in notebook paths from task metadata."""
+    value = metadata.get("notebook_paths")
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _render_text_include(config: ProjectConfig, source_path: str, *, label: str) -> list[str]:
+    """Return config-relative text content or a deterministic unreadable note."""
+    source = source_path.strip()
     lines = [f"Source: {source}", ""]
     requested_path = Path(source)
     if source.startswith("~") or requested_path.is_absolute():
-        lines.append("[prompt_path not included: absolute or home-relative paths are not allowed]")
+        lines.append(f"[{label} not included: absolute or home-relative paths are not allowed]")
         return lines
 
     try:
         config_root = config.root.resolve()
         path = (config_root / requested_path).resolve(strict=False)
     except OSError:
-        lines.append("[prompt_path not included: file could not be read]")
+        lines.append(f"[{label} not included: file could not be read]")
         return lines
     if not path.is_relative_to(config_root):
-        lines.append("[prompt_path not included: path resolves outside the config directory]")
+        lines.append(f"[{label} not included: path resolves outside the config directory]")
         return lines
 
     try:
         if not path.exists():
-            lines.append("[prompt_path not included: file does not exist]")
+            lines.append(f"[{label} not included: file does not exist]")
             return lines
         if not path.is_file():
-            lines.append("[prompt_path not included: path is not a file]")
+            lines.append(f"[{label} not included: path is not a file]")
             return lines
         lines.append(path.read_text(encoding="utf-8").rstrip())
     except OSError:
-        lines.append("[prompt_path not included: file could not be read]")
+        lines.append(f"[{label} not included: file could not be read]")
     except UnicodeDecodeError:
-        lines.append("[prompt_path not included: file is not valid UTF-8 text]")
+        lines.append(f"[{label} not included: file is not valid UTF-8 text]")
     return lines

@@ -37,6 +37,7 @@ This creates:
 - `tracking/.agent-tracker/`
 - `tracking/spool/inbox`, `tracking/spool/done`, and `tracking/spool/error`
 - `tracking/exports/`
+- `tracking/notebooks/repos/`
 - `tracking/.gitignore` entries for runtime state
 
 Commit the config and task plan. Leave runtime files out of git unless a

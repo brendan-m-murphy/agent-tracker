@@ -292,6 +292,7 @@ fields and task-plan format are documented in:
 
 - [docs/configuration.md](docs/configuration.md)
 - [docs/task-plans.md](docs/task-plans.md)
+- [docs/notebooks.md](docs/notebooks.md)
 
 Commit config and task plans. Ignore local runtime files such as SQLite
 databases, spool contents, virtual environments, and generated snapshots unless

@@ -33,7 +33,7 @@ def _write_config(root: Path) -> ProjectConfig:
     return load_config(config_path)
 
 
-def _state(prompt_path: str) -> TaskState:
+def _state(prompt_path: str, *, metadata: dict | None = None) -> TaskState:
     """Build a task state with every default renderer section populated."""
     return TaskState(
         task=TaskRecord(
@@ -45,15 +45,25 @@ def _state(prompt_path: str) -> TaskState:
             execution={"primary_files": ["src/agent_tracker/rendering.py"]},
             validation_checks=["uv run pytest tests/test_prompt_path_rendering.py"],
             next_action="Implement it.",
+            metadata=metadata or {},
         ),
         state="ready",
         requirements=[RequirementState("Foundation complete.", True, "done")],
     )
 
 
-def _render(config: ProjectConfig, prompt_path: str) -> str:
+def _render(
+    config: ProjectConfig,
+    prompt_path: str,
+    *,
+    metadata: dict | None = None,
+) -> str:
     """Render a task prompt through the default renderer."""
-    return DefaultPromptRenderer().render_prompt(config, _state(prompt_path), markdown=True)
+    return DefaultPromptRenderer().render_prompt(
+        config,
+        _state(prompt_path, metadata=metadata),
+        markdown=True,
+    )
 
 
 def test_default_renderer_includes_config_relative_prompt_path(tmp_path: Path) -> None:
@@ -168,3 +178,61 @@ def test_default_renderer_notes_unreadable_prompt_path_probe(
 
     assert "## Prompt Path\nSource: unreadable.md" in prompt
     assert "[prompt_path not included: file could not be read]" in prompt
+
+
+def test_default_renderer_includes_metadata_notebook_paths(tmp_path: Path) -> None:
+    """Opt-in notebook files are included after the primary task prompt context."""
+    config = _write_config(tmp_path)
+    notebooks = tmp_path / "notebooks"
+    repo_notebooks = notebooks / "repos"
+    repo_notebooks.mkdir(parents=True)
+    (notebooks / "project.md").write_text(
+        "Project context.\n\n- Canonical config: tracking/project.json",
+        encoding="utf-8",
+    )
+    (repo_notebooks / "agent-tracker.md").write_text(
+        "Repo context.\n\n- Validation: uv run pytest",
+        encoding="utf-8",
+    )
+
+    prompt = _render(
+        config,
+        "",
+        metadata={
+            "notebook_paths": [
+                "notebooks/project.md",
+                "notebooks/repos/agent-tracker.md",
+            ]
+        },
+    )
+
+    assert (
+        "## Notebooks\n"
+        "Source: notebooks/project.md\n\n"
+        "Project context.\n\n"
+        "- Canonical config: tracking/project.json\n"
+        "Source: notebooks/repos/agent-tracker.md\n\n"
+        "Repo context.\n\n"
+        "- Validation: uv run pytest"
+    ) in prompt
+
+
+def test_default_renderer_rejects_unsafe_metadata_notebook_paths(tmp_path: Path) -> None:
+    """Notebook includes use the same config-root boundary as prompt_path."""
+    project_root = tmp_path / "project"
+    config = _write_config(project_root)
+    secret = tmp_path / "secret.md"
+    secret.write_text("outside secret", encoding="utf-8")
+
+    prompt = _render(
+        config,
+        "",
+        metadata={"notebook_paths": ["../secret.md", "notebooks/missing.md", str(secret)]},
+    )
+
+    assert "outside secret" not in prompt
+    assert "Source: ../secret.md" in prompt
+    assert "[notebook not included: path resolves outside the config directory]" in prompt
+    assert "Source: notebooks/missing.md" in prompt
+    assert "[notebook not included: file does not exist]" in prompt
+    assert "[notebook not included: absolute or home-relative paths are not allowed]" in prompt

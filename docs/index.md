@@ -7,6 +7,7 @@
 readme
 configuration
 operations
+notebooks
 planning
 task-ingest-command-contract
 remote-spooling-ssh-codex

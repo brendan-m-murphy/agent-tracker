@@ -9,6 +9,7 @@ repository.
 - Local spool inbox: `tracking/spool/inbox`
 - Local spool done/error folders: `tracking/spool/done`, `tracking/spool/error`
 - Snapshot export: `tracking/exports/snapshot.json`
+- Project and repo notebooks: `tracking/notebooks/`
 
 The SQLite database, spool files, and exports are runtime state unless a task
 explicitly asks you to commit a bounded export.
@@ -106,6 +107,22 @@ uv run agent-tracker ingest-spool --config tracking/project.json --actor <agent-
 
 Do not store large raw command outputs in the tracker. Link to commits, PRs,
 reports, screenshots, or bounded summaries instead.
+
+## Notebooks
+
+Durable coordination context for this self-dogfood project lives under
+`tracking/notebooks/`:
+
+- `tracking/notebooks/project.md` records project-wide queue policy,
+  architecture decisions, canonical paths, and cross-repo coordination notes.
+- `tracking/notebooks/repos/agent-tracker.md` records repo-specific validation,
+  known failure modes, and local workflow conventions.
+
+Task `prompt_path` values and `metadata.notebook_paths` are relative to
+`tracking/project.json`, so use paths like `notebooks/project.md` rather than
+`docs/...` when the default renderer should include notebook content.
+Exploratory material can stay in `docs/research/`, but durable context should
+be summarized or linked from a notebook with a review date and source list.
 
 ## Complete A Task
 
@@ -257,6 +274,7 @@ User-facing docs live in:
 
 - `README.md`
 - `docs/configuration.md`
+- `docs/notebooks.md`
 - `docs/task-plans.md`
 - `docs/operations.md`
 - `docs/plugins.md`

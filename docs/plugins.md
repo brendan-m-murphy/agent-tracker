@@ -160,9 +160,10 @@ Config key: `prompt_renderer`
 Default: `agent_tracker.rendering:DefaultPromptRenderer`
 
 The default renderer includes the stored summary, execution fields, dependency
-requirements, validation checks, next action, and optional `task.prompt_path`
-content. `prompt_path` is treated as a config-directory-relative UTF-8 text file
-include. The default renderer only reads regular files that stay under the
+requirements, validation checks, next action, optional `task.prompt_path`
+content, and optional `metadata.notebook_paths` content. `prompt_path` and
+`metadata.notebook_paths` are treated as config-directory-relative UTF-8 text
+file includes. The default renderer only reads regular files that stay under the
 config directory; absolute paths, home-relative paths, parent traversal outside
 that directory, directories, missing files, and unreadable files render a stable
 note in the prompt instead of raising.
@@ -211,6 +212,8 @@ Renderer responsibilities:
 - include enough context for an agent to act without reading the task plan first;
 - include dependency state when it matters;
 - include validation checks and next action;
+- include project or repo notebooks only when the task opts in or the project
+  has a bounded local policy for doing so;
 - keep rendered output deterministic and bounded.
 
 ## Event Adapters

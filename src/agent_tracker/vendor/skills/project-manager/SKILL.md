@@ -136,5 +136,11 @@ When creating follow-up tasks:
 Project and repo notebooks should capture durable context that future agents
 need: operational conventions, design constraints, validation suites, known
 failure modes, sandbox/authority rules, and links to canonical config/state.
+Prefer config-root paths such as `tracking/notebooks/project.md` and
+`tracking/notebooks/repos/<repo>.md` in projects that use the default
+`agent-tracker` prompt renderer, because `prompt_path` and
+`metadata.notebook_paths` are resolved relative to the tracker config directory.
+Keep raw research notes and large chat exports out of the notebook body; link to
+them as sources and summarize only durable decisions.
 When planning context has no clear home, create or update a notebook task
 instead of burying it in a transient chat.

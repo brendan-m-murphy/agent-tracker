@@ -201,6 +201,7 @@ def bootstrap_project(
         root / "spool" / "done",
         root / "spool" / "error",
         root / "exports",
+        root / "notebooks" / "repos",
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
