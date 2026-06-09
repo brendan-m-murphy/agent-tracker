@@ -395,6 +395,60 @@
       }
     },
     {
+      "id": "agent-coordinator-skill",
+      "title": "Add agent coordinator skill",
+      "repo": "agent-tracker",
+      "status": "done",
+      "priority": 29,
+      "prompt_key": "agent-coordinator-skill",
+      "prompt_path": "tracking/README.md",
+      "summary": "Provide a reusable Codex skill for coordinating an agent-tracker project end to end: plan or create tasks when needed, work through the queue, supervise agents/reviews, manage leases, and close work with commit/review evidence.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/vendor/skills/agent-coordinator/SKILL.md",
+          "src/agent_tracker/vendor/skills/agent-coordinator/agents/openai.yaml",
+          "src/agent_tracker/skill_bootstrap.py",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "tracking/tasks.json"
+        ],
+        "notes": "The skill should make lease checks and friction diagnosis first-class, not rely on the human to manage project-manager state."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: the skill tells an agent how to prove leases are healthy before coordinating queue work.",
+        "Manual check: the skill names the remaining manual task-source edit as friction rather than normal workflow."
+      ],
+      "next_action": "Create a vendored agent-coordinator skill, make it installable, install or copy it locally for this environment, and validate lease/friction guidance against the live dogfood queue.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "overview-command",
+          "description": "The coordinator skill should rely on the high-level overview command for queue health and friction checks."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "docs"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/vendor/skills/agent-coordinator/SKILL.md",
+          "src/agent_tracker/vendor/skills/agent-coordinator/agents/openai.yaml",
+          "src/agent_tracker/skill_bootstrap.py",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "tracking/tasks.json"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
       "id": "pull-spool-command",
       "title": "Implement pull-based spool support",
       "repo": "agent-tracker",

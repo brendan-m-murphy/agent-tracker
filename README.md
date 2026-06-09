@@ -306,26 +306,34 @@ Snapshots include evaluated task state, events, and audit log entries:
 agent-tracker export --config demo-tracker/project.json
 ```
 
-## Codex Project-Manager Skill
+## Codex Skills
 
-The package vendors a reusable Codex skill named `project-manager`. After
-installing `agent-tracker`, install the skill with:
+The package vendors reusable Codex skills:
+
+- `project-manager`: pull the next task, triage intake, and manage focused
+  project-manager updates.
+- `agent-coordinator`: run an agent-tracker project end to end, including queue
+  health checks, lease checks, task planning, worker/review coordination, and
+  closeout evidence.
+
+After installing `agent-tracker`, install a skill with:
 
 ```bash
 agent-tracker-install-skill --name project-manager
+agent-tracker-install-skill --name agent-coordinator
 ```
 
 By default, this copies the skill into `$CODEX_HOME/skills` or
 `~/.codex/skills`. Use `--destination-root`, `--overwrite`, or `--dry-run` when
 needed.
 
-Project-specific trackers should consume this skill as the generic workflow and
+Project-specific trackers should consume these skills as generic workflows and
 put local policy in project-owned files: `tracking/README.md`, project or repo
 notebooks, plugins, or a small wrapper command documented by that repository.
 For example, `hpc-ci-project-tracker` should install or vendor the generic
-`project-manager` skill unchanged, then document any cluster-specific queues,
-validation suites, or wrapper commands in its own tracker repo. Keep those
-details out of the packaged skill so new projects can reuse it safely.
+skills unchanged, then document any cluster-specific queues, validation suites,
+or wrapper commands in its own tracker repo. Keep those details out of the
+packaged skills so new projects can reuse them safely.
 
 ## Self-Dogfooding
 
