@@ -134,6 +134,267 @@
       }
     },
     {
+      "id": "dogfood-finish-workflow-queue",
+      "title": "Seed finish-workflow dogfood tasks",
+      "repo": "agent-tracker",
+      "status": "done",
+      "priority": 24,
+      "prompt_key": "dogfood-finish-workflow-queue",
+      "prompt_path": "tracking/README.md",
+      "summary": "Capture the current self-dogfood finish-flow gaps as explicit queue tasks and start agent-managed execution from the canonical tracker state.",
+      "execution": {
+        "primary_files": [
+          "tracking/tasks.json"
+        ],
+        "notes": "This task exists because raw intake and mediated task creation are not implemented yet; the current safe path is a reviewed task-plan edit followed by import."
+      },
+      "validation_checks": [
+        "uv run agent-tracker import --config tracking/project.json",
+        "uv run agent-tracker status --config tracking/project.json --json",
+        "Manual check: newly added tasks cover finish guidance, review/merge states, overview output, and completion policy."
+      ],
+      "next_action": "Commit and complete the management task with task-plan import/status evidence and a subagent task-contract review, then launch bounded implementation/review agents for the newly unblocked work.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "config-schema-versioning",
+          "description": "New task metadata should rely on the validated config and task-source behavior."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "project-manager"
+        ],
+        "write_scopes": [
+          "tracking/tasks.json"
+        ],
+        "authority": "May add and prioritize dogfood task contracts; implementation changes must run through their own tracked tasks.",
+        "dogfood": true
+      }
+    },
+    {
+      "id": "finish-lifecycle-policy",
+      "title": "Define default finish lifecycle policy",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 25,
+      "prompt_key": "finish-lifecycle-policy",
+      "prompt_path": "tracking/README.md",
+      "summary": "Make the default closeout policy explicit: code/docs/config/test changes should finish on a branch with commit evidence and normally a PR or review state before tracker completion, with a documented direct-merge override.",
+      "execution": {
+        "primary_files": [
+          "README.md",
+          "docs/operations.md",
+          "docs/task-plans.md",
+          "tracking/README.md",
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md"
+        ],
+        "notes": "Keep SQLite as canonical queue state. GitHub PRs and commits are evidence/review surfaces, not the live coordination bus."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual review: a new agent reading only the skill and task prompt sees branch/commit/PR-or-merge expectations before starting implementation.",
+        "Manual review: direct-merge override is explicit and auditable."
+      ],
+      "next_action": "Update user docs, dogfood runbook, and vendored project-manager skill so finish rules are visible in the default agent path.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "dogfood-finish-workflow-queue",
+          "description": "The finish-flow tasks should be present in the queue before implementation begins."
+        },
+        {
+          "kind": "task",
+          "task": "vendored-project-manager-skill",
+          "description": "The generic project-manager skill should exist before its finish-workflow guidance is tightened."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "docs"
+        ],
+        "write_scopes": [
+          "README.md",
+          "docs/operations.md",
+          "docs/task-plans.md",
+          "tracking/README.md",
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
+      "id": "finish-lifecycle-states",
+      "title": "Add review and merge lifecycle states",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 26,
+      "prompt_key": "finish-lifecycle-states",
+      "prompt_path": "tracking/README.md",
+      "summary": "Add first-class queue transitions for implementation finished but awaiting review, PR, merge, or other integration evidence, instead of forcing agents to choose between active and done.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/mcp_tools.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "notes": "Prefer small explicit commands such as submit-review or await-integration over overloading complete. Preserve existing waiting_evidence compatibility, or include an explicit migration/deprecation plan."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: tasks can be moved into a non-terminal review/integration state with PR or branch evidence.",
+        "Manual check: existing waiting_evidence tasks remain valid or have an explicit migration/deprecation path.",
+        "Manual check: done still requires final integration evidence for code-changing tasks."
+      ],
+      "next_action": "Design and implement review/merge state transitions, CLI commands, service methods, tests, and documentation.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "finish-lifecycle-policy",
+          "description": "The documented policy should define the states and evidence expected by implementation."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/mcp_tools.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
+      "id": "overview-command",
+      "title": "Add high-level project overview command",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 27,
+      "prompt_key": "overview-command",
+      "prompt_path": "tracking/README.md",
+      "summary": "Provide a scannable forward-looking and recent-history project view that groups ready, active, review/integration, blocked, and recently completed work with concise blockers and evidence.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/db.py",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "docs/operations.md"
+        ],
+        "notes": "The overview should be useful without parsing raw status JSON and should support JSON output for automation."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual review: overview output reads like a project log/queue summary and identifies why blocked work is blocked."
+      ],
+      "next_action": "Add an overview payload and CLI command with readable and JSON output, then document the command.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "completion-evidence-policy",
+          "description": "Overview should group review/integration states and final evidence policy outcomes after those lifecycle semantics exist."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/db.py",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "docs/operations.md"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
+      "id": "completion-evidence-policy",
+      "title": "Enforce completion evidence policy",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 28,
+      "prompt_key": "completion-evidence-policy",
+      "prompt_path": "tracking/README.md",
+      "summary": "Make completion evidence expectations machine-checkable enough that code-changing tasks cannot be silently marked done with only local file or validation evidence.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "notes": "Start with lightweight metadata-driven validation rather than trying to inspect git diffs in core."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: completion refuses with a nonzero exit when a code-changing task lacks git:, pr:, or configured integration evidence.",
+        "Manual check: explicit direct-merge override remains available for trusted manager workflows and is covered by tests."
+      ],
+      "next_action": "Add metadata/config-driven completion evidence checks, tests for missing and accepted evidence, and docs for overrides.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "finish-lifecycle-states",
+          "description": "Completion policy should build on the explicit review/integration lifecycle states."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
       "id": "pull-spool-command",
       "title": "Implement pull-based spool support",
       "repo": "agent-tracker",
