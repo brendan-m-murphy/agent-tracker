@@ -94,6 +94,25 @@ def write_project(root: Path) -> Path:
     return config_path
 
 
+def write_project_with_completion_policy(root: Path, policy: object) -> Path:
+    """Write a toy project whose ready task has completion policy metadata."""
+    root.mkdir(parents=True, exist_ok=True)
+    config_path = write_project(root)
+    task_path = root / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for task in payload["tasks"]:
+        if task["id"] == "ready":
+            task.setdefault("metadata", {})["completion_policy"] = policy
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    return config_path
+
+
+PR_OR_REVIEW_POLICY = {
+    "default": "pr_or_review_required",
+    "direct_merge_override": True,
+}
+
+
 def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> None:
     """Configs without an explicit schema version use the current schema."""
     config_path = write_project(tmp_path)
@@ -212,14 +231,192 @@ def test_claim_heartbeat_complete_and_unblock_downstream(tmp_path: Path) -> None
     coord.complete(
         "ready",
         lease_token=heartbeat.lease_token,
-        evidence=["evidence://ready"],
+        evidence=["file:src/ready.py"],
     )
     states = {state.task.task_id: state for state in coord.task_states()}
 
     assert claim.task_id == "ready"
     assert states["ready"].state == "done"
-    assert states["ready"].evidence == ["evidence://ready"]
+    assert states["ready"].evidence == ["file:src/ready.py"]
     assert states["blocked"].state == "ready"
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        (["file:src/ready.py", "validation:pytest"], "git: and pr:/review:/integration:"),
+        (["git:abc123"], "pr:/review:/integration:"),
+        (["pr:https://example.invalid/pr/1"], "git: evidence"),
+        (["review:approved"], "git: evidence"),
+        (["integration:deployed"], "git: evidence"),
+        (["file:git:abc123", "note:pr:1"], "git: and pr:/review:/integration:"),
+    ],
+)
+def test_completion_policy_rejects_incomplete_evidence(
+    tmp_path: Path,
+    evidence: list[str],
+    expected: str,
+) -> None:
+    """Policy tasks reject file, git-only, integration-only, and false-prefix evidence."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match=expected):
+        coord.complete(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            evidence=evidence,
+        )
+
+
+@pytest.mark.parametrize(
+    "integration_evidence",
+    ["pr:https://example.invalid/pr/1", "review:approved", "integration:deployed"],
+)
+def test_completion_policy_accepts_git_with_integration_evidence(
+    tmp_path: Path,
+    integration_evidence: str,
+) -> None:
+    """Policy tasks complete with git evidence plus PR, review, or integration evidence."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:abc123", integration_evidence],
+    )
+
+    assert coord.get_task("ready").state == "done"
+
+
+def test_completion_policy_direct_merge_requires_permission_and_git_evidence(
+    tmp_path: Path,
+) -> None:
+    """Direct-merge completion is explicit, metadata-gated, and audited."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:main-abc123"],
+        direct_merge=True,
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert coord.get_task("ready").state == "done"
+    assert any(
+        audit["action"] == "task.complete" and audit["payload"]["direct_merge"] is True
+        for audit in snapshot["audit"]
+    )
+
+    for dirname, policy in {
+        "forbidden-omitted": {"default": "pr_or_review_required"},
+        "forbidden-false": {
+            "default": "pr_or_review_required",
+            "direct_merge_override": False,
+        },
+    }.items():
+        forbidden_config = load_config(
+            write_project_with_completion_policy(tmp_path / dirname, policy)
+        )
+        forbidden_coord = Coordinator(forbidden_config)
+        forbidden_coord.import_tasks()
+        forbidden_claim = forbidden_coord.claim(agent_id="agent-1", task_id="ready")
+        with pytest.raises(ValueError, match="not allowed"):
+            forbidden_coord.complete(
+                "ready",
+                lease_token=forbidden_claim.lease_token,
+                agent_id="agent-1",
+                evidence=["git:main-abc123"],
+                direct_merge=True,
+            )
+
+    missing_git_config = load_config(
+        write_project_with_completion_policy(tmp_path / "missing-git", PR_OR_REVIEW_POLICY)
+    )
+    missing_git_coord = Coordinator(missing_git_config)
+    missing_git_coord.import_tasks()
+    missing_git_claim = missing_git_coord.claim(agent_id="agent-1", task_id="ready")
+    with pytest.raises(ValueError, match="requires git: evidence"):
+        missing_git_coord.complete(
+            "ready",
+            lease_token=missing_git_claim.lease_token,
+            agent_id="agent-1",
+            evidence=["file:src/ready.py"],
+            direct_merge=True,
+        )
+
+
+def test_completion_policy_direct_merge_rejects_missing_policy(
+    tmp_path: Path,
+) -> None:
+    """Direct-merge completion requires an explicit completion policy."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="not allowed"):
+        coord.complete(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            evidence=["git:main-abc123"],
+            direct_merge=True,
+        )
+
+
+@pytest.mark.parametrize("policy", [[], {}, {"default": "unknown"}])
+def test_completion_policy_direct_merge_rejects_legacy_metadata(
+    tmp_path: Path,
+    policy: object,
+) -> None:
+    """Direct-merge completion rejects malformed or unknown policy metadata."""
+    config = load_config(write_project_with_completion_policy(tmp_path, policy))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="not allowed"):
+        coord.complete(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            evidence=["git:main-abc123"],
+            direct_merge=True,
+        )
+
+
+@pytest.mark.parametrize("policy", [[], {}, {"default": "unknown"}])
+def test_completion_policy_malformed_or_unknown_metadata_is_legacy(
+    tmp_path: Path,
+    policy: object,
+) -> None:
+    """Malformed or unknown completion policy metadata does not break legacy completion."""
+    config = load_config(write_project_with_completion_policy(tmp_path, policy))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["file:src/ready.py"],
+    )
+
+    assert coord.get_task("ready").state == "done"
 
 
 def test_submit_review_clears_lease_records_evidence_and_preserves_blocking(
@@ -348,6 +545,125 @@ def test_resolve_review_completes_waiting_task_and_unblocks_dependents(
         and audit["payload"]["status"] == "done"
         for audit in snapshot["audit"]
     )
+
+
+def test_resolve_review_completion_policy_uses_cumulative_evidence(
+    tmp_path: Path,
+) -> None:
+    """Resolver completion counts evidence recorded before and during resolution."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:branch-abc123", "git:branch-abc123"],
+    )
+
+    with pytest.raises(ValueError, match="pr:/review:/integration:"):
+        coord.resolve_review("ready", status="done", agent_id="reviewer-1")
+
+    coord.resolve_review(
+        "ready",
+        status="done",
+        agent_id="reviewer-1",
+        evidence=["review:approved", "review:approved"],
+    )
+
+    state = coord.get_task("ready")
+    assert state.state == "done"
+    assert state.evidence == ["git:branch-abc123", "review:approved"]
+
+
+def test_resolve_integration_accepts_direct_merge_override(
+    tmp_path: Path,
+) -> None:
+    """Integration resolution can finalize direct-merge policy tasks."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.await_integration(
+        "ready",
+        lease_token=claim.lease_token,
+        status="awaiting_merge",
+        agent_id="agent-1",
+        evidence=["git:main-abc123"],
+    )
+
+    coord.resolve_integration(
+        "ready",
+        status="done",
+        agent_id="integrator-1",
+        direct_merge=True,
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert coord.get_task("ready").state == "done"
+    assert any(
+        audit["action"] == "task.resolve_integration"
+        and audit["actor"] == "integrator-1"
+        and audit["payload"]["direct_merge"] is True
+        for audit in snapshot["audit"]
+    )
+
+
+def test_resolve_integration_failed_ignores_completion_policy(
+    tmp_path: Path,
+) -> None:
+    """Failed resolver paths require a reason but not completion evidence."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.await_integration(
+        "ready",
+        lease_token=claim.lease_token,
+        status="awaiting_merge",
+        agent_id="agent-1",
+        evidence=["file:src/ready.py"],
+    )
+
+    coord.resolve_integration(
+        "ready",
+        status="failed",
+        reason="merge failed",
+        agent_id="reviewer-1",
+        evidence=["file:report.txt"],
+    )
+
+    assert coord.get_task("ready").state == "failed"
+
+
+def test_resolve_integration_failed_rejects_direct_merge_override(
+    tmp_path: Path,
+) -> None:
+    """Direct-merge resolution is only valid when a resolver marks a task done."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.await_integration(
+        "ready",
+        lease_token=claim.lease_token,
+        status="awaiting_merge",
+        agent_id="agent-1",
+        evidence=["file:src/ready.py"],
+    )
+
+    with pytest.raises(ValueError, match="only applies to done"):
+        coord.resolve_integration(
+            "ready",
+            status="failed",
+            reason="merge failed",
+            agent_id="reviewer-1",
+            evidence=["file:report.txt"],
+            direct_merge=True,
+        )
+
+    assert coord.get_task("ready").state == "awaiting_merge"
 
 
 def test_resolve_integration_can_fail_waiting_task_with_reason(tmp_path: Path) -> None:
@@ -834,6 +1150,48 @@ def test_mcp_handlers_claim_and_complete(tmp_path: Path) -> None:
     assert ready_state["evidence"] == ["evidence://ready"]
 
 
+def test_mcp_complete_task_supports_direct_merge_override(tmp_path: Path) -> None:
+    """MCP completion exposes the explicit direct-merge override."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+
+    tools.complete_task(
+        task_id="ready",
+        lease_token=claim["lease_token"],
+        evidence=["git:main-abc123"],
+        agent_id="agent-1",
+        direct_merge=True,
+    )
+
+    assert tools.get_task_context("ready")["state"] == "done"
+
+
+def test_mcp_resolver_supports_direct_merge_override(tmp_path: Path) -> None:
+    """MCP resolver completion exposes the explicit direct-merge override."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+    tools.submit_review_task(
+        task_id="ready",
+        lease_token=claim["lease_token"],
+        evidence=["git:main-abc123"],
+        agent_id="agent-1",
+    )
+
+    tools.resolve_review_task(
+        task_id="ready",
+        agent_id="reviewer-1",
+        direct_merge=True,
+    )
+
+    assert tools.get_task_context("ready")["state"] == "done"
+
+
 def test_mcp_handlers_submit_review_and_await_integration(tmp_path: Path) -> None:
     """MCP-friendly handlers expose review and integration handoff operations."""
     config_path = write_project(tmp_path)
@@ -972,6 +1330,66 @@ def test_cli_submit_review_reports_validation_errors_without_traceback(
     assert "Traceback" not in stderr.getvalue()
 
 
+def test_cli_complete_reports_completion_policy_errors_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """CLI complete reports completion policy failures concisely."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "complete",
+                "--config",
+                str(config_path),
+                "ready",
+                "--lease-token",
+                claim.lease_token,
+                "--agent",
+                "agent-1",
+                "--evidence",
+                "git:abc123",
+            ]
+        )
+
+    assert code == 1
+    assert "pr:/review:/integration:" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_cli_complete_accepts_direct_merge_override(tmp_path: Path) -> None:
+    """CLI complete passes the explicit direct-merge override."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    code = cli.main(
+        [
+            "complete",
+            "--config",
+            str(config_path),
+            "ready",
+            "--lease-token",
+            claim.lease_token,
+            "--agent",
+            "agent-1",
+            "--evidence",
+            "git:main-abc123",
+            "--direct-merge",
+        ]
+    )
+
+    assert code == 0
+    assert coord.get_task("ready").state == "done"
+
+
 def test_cli_resolve_review_completes_waiting_task(tmp_path: Path) -> None:
     """CLI resolve-review finalizes a task waiting for review."""
     config_path = write_project(tmp_path)
@@ -1001,6 +1419,40 @@ def test_cli_resolve_review_completes_waiting_task(tmp_path: Path) -> None:
     assert "Resolved review for ready as done" in stdout.getvalue()
     assert state.state == "done"
     assert state.evidence == ["evidence://approval"]
+
+
+def test_cli_resolve_review_reports_completion_policy_errors_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """CLI resolve-review reports completion policy failures concisely."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:abc123"],
+    )
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "resolve-review",
+                "--config",
+                str(config_path),
+                "ready",
+                "--agent",
+                "reviewer-1",
+            ]
+        )
+
+    assert code == 1
+    assert "pr:/review:/integration:" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
 
 
 def test_cli_resolve_integration_requires_failure_reason_without_traceback(

@@ -235,6 +235,24 @@ are not enough by themselves for tasks that modify repository files. If
 review or integration evidence is pending, use `submit-review` or
 `await-integration` instead of marking the task complete.
 
+Projects can make this expectation machine-checkable per task with metadata:
+
+```json
+{
+  "completion_policy": {
+    "default": "pr_or_review_required",
+    "direct_merge_override": true
+  }
+}
+```
+
+For tasks with `completion_policy.default` set to
+`pr_or_review_required`, any transition to `done` requires cumulative evidence
+with at least one `git:` URI and at least one `pr:`, `review:`, or
+`integration:` URI. Evidence recorded before the final command, such as during
+`submit-review`, counts alongside evidence supplied to `complete`,
+`resolve-review`, or `resolve-integration`.
+
 SQLite remains the canonical live queue state. Git commits and GitHub PRs are
 evidence and review surfaces for closeout; do not use them as live coordination
 state in place of leases, task status, evidence rows, or audit events.
@@ -322,7 +340,8 @@ agent-tracker complete --config tracking/project.json write-readme \
   --lease-token <lease-token> \
   --agent agent-1 \
   --evidence "git:${main_sha}" \
-  --evidence "file:README.md"
+  --evidence "file:README.md" \
+  --direct-merge
 ```
 
 If `main` cannot be updated directly, open a PR and use `pr:<url>` evidence
@@ -330,6 +349,11 @@ with `submit-review` or `await-integration` instead of marking the task complete
 from an isolated worktree. Agents that do not have explicit direct-merge
 authority should also open a PR or leave an equivalent review state before
 completion.
+
+`--direct-merge` is explicit and metadata-gated. It is accepted only when the
+task allows `"direct_merge_override": true`, and it still requires `git:`
+evidence. Without this flag, `git:` evidence alone is not enough for
+`pr_or_review_required` tasks.
 
 When the committed task plan is the authoritative source, include the terminal
 task-plan status update in the integrated branch and use

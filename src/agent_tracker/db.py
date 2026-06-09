@@ -642,8 +642,24 @@ class Store:
         lease_token: str,
         evidence: list[str] | None = None,
         agent_id: str = "",
+        direct_merge: bool = False,
     ) -> None:
-        """Mark a leased task done."""
+        """Mark a leased task done.
+
+        Args:
+            project_id: Project that owns the task.
+            task_id: Task identifier to complete.
+            lease_token: Active lease token for the task.
+            evidence: Optional evidence URIs for the completion.
+            agent_id: Actor completing the task.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override.
+
+        Raises:
+            ValueError: If the lease is invalid or completion evidence does not
+                satisfy task policy.
+            KeyError: If the task does not exist.
+        """
         self._finish_task(
             project_id,
             task_id,
@@ -652,6 +668,7 @@ class Store:
             action="task.complete",
             evidence=evidence or [],
             agent_id=agent_id,
+            direct_merge=direct_merge,
         )
 
     def fail_task(
@@ -757,6 +774,7 @@ class Store:
         evidence: list[str] | None = None,
         agent_id: str = "",
         reason: str = "",
+        direct_merge: bool = False,
     ) -> None:
         """Resolve a review-waiting task without requiring an active lease."""
         self._resolve_awaiting_task(
@@ -768,6 +786,7 @@ class Store:
             evidence=evidence or [],
             agent_id=agent_id,
             reason=reason,
+            direct_merge=direct_merge,
         )
 
     def resolve_integration_task(
@@ -779,6 +798,7 @@ class Store:
         evidence: list[str] | None = None,
         agent_id: str = "",
         reason: str = "",
+        direct_merge: bool = False,
     ) -> None:
         """Resolve an integration-waiting task without requiring an active lease."""
         self._resolve_awaiting_task(
@@ -790,6 +810,7 @@ class Store:
             evidence=evidence or [],
             agent_id=agent_id,
             reason=reason,
+            direct_merge=direct_merge,
         )
 
     def record_event(self, project_id: str, event: EventRecord, *, actor: str = "system") -> bool:
@@ -895,6 +916,7 @@ class Store:
         action: str,
         evidence: list[str],
         agent_id: str,
+        direct_merge: bool = False,
         payload: dict[str, Any] | None = None,
     ) -> None:
         now_dt = utcnow()
@@ -907,6 +929,15 @@ class Store:
                 agent_id=agent_id,
                 now=now_dt,
             )
+            if status == "done":
+                _validate_completion_policy(
+                    conn,
+                    row,
+                    project_id=project_id,
+                    task_id=task_id,
+                    evidence=evidence,
+                    direct_merge=direct_merge,
+                )
             actor = agent_id or str(row["lease_agent_id"])
             now = iso(now_dt)
             conn.execute(
@@ -936,7 +967,11 @@ class Store:
                 task_id,
                 action,
                 actor,
-                {"evidence": evidence, **(payload or {})},
+                {
+                    "evidence": evidence,
+                    **({"direct_merge": True} if direct_merge else {}),
+                    **(payload or {}),
+                },
             )
 
     def _resolve_awaiting_task(
@@ -950,9 +985,12 @@ class Store:
         evidence: list[str],
         agent_id: str,
         reason: str = "",
+        direct_merge: bool = False,
     ) -> None:
         if status not in {"done", "failed"}:
             raise ValueError("resolution status must be one of: done, failed")
+        if direct_merge and status != "done":
+            raise ValueError("direct-merge override only applies to done resolution")
         if status == "failed" and not reason:
             raise ValueError("reason is required when resolving a task as failed")
         now = iso()
@@ -969,6 +1007,15 @@ class Store:
                 raise ValueError(
                     f"task must be in one of {allowed} to resolve; "
                     f"current status is {current_status}"
+                )
+            if status == "done":
+                _validate_completion_policy(
+                    conn,
+                    row,
+                    project_id=project_id,
+                    task_id=task_id,
+                    evidence=evidence,
+                    direct_merge=direct_merge,
                 )
             conn.execute(
                 """
@@ -1001,6 +1048,7 @@ class Store:
                     "from_status": current_status,
                     "status": status,
                     "evidence": evidence,
+                    **({"direct_merge": True} if direct_merge else {}),
                     **({"reason": reason} if reason else {}),
                 },
             )
@@ -1215,6 +1263,75 @@ def _validate_lease_seconds(lease_seconds: int) -> None:
     """Reject leases that would be immediately stale."""
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be greater than zero")
+
+
+def _validate_completion_policy(
+    conn: sqlite3.Connection,
+    task_row: sqlite3.Row,
+    *,
+    project_id: str,
+    task_id: str,
+    evidence: list[str],
+    direct_merge: bool,
+) -> None:
+    """Reject done transitions that do not satisfy task completion policy."""
+    metadata = loads(str(task_row["metadata_json"]), {})
+    policy = metadata.get("completion_policy") if isinstance(metadata, dict) else None
+    policy_applies = isinstance(policy, dict) and policy.get("default") == "pr_or_review_required"
+    if not policy_applies:
+        if direct_merge:
+            raise ValueError("direct-merge override is not allowed for this task")
+        return
+
+    all_evidence = _completion_evidence(conn, project_id, task_id, evidence)
+    has_git = _has_evidence_prefix(all_evidence, "git:")
+    has_integration = any(
+        _has_evidence_prefix(all_evidence, prefix) for prefix in ("pr:", "review:", "integration:")
+    )
+
+    if direct_merge:
+        if policy.get("direct_merge_override") is not True:
+            raise ValueError("direct-merge override is not allowed for this task")
+        if not has_git:
+            raise ValueError("direct-merge completion requires git: evidence")
+        return
+
+    if not has_git and not has_integration:
+        raise ValueError("completion requires git: and pr:/review:/integration: evidence")
+    if not has_git:
+        raise ValueError("completion requires git: evidence")
+    if not has_integration:
+        raise ValueError("completion requires pr:/review:/integration: evidence")
+
+
+def _completion_evidence(
+    conn: sqlite3.Connection,
+    project_id: str,
+    task_id: str,
+    new_evidence: list[str],
+) -> list[str]:
+    """Return existing and new completion evidence without duplicate URIs."""
+    rows = conn.execute(
+        """
+        SELECT uri
+        FROM evidence
+        WHERE project_id = ? AND task_id = ?
+        ORDER BY created_at, uri
+        """,
+        (project_id, task_id),
+    )
+    seen: set[str] = set()
+    combined: list[str] = []
+    for uri in [str(row["uri"]) for row in rows] + new_evidence:
+        if uri not in seen:
+            seen.add(uri)
+            combined.append(uri)
+    return combined
+
+
+def _has_evidence_prefix(evidence: list[str], prefix: str) -> bool:
+    """Return whether any evidence URI starts with the exact prefix."""
+    return any(uri.startswith(prefix) for uri in evidence)
 
 
 def state_to_dict(state: TaskState) -> dict[str, Any]:

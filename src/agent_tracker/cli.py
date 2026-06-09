@@ -157,6 +157,7 @@ def command_complete(args: argparse.Namespace) -> int:
         lease_token=args.lease_token,
         evidence=args.evidence,
         agent_id=args.agent,
+        direct_merge=args.direct_merge,
     )
     print(f"Completed {args.task_id}")
     return 0
@@ -198,6 +199,7 @@ def command_resolve_review(args: argparse.Namespace) -> int:
         evidence=args.evidence,
         agent_id=args.agent,
         reason=args.reason,
+        direct_merge=args.direct_merge,
     )
     print(f"Resolved review for {args.task_id} as {args.status}")
     return 0
@@ -212,6 +214,7 @@ def command_resolve_integration(args: argparse.Namespace) -> int:
         evidence=args.evidence,
         agent_id=args.agent,
         reason=args.reason,
+        direct_merge=args.direct_merge,
     )
     print(f"Resolved integration for {args.task_id} as {args.status}")
     return 0
@@ -322,6 +325,11 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--lease-token", required=True)
     complete.add_argument("--agent", default="")
     complete.add_argument("--evidence", action="append", default=[])
+    complete.add_argument(
+        "--direct-merge",
+        action="store_true",
+        help="Apply an explicit direct-merge completion override when task metadata allows it.",
+    )
     complete.set_defaults(func=command_complete)
 
     submit_review = sub.add_parser("submit-review", help="Submit a leased task for review.")
@@ -358,6 +366,11 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_review.add_argument("--status", choices=["done", "failed"], default="done")
     resolve_review.add_argument("--reason", default="")
     resolve_review.add_argument("--evidence", action="append", default=[])
+    resolve_review.add_argument(
+        "--direct-merge",
+        action="store_true",
+        help="Apply an explicit direct-merge completion override when task metadata allows it.",
+    )
     resolve_review.set_defaults(func=command_resolve_review)
 
     resolve_integration = sub.add_parser(
@@ -370,6 +383,11 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_integration.add_argument("--status", choices=["done", "failed"], default="done")
     resolve_integration.add_argument("--reason", default="")
     resolve_integration.add_argument("--evidence", action="append", default=[])
+    resolve_integration.add_argument(
+        "--direct-merge",
+        action="store_true",
+        help="Apply an explicit direct-merge completion override when task metadata allows it.",
+    )
     resolve_integration.set_defaults(func=command_resolve_integration)
 
     fail = sub.add_parser("fail", help="Fail a task.")

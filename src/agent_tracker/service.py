@@ -129,8 +129,23 @@ class Coordinator:
         lease_token: str,
         evidence: list[str] | None = None,
         agent_id: str = "",
+        direct_merge: bool = False,
     ) -> None:
-        """Complete a leased task."""
+        """Complete a leased task.
+
+        Args:
+            task_id: Task identifier to complete.
+            lease_token: Active lease token for the task.
+            evidence: Optional evidence URIs for the completion.
+            agent_id: Actor completing the task.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override.
+
+        Raises:
+            ValueError: If mutation is refused, the lease is invalid, or the
+                completion evidence does not satisfy task policy.
+            KeyError: If the task does not exist.
+        """
         self._ensure_mutation_allowed()
         self.store.complete_task(
             self.config.project_id,
@@ -138,6 +153,7 @@ class Coordinator:
             lease_token=lease_token,
             evidence=evidence or [],
             agent_id=agent_id,
+            direct_merge=direct_merge,
         )
 
     def fail(self, task_id: str, *, lease_token: str, reason: str, agent_id: str = "") -> None:
@@ -222,6 +238,7 @@ class Coordinator:
         evidence: list[str] | None = None,
         agent_id: str = "",
         reason: str = "",
+        direct_merge: bool = False,
     ) -> None:
         """Resolve a task waiting for review.
 
@@ -231,6 +248,8 @@ class Coordinator:
             evidence: Optional evidence URIs for the resolution.
             agent_id: Actor resolving the review.
             reason: Failure reason when resolving as `failed`.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override when resolving as `done`.
 
         Raises:
             ValueError: If mutation is refused, the task is not awaiting review,
@@ -247,6 +266,7 @@ class Coordinator:
             evidence=evidence or [],
             agent_id=agent_id,
             reason=reason,
+            direct_merge=direct_merge,
         )
 
     def resolve_integration(
@@ -257,6 +277,7 @@ class Coordinator:
         evidence: list[str] | None = None,
         agent_id: str = "",
         reason: str = "",
+        direct_merge: bool = False,
     ) -> None:
         """Resolve a task waiting for integration.
 
@@ -266,6 +287,8 @@ class Coordinator:
             evidence: Optional evidence URIs for the resolution.
             agent_id: Actor resolving the integration wait.
             reason: Failure reason when resolving as `failed`.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override when resolving as `done`.
 
         Raises:
             ValueError: If mutation is refused, the task is not awaiting
@@ -282,6 +305,7 @@ class Coordinator:
             evidence=evidence or [],
             agent_id=agent_id,
             reason=reason,
+            direct_merge=direct_merge,
         )
 
     def record_evidence(self, task_id: str, uri: str, *, actor: str = "system") -> bool:

@@ -87,13 +87,27 @@ class AgentTrackerTools:
         lease_token: str,
         evidence: list[str] | None = None,
         agent_id: str = "",
+        direct_merge: bool = False,
     ) -> dict[str, bool]:
-        """Complete a leased task."""
+        """Complete a leased task.
+
+        Args:
+            task_id: Task identifier to complete.
+            lease_token: Active lease token for the task.
+            evidence: Optional evidence URIs to attach to the completion.
+            agent_id: Actor completing the task.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override.
+
+        Returns:
+            A JSON-friendly success payload.
+        """
         self.coordinator.complete(
             task_id,
             lease_token=lease_token,
             evidence=evidence or [],
             agent_id=agent_id,
+            direct_merge=direct_merge,
         )
         return {"ok": True}
 
@@ -159,6 +173,7 @@ class AgentTrackerTools:
         evidence: list[str] | None = None,
         agent_id: str = "",
         reason: str = "",
+        direct_merge: bool = False,
     ) -> dict[str, bool]:
         """Resolve a task waiting for review.
 
@@ -168,6 +183,8 @@ class AgentTrackerTools:
             evidence: Optional evidence URIs to attach to the resolution.
             agent_id: Actor resolving the review.
             reason: Failure reason when resolving as `failed`.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override when resolving as `done`.
 
         Returns:
             A JSON-friendly success payload.
@@ -178,6 +195,7 @@ class AgentTrackerTools:
             evidence=evidence or [],
             agent_id=agent_id,
             reason=reason,
+            direct_merge=direct_merge,
         )
         return {"ok": True}
 
@@ -188,6 +206,7 @@ class AgentTrackerTools:
         evidence: list[str] | None = None,
         agent_id: str = "",
         reason: str = "",
+        direct_merge: bool = False,
     ) -> dict[str, bool]:
         """Resolve a task waiting for integration.
 
@@ -197,6 +216,8 @@ class AgentTrackerTools:
             evidence: Optional evidence URIs to attach to the resolution.
             agent_id: Actor resolving the integration wait.
             reason: Failure reason when resolving as `failed`.
+            direct_merge: Whether to apply an explicit direct-merge completion
+                override when resolving as `done`.
 
         Returns:
             A JSON-friendly success payload.
@@ -207,6 +228,7 @@ class AgentTrackerTools:
             evidence=evidence or [],
             agent_id=agent_id,
             reason=reason,
+            direct_merge=direct_merge,
         )
         return {"ok": True}
 

@@ -62,6 +62,17 @@ raw artifacts into the task plan.
 | `metadata` | No | `{}` | Free-form object for role filters, write scopes, authority notes, or plugin-specific data. |
 | `requirements` | No | `[]` | Dependencies that must be satisfied before the task is ready. |
 
+`metadata.completion_policy` can opt a task into machine-checked completion
+evidence. With
+`{"default": "pr_or_review_required", "direct_merge_override": true}`, any
+transition to `done` through `complete`, `resolve-review`, or
+`resolve-integration` requires cumulative evidence containing at least one
+`git:` URI and at least one `pr:`, `review:`, or `integration:` URI. The
+direct-merge override is never implicit: callers must pass `--direct-merge`
+or the equivalent service/MCP parameter, the task metadata must allow it, and
+`git:` evidence is still required. Missing, malformed, or unknown
+`completion_policy` metadata is treated as legacy behavior.
+
 ## Statuses
 
 Task plans store manual statuses. `ready` and `blocked` are computed by the

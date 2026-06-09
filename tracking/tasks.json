@@ -344,7 +344,7 @@
       "id": "completion-evidence-policy",
       "title": "Enforce completion evidence policy",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 28,
       "prompt_key": "completion-evidence-policy",
       "prompt_path": "tracking/README.md",
