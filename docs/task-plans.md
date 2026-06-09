@@ -167,13 +167,15 @@ include `["maintainer", "python"]`.
 
 ## Suggested Metadata
 
-The core package does not enforce authority or write scopes yet, but including
-them makes task prompts and reviews clearer:
+The core package does not enforce authority, write scopes, lanes, or conflict
+risk yet, but including them makes task prompts and reviews clearer:
 
 ```json
 {
   "metadata": {
     "roles": ["maintainer"],
+    "lane": "coordination/plumbing",
+    "conflict_risk": "medium",
     "write_scopes": ["src/agent_tracker/config.py", "tests/test_agent_tracker.py"],
     "authority": "local code and docs only",
     "requires_human_approval": false
@@ -184,14 +186,21 @@ them makes task prompts and reviews clearer:
 Recommended metadata keys:
 
 - `roles`: Agent roles allowed to claim the task.
+- `lane`: Stable project objective or workstream, such as
+  `coordination/plumbing`, `planning/intake`, `human/review`,
+  `exports/reporting`, or `feature/testability`.
+- `conflict_risk`: Expected parallel-work risk. Use `low` for narrow docs or
+  isolated files, `medium` for mixed docs/code or shared helpers, and `high`
+  for storage models, service state transitions, CLI contracts, or broad tests.
 - `write_scopes`: Files or directories the task is expected to touch.
 - `authority`: Short description of what the assignee may do.
 - `validation`: Extra project-specific validation notes.
 - `dogfood`: Boolean marker for tasks used to validate `agent-tracker` itself.
 
 Metadata is advisory in the current core package, except for role filtering.
-It is still worth keeping accurate because rendered prompts, reviews, and
-project-local plugins can use it to enforce local conventions.
+It is still worth keeping accurate because rendered prompts, reviews,
+project-local plugins, and coordinators can use it to spot parallel-safe work
+before the tracker enforces lanes or write locks.
 
 ## Import Semantics
 

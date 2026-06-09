@@ -122,6 +122,33 @@ Acceptance criteria:
 - Repeated pulls are idempotent.
 - Pulled files can then be processed by the existing `ingest-spool` flow.
 
+### Safety Task: Test Remote Spooling For SSH/Codex Projects
+
+Goal:
+
+- Prove the spool path works for remote agents, including Codex app sessions
+  connected to an SSH-backed project workspace.
+
+Scope:
+
+- Start with a local/shared-filesystem test harness that models remote outbox
+  and canonical local inbox paths without requiring a real SSH service in CI.
+- Add a documented manual test for a Codex app SSH project where a remote agent
+  writes spool files and the canonical project pulls and ingests them.
+- Cover partial-file publication, repeated pulls, done/error idempotency, and
+  response/error visibility for remote agents.
+- Keep this separate from raw intake and queue mutation semantics until
+  `task-ingest` defines command request/response files.
+
+Acceptance criteria:
+
+- The test harness catches regressions in remote-style pull behavior before an
+  actual SSH environment is needed.
+- The manual runbook identifies the canonical project, remote project, outbox,
+  local inbox, pull command, ingest command, and expected evidence.
+- The task clearly states which parts are blocked on task-ingest command
+  semantics versus already-covered event-spool behavior.
+
 ### 4. Add Queue Lanes And Conflict Risk Planning
 
 Goal:
@@ -146,6 +173,15 @@ Acceptance criteria:
 - A coordinator can identify at least one low-conflict feature task and one
   coordination-plumbing task from the overview/planning docs.
 - The design avoids requiring agents to edit runtime tracker state through git.
+
+Dependency note:
+
+- Raw intake should not wait for follow-up proposal/export plumbing. It can
+  capture untriaged ideas as non-claimable records first.
+- Triage should wait for raw intake records and then promote selected items into
+  proposed task contracts.
+- Follow-up proposals remain a later automation path for deriving tasks from
+  completed work or events.
 
 ### 5. Add A Repository Boundary For In-Memory Tests
 
@@ -349,11 +385,15 @@ Scope:
 - Add deterministic triage commands.
 - Generate proposed tasks with repo, role, authority, dependencies, validation
   checks, intervention needs, and notebook updates.
+- Define the minimal proposed-task contract and persistence needed for
+  human-reviewed intake promotion.
 - Keep human approval between proposal and active queue state.
 
 Acceptance criteria:
 
 - Triage produces proposed tasks, not immediately claimable tasks.
+- Later follow-up proposal automation can reuse the same proposed-task contract
+  instead of creating a parallel model.
 - The project-manager skill documents the triage workflow.
 
 ### 13. Add A Human Intervention Queue

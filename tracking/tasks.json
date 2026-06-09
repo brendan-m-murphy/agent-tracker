@@ -325,6 +325,8 @@
           "maintainer",
           "python"
         ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "medium",
         "write_scopes": [
           "src/agent_tracker/service.py",
           "src/agent_tracker/cli.py",
@@ -482,6 +484,8 @@
           "maintainer",
           "python"
         ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "medium",
         "write_scopes": [
           "src/agent_tracker/service.py",
           "src/agent_tracker/cli.py",
@@ -531,6 +535,8 @@
           "python",
           "architecture"
         ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "high",
         "write_scopes": [
           "src/agent_tracker/models.py",
           "src/agent_tracker/db.py",
@@ -687,7 +693,7 @@
       "priority": 70,
       "prompt_key": "followup-task-proposals",
       "prompt_path": "docs/next-feature-tasks.md",
-      "summary": "Let project plugins propose follow-up tasks from completed work or events without giving callbacks direct authority to launch agents.",
+      "summary": "Let project plugins propose follow-up tasks from completed work or events using the same proposed-task contract as intake triage.",
       "execution": {
         "primary_files": [
           "src/agent_tracker/plugins.py",
@@ -702,8 +708,13 @@
         "uv run pytest",
         "uv run ruff check ."
       ],
-      "next_action": "Wire FollowupPlanner into service and CLI, persist proposed tasks separately from imported tasks, and support human review before promotion.",
+      "next_action": "Wire FollowupPlanner into service and CLI, reusing the triage proposed-task contract for human review before promotion.",
       "requirements": [
+        {
+          "kind": "task",
+          "task": "project-manager-triage-workflow",
+          "description": "Follow-up automation should reuse the proposed-task contract defined for human-reviewed intake triage."
+        },
         {
           "kind": "task",
           "task": "markdown-export-plugins",
@@ -715,6 +726,8 @@
           "maintainer",
           "python"
         ],
+        "lane": "planning/intake",
+        "conflict_risk": "high",
         "write_scopes": [
           "src/agent_tracker/plugins.py",
           "src/agent_tracker/service.py",
@@ -862,6 +875,8 @@
           "docs",
           "python"
         ],
+        "lane": "planning/intake",
+        "conflict_risk": "low",
         "write_scopes": [
           "docs/",
           "src/agent_tracker/rendering.py",
@@ -922,6 +937,63 @@
           "src/agent_tracker/service.py",
           "src/agent_tracker/cli.py",
           "tests/test_agent_tracker.py"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
+      "id": "remote-spooling-ssh-codex-test",
+      "title": "Test remote spooling for SSH Codex projects",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 36,
+      "prompt_key": "remote-spooling-ssh-codex-test",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Add a test harness and manual runbook for remote agents writing spool files from SSH-backed Codex project workspaces.",
+      "execution": {
+        "primary_files": [
+          "tests/test_agent_tracker.py",
+          "docs/",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py"
+        ],
+        "notes": "Start by modelling remote outbox to local inbox behavior locally; add SSH/Codex manual coverage where environment access is required."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: remote-spooling runbook names canonical project, SSH remote project, outbox, local inbox, pull/ingest commands, expected evidence, and blocked task-ingest portions."
+      ],
+      "next_action": "Design local/shared-filesystem remote-spooling tests and a Codex SSH runbook, separating event-spool coverage from task-ingest command semantics.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "pull-spool-command",
+          "description": "The local/shared-filesystem pull command should exist before remote-spooling integration tests are added."
+        },
+        {
+          "kind": "task",
+          "task": "task-ingest-command-contract",
+          "description": "Remote agents need command request/response semantics before queue-mutation spooling can be tested end to end."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "docs"
+        ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "medium",
+        "write_scopes": [
+          "tests/test_agent_tracker.py",
+          "docs/",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py"
         ],
         "completion_policy": {
           "default": "pr_or_review_required",
@@ -1015,8 +1087,8 @@
       "requirements": [
         {
           "kind": "task",
-          "task": "followup-task-proposals",
-          "description": "The proposal model should exist before adding a broader human intake path."
+          "task": "queue-lanes-conflict-risk",
+          "description": "The queue should explicitly allow raw intake to proceed before follow-up proposal automation."
         }
       ],
       "metadata": {
@@ -1024,6 +1096,8 @@
           "maintainer",
           "python"
         ],
+        "lane": "planning/intake",
+        "conflict_risk": "high",
         "write_scopes": [
           "src/agent_tracker/models.py",
           "src/agent_tracker/db.py",
@@ -1043,9 +1117,11 @@
       "priority": 110,
       "prompt_key": "project-manager-triage-workflow",
       "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
-      "summary": "Let a project-manager agent organize intake, ask planning questions, and promote selected items into proposed task contracts.",
+      "summary": "Let a project-manager agent organize intake, ask planning questions, and define the proposed-task contract for selected items.",
       "execution": {
         "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
           "src/agent_tracker/service.py",
           "src/agent_tracker/cli.py",
           "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
@@ -1056,9 +1132,10 @@
       "validation_checks": [
         "uv run pytest",
         "uv run ruff check .",
-        "Manual check: project-manager triage creates proposed tasks, not immediately claimable tasks."
+        "Manual check: project-manager triage creates proposed tasks, not immediately claimable tasks.",
+        "Manual check: later follow-up proposal automation can reuse the same proposed-task contract."
       ],
-      "next_action": "Add deterministic project-manager triage commands and skill guidance for promoting intake into proposed tasks.",
+      "next_action": "Add deterministic project-manager triage commands, proposed-task persistence, and skill guidance for promoting intake into reviewed proposals.",
       "requirements": [
         {
           "kind": "task",
@@ -1077,7 +1154,11 @@
           "python",
           "docs"
         ],
+        "lane": "planning/intake",
+        "conflict_risk": "high",
         "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
           "src/agent_tracker/service.py",
           "src/agent_tracker/cli.py",
           "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
