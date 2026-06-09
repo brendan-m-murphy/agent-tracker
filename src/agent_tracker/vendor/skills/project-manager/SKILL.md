@@ -69,6 +69,34 @@ When the user gives an idea, feature request, check, concern, or planning note:
 5. If the current project has no intake feature yet, add a planning task or a
    repo-local note rather than silently changing active work.
 
+For a plain `agent-tracker` project with intake support:
+
+```bash
+uv run agent-tracker record-intake --config tracking/project.json \
+  --kind feature --source user --tag triage \
+  "Raw request or idea text"
+uv run agent-tracker list-intake --config tracking/project.json --json
+```
+
+After reviewing an intake item, create a proposed task contract rather than a
+claimable task:
+
+```bash
+uv run agent-tracker propose-task --config tracking/project.json <intake-id> \
+  --task-id <stable-task-id> \
+  --title "Task title" \
+  --repo <repo-or-component> \
+  --role maintainer \
+  --write-scope docs/ \
+  --validation-check "uv run pytest" \
+  --authority "local code and docs"
+uv run agent-tracker list-proposals --config tracking/project.json --json
+```
+
+Proposals are review artifacts. Do not add them to the live task plan or another
+authoritative importer source until the user or project workflow approves
+promotion.
+
 ## Logging And Follow-Up
 
 Agents should log useful work as task evidence, notes, or spool-ingested events.

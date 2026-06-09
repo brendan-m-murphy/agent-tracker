@@ -274,6 +274,34 @@ in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`
 results until a later triage workflow promotes them into proposed task
 contracts.
 
+## Triage Intake
+
+Project-manager triage turns a raw intake item into a proposed task contract.
+The proposal is durable and reviewable, but it is still not live queue state:
+
+```bash
+agent-tracker propose-task --config project.json <intake-id> \
+  --task-id add-triage \
+  --title "Add triage workflow" \
+  --repo agent-tracker \
+  --role maintainer \
+  --write-scope src/agent_tracker/service.py \
+  --validation-check "uv run pytest" \
+  --dependency foundation:"Base queue exists." \
+  --authority "local code and docs"
+```
+
+List proposals:
+
+```bash
+agent-tracker list-proposals --config project.json --json
+```
+
+Proposed task records are stored in SQLite, audited as `proposal.record`, and
+included in snapshots. They do not appear in ready-task listings and cannot be
+claimed. A separate promotion workflow should review and approve proposals
+before adding them to the task plan or another authoritative task importer.
+
 ## Complete Work
 
 If the task changed tracked code, docs, config, tests, or task plans, complete

@@ -22,6 +22,7 @@ from agent_tracker.models import (
     DependencyRecord,
     EventRecord,
     IntakeRecord,
+    ProposedTaskRecord,
     RequirementState,
     TaskRecord,
     TaskState,
@@ -196,6 +197,22 @@ class Store:
                     FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS proposed_tasks (
+                    project_id TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    intake_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'proposed',
+                    contract_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, proposal_id),
+                    UNIQUE (project_id, task_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id, intake_id) REFERENCES intake(project_id, intake_id)
+                        ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS artifacts (
                     project_id TEXT NOT NULL,
                     artifact_id TEXT NOT NULL,
@@ -266,6 +283,27 @@ class Store:
                     (config.project_id,),
                 )
             }
+            if _table_exists(conn, "proposed_tasks"):
+                proposal_rows = list(
+                    conn.execute(
+                        """
+                        SELECT task_id, proposal_id
+                        FROM proposed_tasks
+                        WHERE project_id = ? AND status = 'proposed'
+                        """,
+                        (config.project_id,),
+                    )
+                )
+                proposed_task_ids = {
+                    str(row["task_id"]): str(row["proposal_id"]) for row in proposal_rows
+                }
+                for task in tasks:
+                    proposal_id = proposed_task_ids.get(task.task_id)
+                    if proposal_id and task.task_id not in existing_rows:
+                        raise ValueError(
+                            f"task {task.task_id} is still proposed "
+                            f"({proposal_id}); promote it before importing"
+                        )
             imported_task_ids = [task.task_id for task in tasks]
             for task in tasks:
                 existing = existing_rows.get(task.task_id)
@@ -941,6 +979,83 @@ class Store:
             rows = list(conn.execute(sql, values))
         return [_intake_from_row(row) for row in rows]
 
+    def record_proposed_task(
+        self,
+        project_id: str,
+        proposal: ProposedTaskRecord,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Record a proposed task contract."""
+        self.init_schema()
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            if not _intake_exists(conn, project_id, proposal.intake_id):
+                raise ValueError(f"unknown intake record: {proposal.intake_id}")
+            if _task_exists(conn, project_id, proposal.task.task_id):
+                raise ValueError(f"task already exists: {proposal.task.task_id}")
+            contract = proposed_task_to_dict(proposal)
+            conn.execute(
+                """
+                INSERT INTO proposed_tasks (
+                    project_id, proposal_id, intake_id, task_id, status,
+                    contract_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    proposal.proposal_id,
+                    proposal.intake_id,
+                    proposal.task.task_id,
+                    proposal.status,
+                    dumps(contract),
+                    now,
+                    now,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                proposal.task.task_id,
+                "proposal.record",
+                actor,
+                {"proposal_id": proposal.proposal_id, "intake_id": proposal.intake_id},
+            )
+        return replace(proposal, created_at=now, updated_at=now)
+
+    def proposed_task_records(
+        self,
+        project_id: str,
+        *,
+        status: str = "",
+        intake_id: str = "",
+        limit: int = 0,
+    ) -> list[ProposedTaskRecord]:
+        """Return proposed task records newest first."""
+        clauses = ["project_id = ?"]
+        values: list[Any] = [project_id]
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        if intake_id:
+            clauses.append("intake_id = ?")
+            values.append(intake_id)
+        sql = f"""
+            SELECT *
+            FROM proposed_tasks
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_at DESC, proposal_id DESC
+        """
+        if limit:
+            sql += " LIMIT ?"
+            values.append(limit)
+        with self.transaction(read_only=True) as conn:
+            if not _table_exists(conn, "proposed_tasks"):
+                return []
+            rows = list(conn.execute(sql, values))
+        return [_proposed_task_from_row(row) for row in rows]
+
     def record_evidence(
         self,
         project_id: str,
@@ -1018,6 +1133,21 @@ class Store:
                 ]
             else:
                 intake = []
+            if _table_exists(conn, "proposed_tasks"):
+                proposed_tasks = [
+                    proposed_task_to_dict(_proposed_task_from_row(row))
+                    for row in conn.execute(
+                        """
+                        SELECT *
+                        FROM proposed_tasks
+                        WHERE project_id = ?
+                        ORDER BY created_at, proposal_id
+                        """,
+                        (project_id,),
+                    )
+                ]
+            else:
+                proposed_tasks = []
             events = [
                 {
                     "event_id": row["event_id"],
@@ -1050,6 +1180,7 @@ class Store:
             "generated_at": iso(),
             "tasks": [state_to_dict(state) for state in states],
             "intake": intake,
+            "proposed_tasks": proposed_tasks,
             "events": events,
             "audit": audit,
         }
@@ -1491,6 +1622,26 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _intake_exists(conn: sqlite3.Connection, project_id: str, intake_id: str) -> bool:
+    """Return whether an intake record exists."""
+    if not _table_exists(conn, "intake"):
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM intake WHERE project_id = ? AND intake_id = ?",
+        (project_id, intake_id),
+    ).fetchone()
+    return row is not None
+
+
+def _task_exists(conn: sqlite3.Connection, project_id: str, task_id: str) -> bool:
+    """Return whether a live task exists."""
+    row = conn.execute(
+        "SELECT 1 FROM tasks WHERE project_id = ? AND task_id = ?",
+        (project_id, task_id),
+    ).fetchone()
+    return row is not None
+
+
 def _intake_from_row(row: sqlite3.Row) -> IntakeRecord:
     """Convert a SQLite row to an intake record."""
     return IntakeRecord(
@@ -1520,6 +1671,87 @@ def intake_to_dict(intake: IntakeRecord) -> dict[str, Any]:
         "metadata": intake.metadata,
         "created_at": intake.created_at,
         "updated_at": intake.updated_at,
+    }
+
+
+def _proposed_task_from_row(row: sqlite3.Row) -> ProposedTaskRecord:
+    """Convert a SQLite row to a proposed task record."""
+    contract = loads(str(row["contract_json"]), {})
+    if not isinstance(contract, dict):
+        contract = {}
+    task_payload = contract.get("task", {})
+    if not isinstance(task_payload, dict):
+        task_payload = {}
+    requirements = contract.get("requirements", [])
+    if not isinstance(requirements, list):
+        requirements = []
+    return ProposedTaskRecord(
+        proposal_id=str(row["proposal_id"]),
+        intake_id=str(row["intake_id"]),
+        status=str(row["status"]),
+        task=_task_record_from_dict(task_payload),
+        requirements=[
+            {
+                "kind": str(item.get("kind") or "task"),
+                "task": str(item.get("task") or ""),
+                "description": str(item.get("description") or ""),
+            }
+            for item in requirements
+            if isinstance(item, dict)
+        ],
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def _task_record_from_dict(payload: dict[str, Any]) -> TaskRecord:
+    """Convert a task contract dictionary to a task record."""
+    return TaskRecord(
+        task_id=str(payload.get("id") or payload.get("task_id") or ""),
+        title=str(payload.get("title") or ""),
+        repo=str(payload.get("repo") or ""),
+        status=str(payload.get("status") or "pending"),
+        priority=int(payload.get("priority") or 9999),
+        prompt_key=str(payload.get("prompt_key") or ""),
+        prompt_path=str(payload.get("prompt_path") or ""),
+        summary=str(payload.get("summary") or ""),
+        execution=dict(payload.get("execution") or {}),
+        validation_checks=list(payload.get("validation_checks") or []),
+        next_action=str(payload.get("next_action") or ""),
+        evidence=list(payload.get("evidence") or []),
+        metadata=dict(payload.get("metadata") or {}),
+    )
+
+
+def proposed_task_to_dict(proposal: ProposedTaskRecord) -> dict[str, Any]:
+    """Convert a proposed task record to a JSON-friendly dictionary."""
+    return {
+        "id": proposal.proposal_id,
+        "intake_id": proposal.intake_id,
+        "status": proposal.status,
+        "task": task_record_to_dict(proposal.task),
+        "requirements": proposal.requirements,
+        "created_at": proposal.created_at,
+        "updated_at": proposal.updated_at,
+    }
+
+
+def task_record_to_dict(task: TaskRecord) -> dict[str, Any]:
+    """Convert a task record to a JSON-friendly dictionary."""
+    return {
+        "id": task.task_id,
+        "title": task.title,
+        "repo": task.repo,
+        "status": task.status,
+        "priority": task.priority,
+        "prompt_key": task.prompt_key,
+        "prompt_path": task.prompt_path,
+        "summary": task.summary,
+        "execution": task.execution,
+        "validation_checks": task.validation_checks,
+        "next_action": task.next_action,
+        "evidence": task.evidence,
+        "metadata": task.metadata,
     }
 
 

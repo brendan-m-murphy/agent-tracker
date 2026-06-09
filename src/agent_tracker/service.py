@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_tracker.config import ProjectConfig
-from agent_tracker.db import Store, intake_to_dict, state_to_dict
+from agent_tracker.db import Store, intake_to_dict, proposed_task_to_dict, state_to_dict
 from agent_tracker.models import (
     ACTIVE_STATES,
     INTEGRATION_STATES,
@@ -17,7 +17,9 @@ from agent_tracker.models import (
     Claim,
     EventRecord,
     IntakeRecord,
+    ProposedTaskRecord,
     RequirementState,
+    TaskRecord,
     TaskState,
 )
 from agent_tracker.plugins import load_plugin
@@ -404,6 +406,107 @@ class Coordinator:
             "intake": [intake_to_dict(record) for record in records],
         }
 
+    def propose_task_from_intake(
+        self,
+        intake_id: str,
+        *,
+        task_id: str,
+        title: str,
+        repo: str = "",
+        summary: str = "",
+        next_action: str = "",
+        role: str = "",
+        write_scopes: list[str] | None = None,
+        validation_checks: list[str] | None = None,
+        requirements: list[dict[str, str]] | None = None,
+        authority: str = "",
+        intervention_needs: list[str] | None = None,
+        notebook_updates: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        proposal_id: str = "",
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Create a proposed task contract from raw intake."""
+        self._ensure_mutation_allowed()
+        cleaned_intake_id = _first_text(intake_id)
+        cleaned_task_id = _first_text(task_id)
+        cleaned_title = _first_text(title)
+        if not cleaned_intake_id:
+            raise ValueError("intake id is required")
+        if not cleaned_task_id:
+            raise ValueError("proposed task id is required")
+        if not cleaned_title:
+            raise ValueError("proposed task title is required")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("proposal metadata must be a JSON object")
+        scopes = _clean_strings(write_scopes or [])
+        task_metadata = dict(metadata or {})
+        if role:
+            task_metadata["roles"] = _clean_strings([role])
+        if scopes:
+            task_metadata["write_scopes"] = scopes
+        if authority:
+            task_metadata["authority"] = authority.strip()
+        needs = _clean_strings(intervention_needs or [])
+        if needs:
+            task_metadata["intervention_needs"] = needs
+        notebooks = _clean_strings(notebook_updates or [])
+        if notebooks:
+            task_metadata["notebook_updates"] = notebooks
+        task = TaskRecord(
+            task_id=cleaned_task_id,
+            title=cleaned_title,
+            repo=_first_text(repo),
+            status="pending",
+            summary=_first_text(summary),
+            execution={"primary_files": scopes} if scopes else {},
+            validation_checks=_clean_strings(validation_checks or []),
+            next_action=_first_text(next_action),
+            metadata=task_metadata,
+        )
+        proposal = ProposedTaskRecord(
+            proposal_id=_first_text(proposal_id) or uuid.uuid4().hex,
+            intake_id=cleaned_intake_id,
+            task=task,
+            requirements=_clean_requirements(requirements or []),
+        )
+        return self.store.record_proposed_task(
+            self.config.project_id,
+            proposal,
+            actor=actor,
+        )
+
+    def proposed_task_records(
+        self,
+        *,
+        status: str = "",
+        intake_id: str = "",
+        limit: int = 0,
+    ) -> list[ProposedTaskRecord]:
+        """Return proposed task contracts."""
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
+        return self.store.proposed_task_records(
+            self.config.project_id,
+            status=_first_text(status),
+            intake_id=_first_text(intake_id),
+            limit=limit,
+        )
+
+    def proposed_tasks_payload(
+        self,
+        *,
+        status: str = "",
+        intake_id: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Return JSON-friendly proposed task contracts."""
+        records = self.proposed_task_records(status=status, intake_id=intake_id, limit=limit)
+        return {
+            "project_id": self.config.project_id,
+            "proposals": [proposed_task_to_dict(record) for record in records],
+        }
+
     def ingest_event_file(self, path: str | Path, *, actor: str = "system") -> bool:
         """Record an event from a JSON file."""
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -652,13 +755,35 @@ def _first_text(*values: Any) -> str:
 
 def _clean_tags(tags: list[str]) -> list[str]:
     """Normalize tag values while preserving order."""
+    return _clean_strings(tags)
+
+
+def _clean_strings(values: list[str]) -> list[str]:
+    """Normalize string values while preserving order."""
     cleaned = []
     seen = set()
-    for tag in tags:
-        text = str(tag).strip()
+    for value in values:
+        text = str(value).strip()
         if text and text not in seen:
             cleaned.append(text)
             seen.add(text)
+    return cleaned
+
+
+def _clean_requirements(requirements: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Normalize proposed task dependency records."""
+    cleaned = []
+    for requirement in requirements:
+        task_id = _first_text(requirement.get("task"))
+        if not task_id:
+            raise ValueError("proposed task dependency is missing a task id")
+        cleaned.append(
+            {
+                "kind": _first_text(requirement.get("kind")) or "task",
+                "task": task_id,
+                "description": _first_text(requirement.get("description")),
+            }
+        )
     return cleaned
 
 

@@ -117,3 +117,16 @@ class IntakeRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class ProposedTaskRecord:
+    """A reviewed task proposal that is not yet live queue state."""
+
+    proposal_id: str
+    intake_id: str
+    task: TaskRecord
+    requirements: list[dict[str, str]] = field(default_factory=list)
+    status: str = "proposed"
+    created_at: str = ""
+    updated_at: str = ""

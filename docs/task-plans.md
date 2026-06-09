@@ -202,6 +202,25 @@ It is still worth keeping accurate because rendered prompts, reviews,
 project-local plugins, and coordinators can use it to spot parallel-safe work
 before the tracker enforces lanes or write locks.
 
+## Proposed Task Contracts
+
+Project-manager triage can create proposed task contracts from raw intake. A
+proposal stores a task-shaped contract plus proposed dependencies, but it is not
+inserted into the live `tasks` table and is not claimable:
+
+```bash
+agent-tracker propose-task --config project.json <intake-id> \
+  --task-id add-triage \
+  --title "Add triage workflow" \
+  --role maintainer \
+  --write-scope src/agent_tracker/service.py \
+  --validation-check "uv run pytest"
+```
+
+Use `list-proposals --json` or exported snapshots to review proposed tasks. A
+separate promotion workflow should copy approved proposals into `tasks.json` or
+another authoritative importer source.
+
 ## Import Semantics
 
 Importing synchronizes the live SQLite state with the task plan:

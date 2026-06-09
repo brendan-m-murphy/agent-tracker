@@ -249,6 +249,8 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
 | `record-intake` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker record-intake --config demo-tracker/project.json --kind feature --tag inbox "Add triage workflow"` |
 | `list-intake` | List raw intake records for later project-manager triage. | `agent-tracker list-intake --config demo-tracker/project.json --json` |
+| `propose-task` | Create a reviewed proposed task contract from an intake record without importing it as a live task. | `agent-tracker propose-task --config demo-tracker/project.json <intake-id> --task-id add-triage --title "Add triage"` |
+| `list-proposals` | List proposed task contracts awaiting review or promotion. | `agent-tracker list-proposals --config demo-tracker/project.json --json` |
 | `export` | Write the configured audit snapshot through the exporter. | `agent-tracker export --config demo-tracker/project.json` |
 
 See [docs/operations.md](docs/operations.md) for lifecycle details, stale lease
@@ -322,6 +324,20 @@ agent-tracker list-intake --config demo-tracker/project.json --json
 
 Intake records are included in snapshots for project-manager triage, but they do
 not appear in ready-task listings and cannot be claimed.
+
+Project-manager triage can turn an intake item into a proposed task contract
+without adding it to the live queue:
+
+```bash
+agent-tracker propose-task --config demo-tracker/project.json <intake-id> \
+  --task-id add-triage --title "Add triage workflow" \
+  --role maintainer --write-scope src/agent_tracker/service.py \
+  --validation-check "uv run pytest"
+agent-tracker list-proposals --config demo-tracker/project.json --json
+```
+
+Proposals are durable review artifacts. A later promotion workflow can convert
+approved proposals into task-plan entries or another authoritative importer.
 
 Snapshots include evaluated task state, events, and audit log entries:
 

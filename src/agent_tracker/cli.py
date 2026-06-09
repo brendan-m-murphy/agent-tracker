@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_tracker.config import load_config
-from agent_tracker.db import intake_to_dict, state_to_dict
+from agent_tracker.db import intake_to_dict, proposed_task_to_dict, state_to_dict
 from agent_tracker.models import INTEGRATION_STATES
 from agent_tracker.service import Coordinator
 
@@ -355,6 +355,56 @@ def command_list_intake(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_propose_task(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    metadata = parse_json_object(args.metadata_json, "metadata-json")
+    proposal = coord.propose_task_from_intake(
+        args.intake_id,
+        task_id=args.task_id,
+        title=args.title,
+        repo=args.repo,
+        summary=args.summary,
+        next_action=args.next_action,
+        role=args.role,
+        write_scopes=args.write_scope,
+        validation_checks=args.validation_check,
+        requirements=[parse_dependency(value) for value in args.dependency],
+        authority=args.authority,
+        intervention_needs=args.intervention_need,
+        notebook_updates=args.notebook_update,
+        metadata=metadata,
+        proposal_id=args.proposal_id,
+        actor=args.actor,
+    )
+    print_json(proposed_task_to_dict(proposal))
+    return 0
+
+
+def command_list_proposals(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.proposed_tasks_payload(
+        status=args.status,
+        intake_id=args.intake_id,
+        limit=args.limit,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    if not payload["proposals"]:
+        print("No proposed tasks.")
+        return 0
+    for proposal in payload["proposals"]:
+        task = proposal["task"]
+        print(f"{proposal['id']}: {task['id']} - {task['title']}")
+        print(f"  intake: {proposal['intake_id']}; status: {proposal['status']}")
+        if task.get("repo"):
+            print(f"  repo: {task['repo']}")
+        if task.get("next_action"):
+            print(f"  next: {task['next_action']}")
+    return 0
+
+
 def command_export(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -375,6 +425,19 @@ def parse_json_object(value: str, label: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError(f"{label} must be a JSON object")
     return parsed
+
+
+def parse_dependency(value: str) -> dict[str, str]:
+    """Parse a proposed task dependency argument."""
+    task_id, separator, description = value.partition(":")
+    task_id = task_id.strip()
+    if not task_id:
+        raise ValueError("dependency must start with a task id")
+    return {
+        "kind": "task",
+        "task": task_id,
+        "description": description.strip() if separator else "",
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -572,6 +635,37 @@ def build_parser() -> argparse.ArgumentParser:
     list_intake.add_argument("--kind", default="")
     list_intake.add_argument("--repo", default="")
     list_intake.set_defaults(func=command_list_intake)
+
+    propose_task = sub.add_parser(
+        "propose-task",
+        help="Create a proposed task contract from an intake record.",
+    )
+    add_common(propose_task)
+    propose_task.add_argument("intake_id")
+    propose_task.add_argument("--proposal-id", default="")
+    propose_task.add_argument("--task-id", required=True)
+    propose_task.add_argument("--title", required=True)
+    propose_task.add_argument("--repo", default="")
+    propose_task.add_argument("--summary", default="")
+    propose_task.add_argument("--next-action", default="")
+    propose_task.add_argument("--role", default="")
+    propose_task.add_argument("--write-scope", action="append", default=[])
+    propose_task.add_argument("--validation-check", action="append", default=[])
+    propose_task.add_argument("--dependency", action="append", default=[])
+    propose_task.add_argument("--authority", default="")
+    propose_task.add_argument("--intervention-need", action="append", default=[])
+    propose_task.add_argument("--notebook-update", action="append", default=[])
+    propose_task.add_argument("--metadata-json", default="{}")
+    propose_task.add_argument("--actor", default="system")
+    propose_task.set_defaults(func=command_propose_task)
+
+    list_proposals = sub.add_parser("list-proposals", help="List proposed task contracts.")
+    add_common(list_proposals)
+    list_proposals.add_argument("--json", action="store_true")
+    list_proposals.add_argument("--limit", type=int, default=0)
+    list_proposals.add_argument("--status", default="")
+    list_proposals.add_argument("--intake-id", default="")
+    list_proposals.set_defaults(func=command_list_proposals)
 
     export = sub.add_parser("export", help="Export project audit snapshot.")
     add_common(export)

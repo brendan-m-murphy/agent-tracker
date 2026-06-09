@@ -1600,6 +1600,183 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     assert listed["intake"][0]["text"] == "Check whether intake is visible."
 
 
+def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> None:
+    """Triage creates proposed task contracts outside live queue state."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage for intake.", kind="feature")
+
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        repo="agent-tracker",
+        summary="Promote intake into reviewed proposed tasks.",
+        next_action="Define the proposal contract.",
+        role="maintainer",
+        write_scopes=["src/agent_tracker/service.py", "tests/test_agent_tracker.py"],
+        validation_checks=["uv run pytest"],
+        requirements=[{"task": "foundation", "description": "Base queue exists."}],
+        authority="local code and docs",
+        intervention_needs=["approval"],
+        notebook_updates=["project-notebook"],
+        metadata={"lane": "planning/intake"},
+        actor="pm",
+    )
+    listed = coord.proposed_task_records(intake_id=intake.intake_id)
+    snapshot = coord.store.snapshot(config.project_id)
+    ready_ids = {state.task.task_id for state in coord.ready_tasks()}
+
+    assert proposal.task.task_id == "add-triage"
+    assert proposal.task.metadata["roles"] == ["maintainer"]
+    assert proposal.task.metadata["write_scopes"] == [
+        "src/agent_tracker/service.py",
+        "tests/test_agent_tracker.py",
+    ]
+    assert proposal.task.metadata["authority"] == "local code and docs"
+    assert proposal.task.metadata["intervention_needs"] == ["approval"]
+    assert proposal.task.metadata["notebook_updates"] == ["project-notebook"]
+    assert proposal.requirements == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+    assert listed == [proposal]
+    assert snapshot["proposed_tasks"][0]["id"] == proposal.proposal_id
+    assert snapshot["proposed_tasks"][0]["task"]["id"] == "add-triage"
+    assert any(
+        audit["action"] == "proposal.record"
+        and audit["actor"] == "pm"
+        and audit["payload"]["proposal_id"] == proposal.proposal_id
+        for audit in snapshot["audit"]
+    )
+    assert "add-triage" not in ready_ids
+    with pytest.raises(ValueError, match="no matching ready task"):
+        coord.claim(agent_id="agent-1", task_id="add-triage")
+
+
+def test_triage_rejects_missing_intake_and_existing_task_id(tmp_path: Path) -> None:
+    """Proposed tasks must come from intake and not collide with live tasks."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add a task.", kind="feature")
+
+    with pytest.raises(ValueError, match="unknown intake"):
+        coord.propose_task_from_intake("missing", task_id="new-task", title="New Task")
+    with pytest.raises(ValueError, match="task already exists"):
+        coord.propose_task_from_intake(
+            intake.intake_id,
+            task_id="ready",
+            title="Duplicate Ready",
+        )
+
+
+def test_import_rejects_task_id_that_is_still_proposed(tmp_path: Path) -> None:
+    """Plain task imports cannot silently promote proposed task contracts."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+    )
+    task_plan = tmp_path / "tasks.json"
+    payload = json.loads(task_plan.read_text(encoding="utf-8"))
+    payload["tasks"].append(
+        {
+            "id": proposal.task.task_id,
+            "title": proposal.task.title,
+            "status": "pending",
+            "requirements": [{"kind": "task", "task": "foundation"}],
+        }
+    )
+    task_plan.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="still proposed"):
+        coord.import_tasks()
+    with pytest.raises(ValueError, match="no matching ready task"):
+        coord.claim(agent_id="agent-1", task_id=proposal.task.task_id)
+
+
+def test_proposed_tasks_are_compatible_with_pre_triage_database(tmp_path: Path) -> None:
+    """Old databases without proposal tables stay readable and can self-upgrade."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute("DROP TABLE proposed_tasks")
+
+    listed_before = coord.proposed_task_records()
+    snapshot_before = coord.store.snapshot(config.project_id)
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+    )
+    listed_after = coord.proposed_task_records()
+
+    assert listed_before == []
+    assert snapshot_before["proposed_tasks"] == []
+    assert listed_after == [proposal]
+
+
+def test_cli_propose_and_list_proposals_json(tmp_path: Path) -> None:
+    """CLI triage records proposed tasks without importing them as live tasks."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "propose-task",
+                "--config",
+                str(config_path),
+                intake.intake_id,
+                "--task-id",
+                "add-triage",
+                "--title",
+                "Add triage workflow",
+                "--repo",
+                "agent-tracker",
+                "--role",
+                "maintainer",
+                "--write-scope",
+                "src/agent_tracker/service.py",
+                "--validation-check",
+                "uv run pytest",
+                "--dependency",
+                "foundation:Base queue exists.",
+                "--authority",
+                "local code and docs",
+            ]
+        )
+
+    proposed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert proposed["task"]["id"] == "add-triage"
+    assert proposed["requirements"] == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-proposals", "--config", str(config_path), "--json"])
+
+    listed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert [proposal["id"] for proposal in listed["proposals"]] == [proposed["id"]]
+    with pytest.raises(ValueError, match="no matching ready task"):
+        Coordinator(load_config(config_path)).claim(agent_id="agent-1", task_id="add-triage")
+
+
 def test_project_root_plugin_loads_from_config_directory(tmp_path: Path) -> None:
     """Configured project plugins can live below the project config directory."""
     old_path = list(sys.path)
