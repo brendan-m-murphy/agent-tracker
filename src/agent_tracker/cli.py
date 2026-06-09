@@ -11,6 +11,7 @@ from typing import Any
 
 from agent_tracker.config import load_config
 from agent_tracker.db import state_to_dict
+from agent_tracker.models import INTEGRATION_STATES
 from agent_tracker.service import Coordinator
 
 
@@ -74,6 +75,8 @@ def command_status(args: argparse.Namespace) -> int:
         print(f"  task source: {payload['task_source_path']}")
     print(f"  ready: {len(payload['ready'])}")
     print(f"  active: {len(payload['active'])}")
+    print(f"  review: {len(payload['review'])}")
+    print(f"  integration: {len(payload['integration'])}")
     print(f"  blocked: {len(payload['blocked'])}")
     return 0
 
@@ -156,6 +159,61 @@ def command_complete(args: argparse.Namespace) -> int:
         agent_id=args.agent,
     )
     print(f"Completed {args.task_id}")
+    return 0
+
+
+def command_submit_review(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    coord.submit_review(
+        args.task_id,
+        lease_token=args.lease_token,
+        evidence=args.evidence,
+        agent_id=args.agent,
+    )
+    print(f"Submitted {args.task_id} for review")
+    return 0
+
+
+def command_await_integration(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    coord.await_integration(
+        args.task_id,
+        lease_token=args.lease_token,
+        status=args.status,
+        evidence=args.evidence,
+        agent_id=args.agent,
+    )
+    print(f"Set {args.task_id} to {args.status}")
+    return 0
+
+
+def command_resolve_review(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    coord.resolve_review(
+        args.task_id,
+        status=args.status,
+        evidence=args.evidence,
+        agent_id=args.agent,
+        reason=args.reason,
+    )
+    print(f"Resolved review for {args.task_id} as {args.status}")
+    return 0
+
+
+def command_resolve_integration(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    coord.resolve_integration(
+        args.task_id,
+        status=args.status,
+        evidence=args.evidence,
+        agent_id=args.agent,
+        reason=args.reason,
+    )
+    print(f"Resolved integration for {args.task_id} as {args.status}")
     return 0
 
 
@@ -265,6 +323,54 @@ def build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--agent", default="")
     complete.add_argument("--evidence", action="append", default=[])
     complete.set_defaults(func=command_complete)
+
+    submit_review = sub.add_parser("submit-review", help="Submit a leased task for review.")
+    add_common(submit_review)
+    submit_review.add_argument("task_id")
+    submit_review.add_argument("--lease-token", required=True)
+    submit_review.add_argument("--agent", default="")
+    submit_review.add_argument("--evidence", action="append", default=[])
+    submit_review.set_defaults(func=command_submit_review)
+
+    await_integration = sub.add_parser(
+        "await-integration",
+        help="Move a leased task to an integration wait state.",
+    )
+    add_common(await_integration)
+    await_integration.add_argument("task_id")
+    await_integration.add_argument("--lease-token", required=True)
+    await_integration.add_argument("--agent", default="")
+    await_integration.add_argument(
+        "--status",
+        choices=sorted(INTEGRATION_STATES),
+        default="awaiting_integration",
+    )
+    await_integration.add_argument("--evidence", action="append", default=[])
+    await_integration.set_defaults(func=command_await_integration)
+
+    resolve_review = sub.add_parser(
+        "resolve-review",
+        help="Resolve a task waiting for review.",
+    )
+    add_common(resolve_review)
+    resolve_review.add_argument("task_id")
+    resolve_review.add_argument("--agent", required=True)
+    resolve_review.add_argument("--status", choices=["done", "failed"], default="done")
+    resolve_review.add_argument("--reason", default="")
+    resolve_review.add_argument("--evidence", action="append", default=[])
+    resolve_review.set_defaults(func=command_resolve_review)
+
+    resolve_integration = sub.add_parser(
+        "resolve-integration",
+        help="Resolve a task waiting for integration.",
+    )
+    add_common(resolve_integration)
+    resolve_integration.add_argument("task_id")
+    resolve_integration.add_argument("--agent", required=True)
+    resolve_integration.add_argument("--status", choices=["done", "failed"], default="done")
+    resolve_integration.add_argument("--reason", default="")
+    resolve_integration.add_argument("--evidence", action="append", default=[])
+    resolve_integration.set_defaults(func=command_resolve_integration)
 
     fail = sub.add_parser("fail", help="Fail a task.")
     add_common(fail)

@@ -234,7 +234,7 @@
       "id": "finish-lifecycle-states",
       "title": "Add review and merge lifecycle states",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 26,
       "prompt_key": "finish-lifecycle-states",
       "prompt_path": "tracking/README.md",

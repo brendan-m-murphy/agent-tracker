@@ -9,7 +9,13 @@ from typing import Any
 
 from agent_tracker.config import ProjectConfig
 from agent_tracker.db import Store, state_to_dict
-from agent_tracker.models import Claim, EventRecord, TaskState
+from agent_tracker.models import (
+    INTEGRATION_STATES,
+    REVIEW_STATES,
+    Claim,
+    EventRecord,
+    TaskState,
+)
 from agent_tracker.plugins import load_plugin
 from agent_tracker.rendering import DefaultPromptRenderer
 
@@ -145,6 +151,139 @@ class Coordinator:
             agent_id=agent_id,
         )
 
+    def submit_review(
+        self,
+        task_id: str,
+        *,
+        lease_token: str,
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+    ) -> None:
+        """Submit a leased task for review without marking it done.
+
+        Args:
+            task_id: Task identifier to transition.
+            lease_token: Current active lease token for the task.
+            evidence: Optional evidence URIs for the review submission.
+            agent_id: Optional agent ID used to validate lease ownership.
+
+        Raises:
+            ValueError: If mutation is refused or the lease is invalid.
+            KeyError: If the task does not exist.
+        """
+        self._ensure_mutation_allowed()
+        self.store.submit_review_task(
+            self.config.project_id,
+            task_id,
+            lease_token=lease_token,
+            evidence=evidence or [],
+            agent_id=agent_id,
+        )
+
+    def await_integration(
+        self,
+        task_id: str,
+        *,
+        lease_token: str,
+        status: str = "awaiting_integration",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+    ) -> None:
+        """Move a leased task to an integration wait state.
+
+        Args:
+            task_id: Task identifier to transition.
+            lease_token: Current active lease token for the task.
+            status: Integration status to set. Must be `awaiting_pr`,
+                `awaiting_merge`, or `awaiting_integration`.
+            evidence: Optional evidence URIs for the integration handoff.
+            agent_id: Optional agent ID used to validate lease ownership.
+
+        Raises:
+            ValueError: If mutation is refused, the lease is invalid, or the
+                requested status is not an integration wait state.
+            KeyError: If the task does not exist.
+        """
+        self._ensure_mutation_allowed()
+        self.store.await_integration_task(
+            self.config.project_id,
+            task_id,
+            lease_token=lease_token,
+            status=status,
+            evidence=evidence or [],
+            agent_id=agent_id,
+        )
+
+    def resolve_review(
+        self,
+        task_id: str,
+        *,
+        status: str = "done",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> None:
+        """Resolve a task waiting for review.
+
+        Args:
+            task_id: Task identifier to resolve.
+            status: Terminal status to set. Must be `done` or `failed`.
+            evidence: Optional evidence URIs for the resolution.
+            agent_id: Actor resolving the review.
+            reason: Failure reason when resolving as `failed`.
+
+        Raises:
+            ValueError: If mutation is refused, the task is not awaiting review,
+                or the resolution status is invalid.
+            KeyError: If the task does not exist.
+        """
+        self._ensure_mutation_allowed()
+        if not agent_id.strip():
+            raise ValueError("agent is required when resolving review state")
+        self.store.resolve_review_task(
+            self.config.project_id,
+            task_id,
+            status=status,
+            evidence=evidence or [],
+            agent_id=agent_id,
+            reason=reason,
+        )
+
+    def resolve_integration(
+        self,
+        task_id: str,
+        *,
+        status: str = "done",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> None:
+        """Resolve a task waiting for integration.
+
+        Args:
+            task_id: Task identifier to resolve.
+            status: Terminal status to set. Must be `done` or `failed`.
+            evidence: Optional evidence URIs for the resolution.
+            agent_id: Actor resolving the integration wait.
+            reason: Failure reason when resolving as `failed`.
+
+        Raises:
+            ValueError: If mutation is refused, the task is not awaiting
+                integration, or the resolution status is invalid.
+            KeyError: If the task does not exist.
+        """
+        self._ensure_mutation_allowed()
+        if not agent_id.strip():
+            raise ValueError("agent is required when resolving integration state")
+        self.store.resolve_integration_task(
+            self.config.project_id,
+            task_id,
+            status=status,
+            evidence=evidence or [],
+            agent_id=agent_id,
+            reason=reason,
+        )
+
     def record_evidence(self, task_id: str, uri: str, *, actor: str = "system") -> bool:
         """Record evidence for a task."""
         self._ensure_mutation_allowed()
@@ -256,6 +395,10 @@ class Coordinator:
                 state.task.task_id
                 for state in states
                 if state.state in {"claimed", "in_progress", "waiting_evidence"}
+            ],
+            "review": [state.task.task_id for state in states if state.state in REVIEW_STATES],
+            "integration": [
+                state.task.task_id for state in states if state.state in INTEGRATION_STATES
             ],
             "blocked": [state.task.task_id for state in states if state.state == "blocked"],
         }

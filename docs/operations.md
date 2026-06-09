@@ -80,6 +80,8 @@ The JSON payload contains:
 - `tasks`: all evaluated task states;
 - `ready`: ready task IDs;
 - `active`: claimed, in-progress, or waiting-evidence task IDs;
+- `review`: task IDs waiting for review evidence;
+- `integration`: task IDs waiting for PR, merge, or integration evidence;
 - `blocked`: blocked task IDs;
 - `db_path`: resolved SQLite path.
 
@@ -230,8 +232,8 @@ handled outside a PR:
 
 Local validation output and file paths are useful supporting evidence, but they
 are not enough by themselves for tasks that modify repository files. If
-integration is blocked, keep the task active with heartbeats or fail it with an
-actionable reason instead of marking it complete.
+review or integration evidence is pending, use `submit-review` or
+`await-integration` instead of marking the task complete.
 
 SQLite remains the canonical live queue state. Git commits and GitHub PRs are
 evidence and review surfaces for closeout; do not use them as live coordination
@@ -254,6 +256,57 @@ or bounded summaries over large raw outputs.
 Completing a task clears its lease. Downstream pending tasks become ready after
 their dependencies are done.
 
+## Await Review Or Integration
+
+When implementation work is finished but the task is not done yet, release the
+active lease into an explicit non-terminal queue state. This prevents the task
+from being reclaimed as active work while preserving that dependencies are not
+satisfied until the task is `done`.
+
+Submit work for review:
+
+```bash
+agent-tracker submit-review --config project.json write-readme \
+  --lease-token <lease-token> \
+  --agent agent-1 \
+  --evidence "git:<branch-commit>" \
+  --evidence "pr:https://github.com/org/repo/pull/123"
+```
+
+Wait for PR, merge, or another integration step:
+
+```bash
+agent-tracker await-integration --config project.json write-readme \
+  --lease-token <lease-token> \
+  --agent agent-1 \
+  --status awaiting_merge \
+  --evidence "pr:https://github.com/org/repo/pull/123"
+```
+
+`await-integration` defaults to `awaiting_integration`; `--status` can be
+`awaiting_pr`, `awaiting_merge`, or `awaiting_integration`. These transitions
+record evidence, write audit entries, and clear lease fields. They do not unblock
+dependents.
+
+After review or integration is finished, a reviewer or trusted manager resolves
+the waiting task without a lease token:
+
+```bash
+agent-tracker resolve-review --config project.json write-readme \
+  --agent reviewer-1 \
+  --evidence "review:approved"
+
+agent-tracker resolve-integration --config project.json write-readme \
+  --agent reviewer-1 \
+  --evidence "git:<main-commit>"
+```
+
+Both resolver commands default to `--status done`. To resolve the waiting task
+as failed, pass `--status failed --reason "<short reason>"`. A task is stranded
+if it is moved to an awaiting state and never resolved, so reviewers and
+managers should treat these resolver commands as the normal closeout path for
+reviewable work.
+
 For branch-backed local work with the trusted-manager direct-merge override, a
 typical flow is:
 
@@ -273,9 +326,10 @@ agent-tracker complete --config tracking/project.json write-readme \
 ```
 
 If `main` cannot be updated directly, open a PR and use `pr:<url>` evidence
-instead of marking the task complete from an isolated worktree. Agents that do
-not have explicit direct-merge authority should also open a PR or leave an
-equivalent review state before completion.
+with `submit-review` or `await-integration` instead of marking the task complete
+from an isolated worktree. Agents that do not have explicit direct-merge
+authority should also open a PR or leave an equivalent review state before
+completion.
 
 When the committed task plan is the authoritative source, include the terminal
 task-plan status update in the integrated branch and use
@@ -437,6 +491,33 @@ agent-tracker complete --config project.json <task-id> \
   --agent <agent-id> \
   --evidence "git:<branch-or-main-commit>" \
   --evidence "file:<path>"
+```
+
+If implementation is done but review or integration evidence is still pending:
+
+```bash
+agent-tracker submit-review --config project.json <task-id> \
+  --lease-token <lease-token> \
+  --agent <agent-id> \
+  --evidence "git:<branch-commit>"
+
+agent-tracker await-integration --config project.json <task-id> \
+  --lease-token <lease-token> \
+  --agent <agent-id> \
+  --status awaiting_pr \
+  --evidence "git:<branch-commit>"
+```
+
+After review or integration is finished:
+
+```bash
+agent-tracker resolve-review --config project.json <task-id> \
+  --agent <reviewer-or-manager> \
+  --evidence "review:approved"
+
+agent-tracker resolve-integration --config project.json <task-id> \
+  --agent <reviewer-or-manager> \
+  --evidence "git:<main-commit>"
 ```
 
 If blocked after investigation:

@@ -238,6 +238,10 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `claim` | Atomically claim a ready task and create a lease token. | `agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200` |
 | `heartbeat` | Extend a live lease and mark the task `in_progress`. | `agent-tracker heartbeat --config demo-tracker/project.json write-readme --lease-token <token> --agent agent-1` |
 | `complete` | Mark a leased task `done` and record evidence URIs. | `agent-tracker complete --config demo-tracker/project.json write-readme --lease-token <token> --evidence "git:<branch-sha>" --evidence "pr:<url>"` |
+| `submit-review` | Move a leased task into review wait state. | `agent-tracker submit-review --config demo-tracker/project.json write-readme --lease-token <token> --agent agent-1 --evidence "pr:<url>"` |
+| `await-integration` | Move a leased task into PR, merge, or integration wait state. | `agent-tracker await-integration --config demo-tracker/project.json write-readme --lease-token <token> --agent agent-1 --status awaiting_merge` |
+| `resolve-review` | Resolve a task waiting for review as `done` or `failed`. | `agent-tracker resolve-review --config demo-tracker/project.json write-readme --agent reviewer --evidence "review:approved"` |
+| `resolve-integration` | Resolve a task waiting for integration as `done` or `failed`. | `agent-tracker resolve-integration --config demo-tracker/project.json write-readme --agent reviewer --evidence "git:<main-sha>"` |
 | `fail` | Mark a leased task `failed` with a reason. | `agent-tracker fail --config demo-tracker/project.json write-readme --lease-token <token> --reason "validation failed"` |
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |

@@ -97,6 +97,119 @@ class AgentTrackerTools:
         )
         return {"ok": True}
 
+    def submit_review_task(
+        self,
+        task_id: str,
+        lease_token: str,
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+    ) -> dict[str, bool]:
+        """Submit a leased task for review.
+
+        Args:
+            task_id: Task identifier to transition.
+            lease_token: Current active lease token for the task.
+            evidence: Optional evidence URIs to attach to the handoff.
+            agent_id: Optional agent ID used to validate lease ownership.
+
+        Returns:
+            A JSON-friendly success payload.
+        """
+        self.coordinator.submit_review(
+            task_id,
+            lease_token=lease_token,
+            evidence=evidence or [],
+            agent_id=agent_id,
+        )
+        return {"ok": True}
+
+    def await_integration_task(
+        self,
+        task_id: str,
+        lease_token: str,
+        status: str = "awaiting_integration",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+    ) -> dict[str, bool]:
+        """Move a leased task to an integration wait state.
+
+        Args:
+            task_id: Task identifier to transition.
+            lease_token: Current active lease token for the task.
+            status: Integration wait status to set.
+            evidence: Optional evidence URIs to attach to the handoff.
+            agent_id: Optional agent ID used to validate lease ownership.
+
+        Returns:
+            A JSON-friendly success payload.
+        """
+        self.coordinator.await_integration(
+            task_id,
+            lease_token=lease_token,
+            status=status,
+            evidence=evidence or [],
+            agent_id=agent_id,
+        )
+        return {"ok": True}
+
+    def resolve_review_task(
+        self,
+        task_id: str,
+        status: str = "done",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> dict[str, bool]:
+        """Resolve a task waiting for review.
+
+        Args:
+            task_id: Task identifier to resolve.
+            status: Terminal status to set. Must be `done` or `failed`.
+            evidence: Optional evidence URIs to attach to the resolution.
+            agent_id: Actor resolving the review.
+            reason: Failure reason when resolving as `failed`.
+
+        Returns:
+            A JSON-friendly success payload.
+        """
+        self.coordinator.resolve_review(
+            task_id,
+            status=status,
+            evidence=evidence or [],
+            agent_id=agent_id,
+            reason=reason,
+        )
+        return {"ok": True}
+
+    def resolve_integration_task(
+        self,
+        task_id: str,
+        status: str = "done",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> dict[str, bool]:
+        """Resolve a task waiting for integration.
+
+        Args:
+            task_id: Task identifier to resolve.
+            status: Terminal status to set. Must be `done` or `failed`.
+            evidence: Optional evidence URIs to attach to the resolution.
+            agent_id: Actor resolving the integration wait.
+            reason: Failure reason when resolving as `failed`.
+
+        Returns:
+            A JSON-friendly success payload.
+        """
+        self.coordinator.resolve_integration(
+            task_id,
+            status=status,
+            evidence=evidence or [],
+            agent_id=agent_id,
+            reason=reason,
+        )
+        return {"ok": True}
+
     def fail_task(
         self,
         task_id: str,

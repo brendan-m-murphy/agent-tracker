@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
@@ -17,6 +17,7 @@ from agent_tracker import cli  # noqa: E402
 from agent_tracker.config import SUPPORTED_CONFIG_SCHEMA_VERSION, load_config  # noqa: E402
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
+from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import install_skill, vendored_skill_path  # noqa: E402
 
@@ -162,6 +163,44 @@ def test_import_evaluates_ready_blocked_and_deferred_tasks(tmp_path: Path) -> No
     assert states["deferred"].state == "deferred"
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "waiting_evidence",
+        "awaiting_review",
+        "awaiting_pr",
+        "awaiting_merge",
+        "awaiting_integration",
+    ],
+)
+def test_imported_non_ready_statuses_compute_to_themselves(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    """Imported active and awaiting statuses remain explicit queue states."""
+    config_path = write_project(tmp_path)
+    task_plan = tmp_path / "tasks.json"
+    data = json.loads(task_plan.read_text(encoding="utf-8"))
+    for raw_task in data["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["status"] = status
+    task_plan.write_text(json.dumps(data), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    payload = coord.status_payload()
+    ready_state = next(task for task in payload["tasks"] if task["id"] == "ready")
+
+    assert ready_state["state"] == status
+    assert ready_state["manual_status"] == status
+    assert "ready" not in payload["ready"]
+    assert "ready" not in payload["blocked"]
+    if status == "waiting_evidence":
+        assert "ready" in payload["active"]
+    else:
+        assert "ready" not in payload["active"]
+
+
 def test_claim_heartbeat_complete_and_unblock_downstream(tmp_path: Path) -> None:
     """Claimed work can be heartbeated, completed, and unblock dependents."""
     config = load_config(write_project(tmp_path))
@@ -181,6 +220,188 @@ def test_claim_heartbeat_complete_and_unblock_downstream(tmp_path: Path) -> None
     assert states["ready"].state == "done"
     assert states["ready"].evidence == ["evidence://ready"]
     assert states["blocked"].state == "ready"
+
+
+def test_submit_review_clears_lease_records_evidence_and_preserves_blocking(
+    tmp_path: Path,
+) -> None:
+    """Review submission is lease-gated, audited, and non-terminal."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    coord.submit_review(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["evidence://review", "evidence://review"],
+    )
+    states = {state.task.task_id: state for state in coord.task_states()}
+    payload = coord.status_payload()
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert states["ready"].state == "awaiting_review"
+    assert states["ready"].lease_token == ""
+    assert states["ready"].lease_agent_id == ""
+    assert states["ready"].lease_expires_at == ""
+    assert states["ready"].evidence == ["evidence://review"]
+    assert states["blocked"].state == "blocked"
+    assert payload["review"] == ["ready"]
+    assert payload["integration"] == []
+    assert "ready" not in payload["active"]
+    assert any(audit["action"] == "task.submit_review" for audit in snapshot["audit"])
+    assert "evidence://review" in {
+        evidence for task in snapshot["tasks"] for evidence in task["evidence"]
+    }
+    with pytest.raises(ValueError, match="not active"):
+        coord.heartbeat("ready", lease_token=claim.lease_token, agent_id="agent-1")
+    with pytest.raises(ValueError, match="not active"):
+        coord.complete("ready", lease_token=claim.lease_token, agent_id="agent-1")
+    with pytest.raises(ValueError, match="not active"):
+        coord.fail(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            reason="old token",
+        )
+
+
+@pytest.mark.parametrize("status", sorted(INTEGRATION_STATES))
+def test_await_integration_statuses_clear_lease_and_do_not_unblock(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    """Integration wait states are non-terminal and keep dependents blocked."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    coord.await_integration(
+        "ready",
+        lease_token=claim.lease_token,
+        status=status,
+        agent_id="agent-1",
+        evidence=[f"evidence://{status}"],
+    )
+    states = {state.task.task_id: state for state in coord.task_states()}
+    payload = coord.status_payload()
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert states["ready"].state == status
+    assert states["ready"].lease_token == ""
+    assert states["ready"].evidence == [f"evidence://{status}"]
+    assert states["blocked"].state == "blocked"
+    assert payload["integration"] == ["ready"]
+    assert payload["review"] == []
+    assert "ready" not in payload["active"]
+    assert any(
+        audit["action"] == "task.await_integration" and audit["payload"]["status"] == status
+        for audit in snapshot["audit"]
+    )
+
+
+def test_await_integration_defaults_to_generic_status(tmp_path: Path) -> None:
+    """The integration handoff defaults to awaiting_integration."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    coord.await_integration("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    assert coord.get_task("ready").state == "awaiting_integration"
+
+
+def test_resolve_review_completes_waiting_task_and_unblocks_dependents(
+    tmp_path: Path,
+) -> None:
+    """Review resolution finalizes an awaiting task without a lease token."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["evidence://review"],
+    )
+
+    coord.resolve_review(
+        "ready",
+        status="done",
+        agent_id="reviewer-1",
+        evidence=["evidence://approval"],
+    )
+    states = {state.task.task_id: state for state in coord.task_states()}
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert states["ready"].state == "done"
+    assert set(states["ready"].evidence) == {"evidence://review", "evidence://approval"}
+    assert states["blocked"].state == "ready"
+    assert any(
+        audit["action"] == "task.resolve_review"
+        and audit["actor"] == "reviewer-1"
+        and audit["payload"]["from_status"] == "awaiting_review"
+        and audit["payload"]["status"] == "done"
+        for audit in snapshot["audit"]
+    )
+
+
+def test_resolve_integration_can_fail_waiting_task_with_reason(tmp_path: Path) -> None:
+    """Integration resolution can fail an awaiting task with a durable reason."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.await_integration(
+        "ready",
+        lease_token=claim.lease_token,
+        status="awaiting_merge",
+        agent_id="agent-1",
+        evidence=["evidence://pr"],
+    )
+
+    coord.resolve_integration(
+        "ready",
+        status="failed",
+        reason="merge conflict",
+        agent_id="reviewer-1",
+        evidence=["evidence://conflict"],
+    )
+    states = {state.task.task_id: state for state in coord.task_states()}
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert states["ready"].state == "failed"
+    assert states["blocked"].state == "blocked"
+    assert any(
+        audit["action"] == "task.resolve_integration"
+        and audit["payload"]["reason"] == "merge conflict"
+        and audit["payload"]["status"] == "failed"
+        for audit in snapshot["audit"]
+    )
+
+
+def test_resolve_awaiting_requires_matching_state_and_failure_reason(
+    tmp_path: Path,
+) -> None:
+    """Awaiting resolvers reject wrong source states and incomplete failures."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="awaiting_review"):
+        coord.resolve_review("ready", agent_id="reviewer-1")
+
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    with pytest.raises(ValueError, match="agent is required"):
+        coord.resolve_review("ready")
+    with pytest.raises(ValueError, match="reason is required"):
+        coord.resolve_review("ready", status="failed", agent_id="reviewer-1")
 
 
 def test_database_schema_metadata_is_created(tmp_path: Path) -> None:
@@ -217,10 +438,81 @@ def test_stale_claim_is_recovered(tmp_path: Path) -> None:
             """,
             ("2000-01-01T00:00:00+00:00", config.project_id, "ready"),
         )
-    recovered = coord.get_task("ready")
+    inspected = coord.get_task("ready")
+    recovered = coord.get_task("ready", recover_stale_leases=True)
 
+    assert inspected.state == "ready"
+    assert inspected.lease_token == ""
     assert recovered.state == "ready"
     assert recovered.lease_token == ""
+
+
+def test_stale_waiting_evidence_lease_is_recovered(tmp_path: Path) -> None:
+    """Waiting-evidence remains an active lease state for stale recovery."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?, lease_expires_at = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            ("waiting_evidence", "2000-01-01T00:00:00+00:00", config.project_id, "ready"),
+        )
+
+    inspected = coord.get_task("ready")
+    recovered = coord.get_task("ready", recover_stale_leases=True)
+    with coord.store.transaction(read_only=True) as conn:
+        row = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+
+    assert claim.lease_token
+    assert inspected.state == "ready"
+    assert inspected.lease_token == ""
+    assert recovered.state == "ready"
+    assert recovered.lease_token == ""
+    assert row["status"] == "pending"
+    assert row["lease_token"] == ""
+
+
+def test_awaiting_states_are_not_recovered_as_stale_leases(tmp_path: Path) -> None:
+    """Lease-free awaiting states are unaffected by stale lease recovery."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    state = coord.get_task("ready", recover_stale_leases=True)
+
+    assert state.state == "awaiting_review"
+    assert state.lease_token == ""
+
+
+def test_awaiting_and_waiting_evidence_states_are_not_claimable(tmp_path: Path) -> None:
+    """Explicit active and awaiting statuses are excluded from claim selection."""
+    for status in sorted(REVIEW_STATES | INTEGRATION_STATES | {"waiting_evidence"}):
+        project_root = tmp_path / status
+        project_root.mkdir()
+        config_path = write_project(project_root)
+        task_plan = project_root / "tasks.json"
+        data = json.loads(task_plan.read_text(encoding="utf-8"))
+        data["tasks"] = [
+            {**raw_task, "status": status} if raw_task["id"] == "ready" else raw_task
+            for raw_task in data["tasks"]
+            if raw_task["id"] in {"foundation", "ready"}
+        ]
+        task_plan.write_text(json.dumps(data), encoding="utf-8")
+        coord = Coordinator(load_config(config_path))
+        coord.import_tasks()
+
+        with pytest.raises(ValueError, match="no matching ready task"):
+            coord.claim(agent_id="agent-1", task_id="ready")
 
 
 def test_lease_validation_rejects_nonpositive_duration_and_wrong_agent(tmp_path: Path) -> None:
@@ -278,6 +570,31 @@ def test_reimport_preserves_live_lease_but_clears_when_source_is_terminal(
     assert completed.state == "done"
     assert completed.lease_token == ""
     assert completed.lease_agent_id == ""
+
+
+def test_reimport_reconciles_new_nonterminal_statuses_explicitly(tmp_path: Path) -> None:
+    """Definition imports preserve live awaiting states unless reconciliation is explicit."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    task_plan = tmp_path / "tasks.json"
+    data = json.loads(task_plan.read_text(encoding="utf-8"))
+    for raw_task in data["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["status"] = "awaiting_pr"
+    task_plan.write_text(json.dumps(data), encoding="utf-8")
+    coord.import_tasks()
+    preserved = coord.get_task("ready")
+    coord.import_tasks(reconcile_runtime_state=True)
+    reconciled = coord.get_task("ready")
+
+    assert preserved.state == "awaiting_review"
+    assert reconciled.state == "awaiting_pr"
+    assert reconciled.lease_token == ""
 
 
 def test_import_removes_tasks_deleted_from_source_only_when_reconciling(tmp_path: Path) -> None:
@@ -517,6 +834,64 @@ def test_mcp_handlers_claim_and_complete(tmp_path: Path) -> None:
     assert ready_state["evidence"] == ["evidence://ready"]
 
 
+def test_mcp_handlers_submit_review_and_await_integration(tmp_path: Path) -> None:
+    """MCP-friendly handlers expose review and integration handoff operations."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+
+    review_claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+    tools.submit_review_task(
+        task_id="ready",
+        lease_token=review_claim["lease_token"],
+        evidence=["evidence://review"],
+        agent_id="agent-1",
+    )
+    tools.resolve_review_task(
+        task_id="ready",
+        evidence=["evidence://approval"],
+        agent_id="reviewer-1",
+    )
+    review_status = tools.get_task_context("ready")
+
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'pending'
+            WHERE project_id = ? AND task_id = ?
+            """,
+            (config.project_id, "ready"),
+        )
+    integration_claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+    tools.await_integration_task(
+        task_id="ready",
+        lease_token=integration_claim["lease_token"],
+        status="awaiting_merge",
+        evidence=["evidence://merge"],
+        agent_id="agent-1",
+    )
+    tools.resolve_integration_task(
+        task_id="ready",
+        status="failed",
+        reason="merge failed",
+        evidence=["evidence://failure"],
+        agent_id="reviewer-1",
+    )
+    integration_status = tools.get_task_context("ready")
+
+    assert review_status["state"] == "done"
+    assert integration_status["state"] == "failed"
+    assert set(integration_status["evidence"]) == {
+        "evidence://review",
+        "evidence://approval",
+        "evidence://merge",
+        "evidence://failure",
+    }
+
+
 def test_mcp_ready_task_limit_rejects_negative_values(tmp_path: Path) -> None:
     """MCP handlers expose service validation for invalid limits."""
     config_path = write_project(tmp_path)
@@ -527,6 +902,149 @@ def test_mcp_ready_task_limit_rejects_negative_values(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="greater than or equal to zero"):
         tools.list_ready_tasks(limit=-1)
+
+
+def test_cli_submit_review_updates_state_and_records_repeated_evidence(
+    tmp_path: Path,
+) -> None:
+    """CLI submit-review parses lease, agent, task ID, and repeatable evidence."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "submit-review",
+                "--config",
+                str(config_path),
+                "ready",
+                "--lease-token",
+                claim.lease_token,
+                "--agent",
+                "agent-1",
+                "--evidence",
+                "evidence://one",
+                "--evidence",
+                "evidence://two",
+            ]
+        )
+    state = coord.get_task("ready")
+
+    assert code == 0
+    assert "Submitted ready for review" in stdout.getvalue()
+    assert state.state == "awaiting_review"
+    assert state.evidence == ["evidence://one", "evidence://two"]
+
+
+def test_cli_submit_review_reports_validation_errors_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """CLI submit-review reports invalid lease ownership concisely."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "submit-review",
+                "--config",
+                str(config_path),
+                "ready",
+                "--lease-token",
+                claim.lease_token,
+                "--agent",
+                "agent-2",
+                "--evidence",
+                "evidence://review",
+            ]
+        )
+
+    assert code == 1
+    assert "different agent" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_cli_resolve_review_completes_waiting_task(tmp_path: Path) -> None:
+    """CLI resolve-review finalizes a task waiting for review."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.submit_review("ready", lease_token=claim.lease_token, agent_id="agent-1")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "resolve-review",
+                "--config",
+                str(config_path),
+                "ready",
+                "--agent",
+                "reviewer-1",
+                "--evidence",
+                "evidence://approval",
+            ]
+        )
+    state = coord.get_task("ready")
+
+    assert code == 0
+    assert "Resolved review for ready as done" in stdout.getvalue()
+    assert state.state == "done"
+    assert state.evidence == ["evidence://approval"]
+
+
+def test_cli_resolve_integration_requires_failure_reason_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """CLI resolve-integration reports missing failure reasons concisely."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.await_integration("ready", lease_token=claim.lease_token, agent_id="agent-1")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "resolve-integration",
+                "--config",
+                str(config_path),
+                "ready",
+                "--agent",
+                "reviewer-1",
+                "--status",
+                "failed",
+            ]
+        )
+
+    assert code == 1
+    assert "reason is required" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_mcp_resolvers_require_actor_identity(tmp_path: Path) -> None:
+    """Lease-free MCP resolver paths require durable actor identity."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+    tools.submit_review_task("ready", lease_token=claim["lease_token"], agent_id="agent-1")
+
+    with pytest.raises(ValueError, match="agent is required"):
+        tools.resolve_review_task("ready")
 
 
 def test_cli_reports_validation_errors_without_traceback(tmp_path: Path) -> None:

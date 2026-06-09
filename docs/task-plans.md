@@ -73,10 +73,21 @@ Valid imported statuses:
 - `claimed`: Active work with a lease.
 - `in_progress`: Active work after a heartbeat.
 - `waiting_evidence`: Active work waiting on external evidence.
+- `awaiting_review`: Implementation finished and waiting for review evidence.
+- `awaiting_pr`: Implementation finished and waiting for a PR or equivalent
+  review surface.
+- `awaiting_merge`: Reviewable work is waiting to be merged or otherwise
+  integrated.
+- `awaiting_integration`: Implementation finished and waiting for other
+  project-defined integration evidence.
 - `done`: Completed task.
 - `failed`: Failed task.
 - `deferred`: Not ready for automatic claim.
 - `cancelled`: Terminal task that will not run.
+
+The `awaiting_*` states are non-terminal and not claimable. They clear any live
+lease when set through the queue commands so another agent does not reclaim the
+same implementation work while review or integration evidence is pending.
 
 Computed states:
 
@@ -104,7 +115,9 @@ Only task dependencies are supported by the built-in JSON importer today:
 ```
 
 A dependency is satisfied only when the dependency task's stored status is
-`done`. When a completed dependency unblocks downstream work, the downstream
+`done`. Review and integration states such as `awaiting_review`,
+`awaiting_pr`, `awaiting_merge`, and `awaiting_integration` do not unblock
+dependents. When a completed dependency unblocks downstream work, the downstream
 task appears in `next`.
 
 Imports validate that:
@@ -177,20 +190,23 @@ Importing synchronizes the live SQLite state with the task plan:
 agent-tracker import --config project.json
 ```
 
-During import:
+During the default definition-only import:
 
 - task rows are inserted or updated;
 - dependencies are replaced with the imported dependency set;
-- tasks removed from the task plan are removed from live state;
 - evidence listed on a task is inserted if not already present;
-- live leases are preserved when the imported task remains active or `pending`;
-- terminal imported statuses such as `done`, `failed`, or `cancelled` clear any
-  live lease.
+- existing runtime status, leases, evidence, audit entries, and tasks absent
+  from the source are preserved.
 
-Do not delete task entries casually. The import is authoritative for the active
-task set and for imported manual statuses. If live SQLite state says a task is
-`done` but the imported task plan still says `pending`, the next import can
-reopen that task as pending.
+When `import --reconcile-runtime-state` is used, imported statuses and removals
+are applied deliberately. Imported statuses outside active work, including
+`awaiting_review`, `awaiting_pr`, `awaiting_merge`, `awaiting_integration`,
+`done`, `failed`, and `cancelled`, clear any live lease during reconciliation.
+
+Do not delete task entries casually. Runtime reconciliation is authoritative for
+the active task set and for imported manual statuses. If live SQLite state says a
+task is `done` but the imported task plan still says `pending`,
+`import --reconcile-runtime-state` can reopen that task as pending.
 
 When a task changes tracked code, docs, config, tests, or task plans, do not
 mark it complete until the closeout is branch-backed and reviewable. By

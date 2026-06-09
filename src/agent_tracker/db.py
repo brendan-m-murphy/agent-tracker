@@ -15,7 +15,9 @@ from typing import Any
 from agent_tracker.config import ProjectConfig
 from agent_tracker.models import (
     ACTIVE_STATES,
+    INTEGRATION_STATES,
     MANUAL_STATES,
+    REVIEW_STATES,
     Claim,
     DependencyRecord,
     EventRecord,
@@ -673,6 +675,123 @@ class Store:
             payload={"reason": reason},
         )
 
+    def submit_review_task(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        lease_token: str,
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+    ) -> None:
+        """Move a leased task to review and clear its lease.
+
+        Args:
+            project_id: Project that owns the task.
+            task_id: Task identifier to transition.
+            lease_token: Current active lease token for the task.
+            evidence: Optional evidence URIs to attach to the handoff.
+            agent_id: Optional agent ID used to validate lease ownership.
+
+        Raises:
+            KeyError: If the task does not exist.
+            ValueError: If the lease token is missing, expired, invalid, or
+                belongs to a different agent.
+        """
+        self._finish_task(
+            project_id,
+            task_id,
+            lease_token=lease_token,
+            status="awaiting_review",
+            action="task.submit_review",
+            evidence=evidence or [],
+            agent_id=agent_id,
+        )
+
+    def await_integration_task(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        lease_token: str,
+        status: str = "awaiting_integration",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+    ) -> None:
+        """Move a leased task to an integration wait state and clear its lease.
+
+        Args:
+            project_id: Project that owns the task.
+            task_id: Task identifier to transition.
+            lease_token: Current active lease token for the task.
+            status: Integration wait status to set.
+            evidence: Optional evidence URIs to attach to the handoff.
+            agent_id: Optional agent ID used to validate lease ownership.
+
+        Raises:
+            KeyError: If the task does not exist.
+            ValueError: If `status` is not an integration wait state, or if the
+                lease token is missing, expired, invalid, or belongs to a
+                different agent.
+        """
+        if status not in INTEGRATION_STATES:
+            allowed = ", ".join(sorted(INTEGRATION_STATES))
+            raise ValueError(f"integration status must be one of: {allowed}")
+        self._finish_task(
+            project_id,
+            task_id,
+            lease_token=lease_token,
+            status=status,
+            action="task.await_integration",
+            evidence=evidence or [],
+            agent_id=agent_id,
+            payload={"status": status},
+        )
+
+    def resolve_review_task(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        status: str = "done",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> None:
+        """Resolve a review-waiting task without requiring an active lease."""
+        self._resolve_awaiting_task(
+            project_id,
+            task_id,
+            allowed_current_statuses=REVIEW_STATES,
+            status=status,
+            action="task.resolve_review",
+            evidence=evidence or [],
+            agent_id=agent_id,
+            reason=reason,
+        )
+
+    def resolve_integration_task(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        status: str = "done",
+        evidence: list[str] | None = None,
+        agent_id: str = "",
+        reason: str = "",
+    ) -> None:
+        """Resolve an integration-waiting task without requiring an active lease."""
+        self._resolve_awaiting_task(
+            project_id,
+            task_id,
+            allowed_current_statuses=INTEGRATION_STATES,
+            status=status,
+            action="task.resolve_integration",
+            evidence=evidence or [],
+            agent_id=agent_id,
+            reason=reason,
+        )
+
     def record_event(self, project_id: str, event: EventRecord, *, actor: str = "system") -> bool:
         """Record an event idempotently. Return True if inserted."""
         with self.transaction(immediate=True) as conn:
@@ -818,6 +937,72 @@ class Store:
                 action,
                 actor,
                 {"evidence": evidence, **(payload or {})},
+            )
+
+    def _resolve_awaiting_task(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        allowed_current_statuses: set[str],
+        status: str,
+        action: str,
+        evidence: list[str],
+        agent_id: str,
+        reason: str = "",
+    ) -> None:
+        if status not in {"done", "failed"}:
+            raise ValueError("resolution status must be one of: done, failed")
+        if status == "failed" and not reason:
+            raise ValueError("reason is required when resolving a task as failed")
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE project_id = ? AND task_id = ?",
+                (project_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown task: {task_id}")
+            current_status = str(row["status"])
+            if current_status not in allowed_current_statuses:
+                allowed = ", ".join(sorted(allowed_current_statuses))
+                raise ValueError(
+                    f"task must be in one of {allowed} to resolve; "
+                    f"current status is {current_status}"
+                )
+            conn.execute(
+                """
+                UPDATE tasks SET
+                    status = ?,
+                    lease_agent_id = '',
+                    lease_token = '',
+                    lease_expires_at = '',
+                    claimed_at = '',
+                    updated_at = ?
+                WHERE project_id = ? AND task_id = ?
+                """,
+                (status, now, project_id, task_id),
+            )
+            for uri in evidence:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence (project_id, task_id, uri, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (project_id, task_id, uri, now),
+                )
+            self._audit(
+                conn,
+                project_id,
+                task_id,
+                action,
+                agent_id or "system",
+                {
+                    "from_status": current_status,
+                    "status": status,
+                    "evidence": evidence,
+                    **({"reason": reason} if reason else {}),
+                },
             )
 
     def _locked_task(

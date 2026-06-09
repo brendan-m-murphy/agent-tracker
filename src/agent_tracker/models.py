@@ -10,6 +10,10 @@ MANUAL_STATES = {
     "claimed",
     "in_progress",
     "waiting_evidence",
+    "awaiting_review",
+    "awaiting_pr",
+    "awaiting_merge",
+    "awaiting_integration",
     "done",
     "failed",
     "deferred",
@@ -17,6 +21,9 @@ MANUAL_STATES = {
 }
 
 ACTIVE_STATES = {"claimed", "in_progress", "waiting_evidence"}
+REVIEW_STATES = {"awaiting_review"}
+INTEGRATION_STATES = {"awaiting_pr", "awaiting_merge", "awaiting_integration"}
+AWAITING_STATES = REVIEW_STATES | INTEGRATION_STATES
 TERMINAL_STATES = {"done", "failed", "cancelled"}
 
 
