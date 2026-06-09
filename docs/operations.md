@@ -141,6 +141,8 @@ Human overview output wraps long task titles, blockers, next actions, evidence,
 and completion details at a standard terminal width. Wrapped task titles use a
 distinct continuation indent so they do not read like `next`, `blocker`, or
 other detail fields. JSON output is unchanged and should be used for automation.
+See `docs/research/2026-06-09-cli-tui-helper-evaluation.md` before adding a
+runtime dependency for richer human output or TUI behavior.
 
 Use JSON output for automation:
 
