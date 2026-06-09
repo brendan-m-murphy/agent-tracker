@@ -2011,9 +2011,9 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
         code = cli.main(
             [
                 "intake",
-                "record",
                 "--config",
                 str(config_path),
+                "record",
                 "--kind",
                 "feature",
                 "--repo",
@@ -2036,9 +2036,9 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
         code = cli.main(
             [
                 "intake",
-                "list",
                 "--config",
                 str(config_path),
+                "list",
                 "--json",
                 "--kind",
                 "feature",
@@ -2093,7 +2093,8 @@ def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
     assert code == 0
     for status, record in records.items():
         assert f"{record.intake_id}: {status.title()} intake." in output
-        assert f"  status {status}; {record.kind}" in output
+        assert f"  status   {status}" in output
+        assert f"  kind     {record.kind}" in output
 
 
 def test_cli_human_status_and_intake_output_are_plain_text(tmp_path: Path) -> None:
@@ -2120,7 +2121,9 @@ def test_cli_human_status_and_intake_output_are_plain_text(tmp_path: Path) -> No
     assert "  config       " in status_output
     assert "  ready        " in status_output
     assert "Review the CLI output." in intake_output
-    assert "  created: " in intake_output
+    assert "  status   open" in intake_output
+    assert "  kind     check" in intake_output
+    assert "  created  " in intake_output
     assert_no_box_drawing(status_output)
     assert_no_box_drawing(intake_output)
 
@@ -2130,13 +2133,15 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     root_help = cli.build_parser().format_help()
     stdout = StringIO()
 
-    with pytest.raises(SystemExit) as excinfo, redirect_stdout(stdout):
-        cli.main(["intake", "--help"])
+    with redirect_stdout(stdout):
+        code = cli.main(["intake", "--help"])
 
     intake_help = stdout.getvalue()
-    assert excinfo.value.code == 0
+    assert code == 0
     assert "record-intake" in root_help
     assert "intake" in root_help
+    assert "Usage: agent-tracker intake" in intake_help
+    assert "--config TEXT" in intake_help
     assert "record" in intake_help
     assert "list" in intake_help
     assert "update" in intake_help

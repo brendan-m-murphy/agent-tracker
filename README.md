@@ -161,10 +161,10 @@ agent-tracker next --config demo-tracker/project.json --role maintainer --limit 
 agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200
 ```
 
-Human `status`, `overview`, and `next` output wraps long values at a standard
-terminal width with continuation lines aligned under the field value. For
-automation, add `--json` to `next`, `status`, or `overview`; JSON output is not
-wrapped or reformatted.
+Human `status`, `overview`, `next`, and intake output is rendered with Rich for
+readable wrapping and alignment without decorative panels or box-drawing
+characters by default. For automation, add `--json` to `next`, `status`,
+`overview`, or intake list commands; JSON output is not wrapped or reformatted.
 
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
 the token; `heartbeat`, `complete`, and `fail` require it.
@@ -273,9 +273,9 @@ agent-tracker status --json
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `pull-spool` | Copy complete JSON files from `spool.remote_inbox` to the local spool inbox; add `--dry-run` to preview. | `agent-tracker pull-spool --config demo-tracker/project.json --dry-run` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
-| `record-intake` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker record-intake --config demo-tracker/project.json --kind feature --tag inbox "Add triage workflow"` |
-| `list-intake` | List raw intake records for later project-manager triage. | `agent-tracker list-intake --config demo-tracker/project.json --json` |
-| `update-intake` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker update-intake --config demo-tracker/project.json <intake-id> --status closed` |
+| `intake record` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker intake --config demo-tracker/project.json record --kind feature --tag inbox "Add triage workflow"` |
+| `intake list` | List raw intake records for later project-manager triage. | `agent-tracker intake --config demo-tracker/project.json list --json` |
+| `intake update` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker intake --config demo-tracker/project.json update <intake-id> --status closed` |
 | `propose-task` | Create a reviewed proposed task contract from an intake record without importing it as a live task. | `agent-tracker propose-task --config demo-tracker/project.json <intake-id> --task-id add-triage --title "Add triage"` |
 | `promote-proposal` | Promote a proposed task into live queue state so it appears in `next` and can be claimed. | `agent-tracker promote-proposal --config demo-tracker/project.json <proposal-id>` |
 | `list-proposals` | List proposed task contracts awaiting review or promotion. | `agent-tracker list-proposals --config demo-tracker/project.json --json` |
@@ -344,14 +344,17 @@ Raw intake records capture ideas, feature requests, checks, and planning notes
 without making them claimable tasks:
 
 ```bash
-agent-tracker record-intake --config demo-tracker/project.json \
+agent-tracker intake --config demo-tracker/project.json record \
   --kind feature --source user --tag triage \
   "Add an inbox for untriaged requests"
-agent-tracker list-intake --config demo-tracker/project.json --json
+agent-tracker intake --config demo-tracker/project.json list --json
 ```
 
-Without `--json`, `list-intake` prints each record with its current status, such
-as `status open`, `status triaged`, `status closed`, or `status deferred`.
+The grouped `intake` command is implemented with Typer. The flat aliases
+`record-intake`, `list-intake`, and `update-intake` remain available for scripts
+and produce the same JSON payloads. Without `--json`, `intake list` prints each
+record with its current status, such as `status open`, `status triaged`,
+`status closed`, or `status deferred`.
 
 Intake records are included in snapshots for project-manager triage, but they do
 not appear in ready-task listings and cannot be claimed.

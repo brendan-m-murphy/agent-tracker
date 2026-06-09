@@ -96,9 +96,9 @@ Print counts:
 agent-tracker status --config project.json
 ```
 
-Human `status` output is plain text grouped into `Paths` and `Queue` sections
-with aligned labels. It avoids Rich panels or box-drawing characters so output
-can be copied into logs and plain-text handoffs.
+Human `status` output is rendered with Rich and grouped into `Paths` and
+`Queue` sections with aligned labels. It avoids Rich panels or box-drawing
+characters by default so output can be copied into logs and plain-text handoffs.
 
 Print full JSON task state:
 
@@ -296,7 +296,7 @@ Use intake for ideas, feature requests, checks, and planning notes that should
 not become claimable tasks yet:
 
 ```bash
-agent-tracker intake record --config project.json \
+agent-tracker intake --config project.json record \
   --kind feature \
   --source user \
   --repo agent-tracker \
@@ -307,14 +307,16 @@ agent-tracker intake record --config project.json \
 List intake for project-manager triage:
 
 ```bash
-agent-tracker intake list --config project.json --json
+agent-tracker intake --config project.json list --json
 ```
 
-Without `--json`, `intake list` prints each record with its current status, such
-as `status open`, `status triaged`, `status closed`, or `status deferred`, plus
-its creation timestamp when available. The flat aliases `record-intake`,
-`list-intake`, and `update-intake` remain supported for existing scripts and
-produce the same JSON payloads.
+The grouped `intake` command is implemented with Typer and accepts common
+`--config` and `--db` options at the group level, before the leaf command.
+Without `--json`, `intake list` uses Rich rendering and prints each record with
+its current status, such as `status open`, `status triaged`, `status closed`, or
+`status deferred`, plus its creation timestamp when available. The flat aliases
+`record-intake`, `list-intake`, and `update-intake` remain supported for
+existing scripts and produce the same JSON payloads.
 
 Intake records are stored in SQLite, audited as `intake.record`, and included
 in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`
@@ -324,7 +326,7 @@ contracts.
 If an intake item needs no task, close or defer it explicitly:
 
 ```bash
-agent-tracker intake update --config project.json <intake-id> --status closed
+agent-tracker intake --config project.json update <intake-id> --status closed
 ```
 
 ## Triage Intake

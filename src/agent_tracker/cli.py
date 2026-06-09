@@ -11,6 +11,11 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+import click
+import typer
+from rich.console import Console
+from rich.text import Text
+
 from agent_tracker.config import (
     PROJECT_CONFIG_ENV_VAR,
     PROJECT_DB_ENV_VAR,
@@ -35,6 +40,11 @@ BOOTSTRAP_GITIGNORE_LINES = (
     "spool/",
     "exports/*.json",
 )
+
+
+def _human_console() -> Console:
+    """Return a Rich console bound to the current stdout stream."""
+    return Console(file=sys.stdout, width=_HUMAN_OUTPUT_WIDTH, highlight=False)
 
 
 def coordinator(args: argparse.Namespace) -> Coordinator:
@@ -79,14 +89,16 @@ def _print_human_line(
     subsequent_indent: str = "",
 ) -> None:
     """Print a human-oriented line with stable wrapping indentation."""
-    print(
-        textwrap.fill(
-            text,
-            width=_HUMAN_OUTPUT_WIDTH,
-            initial_indent=initial_indent,
-            subsequent_indent=subsequent_indent or initial_indent,
-            break_long_words=False,
-            break_on_hyphens=False,
+    _human_console().print(
+        Text(
+            textwrap.fill(
+                text,
+                width=_HUMAN_OUTPUT_WIDTH,
+                initial_indent=initial_indent,
+                subsequent_indent=subsequent_indent or initial_indent,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
         )
     )
 
@@ -103,9 +115,18 @@ def _print_human_kv_row(label: str, value: object, *, label_width: int = 12) -> 
     _print_human_line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
 
 
+def _print_human_kv_table(rows: list[tuple[str, object]], *, label_width: int = 12) -> None:
+    """Print aligned key/value rows using Rich text without borders."""
+    console = _human_console()
+    for label, value in rows:
+        line = Text(f"  {label:<{label_width}} ")
+        line.append(str(value))
+        console.print(line)
+
+
 def _print_human_section(heading: str) -> None:
     """Print a plain section heading without box-drawing decoration."""
-    print(heading)
+    _human_console().print(Text(heading, style="bold"))
 
 
 def print_path_report(coord: Coordinator) -> None:
@@ -299,18 +320,25 @@ def command_status(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    print(f"{payload['name']} ({payload['project_id']})")
+    _human_console().print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
     _print_human_section("Paths")
-    _print_human_kv_row("config", payload["config_path"])
-    _print_human_kv_row("db", payload["db_path"])
+    path_rows: list[tuple[str, object]] = [
+        ("config", payload["config_path"]),
+        ("db", payload["db_path"]),
+    ]
     if payload.get("task_source_path"):
-        _print_human_kv_row("task source", payload["task_source_path"])
+        path_rows.append(("task source", payload["task_source_path"]))
+    _print_human_kv_table(path_rows)
     _print_human_section("Queue")
-    _print_human_kv_row("ready", len(payload["ready"]))
-    _print_human_kv_row("active", len(payload["active"]))
-    _print_human_kv_row("review", len(payload["review"]))
-    _print_human_kv_row("integration", len(payload["integration"]))
-    _print_human_kv_row("blocked", len(payload["blocked"]))
+    _print_human_kv_table(
+        [
+            ("ready", len(payload["ready"])),
+            ("active", len(payload["active"])),
+            ("review", len(payload["review"])),
+            ("integration", len(payload["integration"])),
+            ("blocked", len(payload["blocked"])),
+        ]
+    )
     return 0
 
 
@@ -329,18 +357,18 @@ def command_overview(args: argparse.Namespace) -> int:
 
 def print_overview(payload: dict[str, Any]) -> None:
     """Print a grouped project overview."""
-    print(f"{payload['name']} ({payload['project_id']})")
+    _human_console().print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
     for key, heading in OVERVIEW_GROUPS:
         items = payload["groups"][key]
         total = payload["counts"][key]
-        print(f"{heading} ({total})")
+        _human_console().print(Text(f"{heading} ({total})", style="bold"))
         if not items:
-            print("  (none)")
+            _human_console().print(Text("  (none)"))
             continue
         for item in items:
             print_overview_item(key, item)
         if len(items) < total:
-            print(f"  ... {total - len(items)} more")
+            _human_console().print(Text(f"  ... {total - len(items)} more"))
 
 
 def print_overview_item(group: str, item: dict[str, Any]) -> None:
@@ -385,7 +413,7 @@ def command_next(args: argparse.Namespace) -> int:
         print_json([state_to_dict(state) for state in ready])
         return 0
     if not ready:
-        print("No ready tasks.")
+        _human_console().print(Text("No ready tasks."))
         return 0
     for state in ready:
         task = state.task
@@ -572,20 +600,23 @@ def command_list_intake(args: argparse.Namespace) -> int:
         print_json(payload)
         return 0
     if not payload["intake"]:
-        print("No intake records.")
+        _human_console().print(Text("No intake records."))
         return 0
     for item in payload["intake"]:
-        qualifiers = [f"status {item['status']}", item["kind"]]
+        rows: list[tuple[str, object]] = [
+            ("status", item["status"]),
+            ("kind", item["kind"]),
+        ]
         if item["repo"]:
-            qualifiers.append(f"repo {item['repo']}")
+            rows.append(("repo", item["repo"]))
         if item["source"]:
-            qualifiers.append(f"source {item['source']}")
+            rows.append(("source", item["source"]))
         _print_human_line(f"{item['id']}: {item['text']}", subsequent_indent="  ")
-        print(f"  {'; '.join(qualifiers)}")
+        _print_human_kv_table(rows, label_width=8)
         if item["tags"]:
-            print(f"  tags: {', '.join(item['tags'])}")
+            _print_human_kv_table([("tags", ", ".join(item["tags"]))], label_width=8)
         if item.get("created_at"):
-            print(f"  created: {item['created_at']}")
+            _print_human_kv_table([("created", item["created_at"])], label_width=8)
     return 0
 
 
@@ -734,6 +765,139 @@ def add_update_intake_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--status", required=True, choices=sorted(INTAKE_STATES))
     parser.add_argument("--actor", default="system")
     parser.set_defaults(func=command_update_intake)
+
+
+intake_typer_app = typer.Typer(
+    help="Record, list, and update raw project intake.",
+    context_settings={"help_option_names": ["-h", "--help"]},
+    rich_markup_mode=None,
+    pretty_exceptions_enable=False,
+    add_completion=False,
+)
+
+
+@intake_typer_app.callback()
+def _typer_intake_callback(
+    ctx: typer.Context,
+    config: str = typer.Option(
+        "",
+        "--config",
+        help=f"Project config JSON path. Defaults to ${PROJECT_CONFIG_ENV_VAR}.",
+    ),
+    db: str = typer.Option(
+        "",
+        "--db",
+        help=f"Override SQLite DB path. Defaults to ${PROJECT_DB_ENV_VAR}.",
+    ),
+) -> None:
+    """Share common options with grouped intake subcommands."""
+    ctx.obj = {"config": config, "db": db}
+
+
+def _typer_common_value(ctx: typer.Context, value: str, key: str) -> str:
+    """Return a leaf option value, falling back to a Typer group option."""
+    if value:
+        return value
+    if isinstance(ctx.obj, dict):
+        return str(ctx.obj.get(key) or "")
+    return ""
+
+
+@intake_typer_app.command("record")
+def _typer_record_intake(
+    ctx: typer.Context,
+    text: str = typer.Argument(..., help="Intake text."),
+    config: str = typer.Option("", "--config"),
+    db: str = typer.Option("", "--db"),
+    id_: str = typer.Option("", "--id"),
+    kind: str = typer.Option("idea", "--kind"),
+    source: str = typer.Option("", "--source"),
+    repo: str = typer.Option("", "--repo"),
+    tag: list[str] | None = typer.Option(None, "--tag"),
+    metadata_json: str = typer.Option("{}", "--metadata-json"),
+    actor: str = typer.Option("system", "--actor"),
+) -> None:
+    """Record raw project intake without creating a task."""
+    args = argparse.Namespace(
+        config=_typer_common_value(ctx, config, "config"),
+        db=_typer_common_value(ctx, db, "db"),
+        text=text,
+        id=id_,
+        kind=kind,
+        source=source,
+        repo=repo,
+        tag=tag or [],
+        metadata_json=metadata_json,
+        actor=actor,
+    )
+    code = command_record_intake(args)
+    if code:
+        raise typer.Exit(code)
+
+
+@intake_typer_app.command("list")
+def _typer_list_intake(
+    ctx: typer.Context,
+    config: str = typer.Option("", "--config"),
+    db: str = typer.Option("", "--db"),
+    json_output: bool = typer.Option(False, "--json", help="Print JSON."),
+    limit: int = typer.Option(0, "--limit"),
+    status: str = typer.Option("", "--status"),
+    kind: str = typer.Option("", "--kind"),
+    repo: str = typer.Option("", "--repo"),
+) -> None:
+    """List raw project intake."""
+    args = argparse.Namespace(
+        config=_typer_common_value(ctx, config, "config"),
+        db=_typer_common_value(ctx, db, "db"),
+        json=json_output,
+        limit=limit,
+        status=status,
+        kind=kind,
+        repo=repo,
+    )
+    code = command_list_intake(args)
+    if code:
+        raise typer.Exit(code)
+
+
+@intake_typer_app.command("update")
+def _typer_update_intake(
+    ctx: typer.Context,
+    intake_id: str = typer.Argument(..., help="Intake record id."),
+    config: str = typer.Option("", "--config"),
+    db: str = typer.Option("", "--db"),
+    status: str = typer.Option(..., "--status", help="New intake status."),
+    actor: str = typer.Option("system", "--actor"),
+) -> None:
+    """Update raw intake status after triage or closeout."""
+    args = argparse.Namespace(
+        config=_typer_common_value(ctx, config, "config"),
+        db=_typer_common_value(ctx, db, "db"),
+        intake_id=intake_id,
+        status=status,
+        actor=actor,
+    )
+    code = command_update_intake(args)
+    if code:
+        raise typer.Exit(code)
+
+
+def run_intake_typer(argv: list[str]) -> int:
+    """Run the grouped Typer intake command."""
+    command = typer.main.get_command(intake_typer_app)
+    try:
+        result = command.main(
+            args=argv,
+            prog_name="agent-tracker intake",
+            standalone_mode=False,
+        )
+    except click.exceptions.Exit as exc:
+        return int(exc.exit_code or 0)
+    except click.ClickException as exc:
+        exc.show()
+        return int(exc.exit_code)
+    return int(result or 0)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1013,8 +1177,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI."""
-    args = build_parser().parse_args(argv)
     try:
+        raw_args = list(sys.argv[1:] if argv is None else argv)
+        if raw_args and raw_args[0] == "intake":
+            return run_intake_typer(raw_args[1:])
+        args = build_parser().parse_args(raw_args)
         return args.func(args)
     except (
         FileNotFoundError,
