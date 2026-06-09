@@ -138,9 +138,9 @@ evidence when available. Recently completed entries are ordered from completion
 audit records, not task priority.
 
 Human overview output wraps long task titles, blockers, next actions, evidence,
-and completion details at a standard terminal width with continuation lines
-aligned under the field value. JSON output is unchanged and should be used for
-automation.
+and completion details at a standard terminal width. Wrapped task titles use a
+distinct continuation indent so they do not read like `next`, `blocker`, or
+other detail fields. JSON output is unchanged and should be used for automation.
 
 Use JSON output for automation:
 

@@ -605,6 +605,37 @@ def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
     assert any(line.startswith("             with enough evidence") for line in lines)
 
 
+def test_cli_overview_human_output_distinguishes_wrapped_titles(
+    tmp_path: Path,
+) -> None:
+    """Wrapped overview titles use a distinct indent from detail fields."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["title"] = (
+                "Add repository boundary for in-memory tests with title continuation "
+                "that should not look like a field"
+            )
+            raw_task["next_action"] = (
+                "Keep detail fields visually separate from wrapped task titles."
+            )
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--limit", "10"])
+    lines = stdout.getvalue().splitlines()
+
+    assert code == 0
+    assert all(len(line) <= 80 for line in lines)
+    assert any(line.startswith("      that should not look like a field") for line in lines)
+    assert not any(line.startswith("    that should not look like a field") for line in lines)
+    assert any(line.startswith("    next: Keep detail fields") for line in lines)
+
+
 def test_cli_next_human_output_wraps_long_next_action(tmp_path: Path) -> None:
     """Human next output wraps long next-action lines under the field value."""
     config_path = write_project(tmp_path)

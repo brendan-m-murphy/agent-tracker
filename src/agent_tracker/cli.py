@@ -181,7 +181,7 @@ def print_overview_item(group: str, item: dict[str, Any]) -> None:
     _print_human_line(
         f"- {item['id']}: {item['title']}{qualifier}",
         initial_indent="  ",
-        subsequent_indent="    ",
+        subsequent_indent="      ",
     )
 
     for blocker in item.get("blockers", [])[:2]:
