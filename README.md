@@ -20,6 +20,8 @@ An `agent-tracker` project has three durable inputs:
 The live queue is a SQLite database. Treat it as runtime state: import from the
 committed task plan, claim work with leases, record events and evidence while
 agents work, and export snapshots when another system needs an audit artifact.
+Git commits and GitHub PRs are evidence and review surfaces; they are not the
+live coordination queue.
 
 ## What You Get
 
@@ -183,15 +185,24 @@ agent-tracker heartbeat --config demo-tracker/project.json write-readme \
 
 Complete the task with evidence:
 
-If the task changed tracked repository files, commit and integrate the work
-before completing it in the tracker. Use a merged commit, pushed branch, or PR
-URL as evidence, not only local file paths or validation commands.
+If the task changed tracked code, docs, config, tests, or task plans, finish the
+code-review closeout before completing it in the tracker. By default, that means
+the scoped work is on a task branch, has a commit, and has a PR or equivalent
+review surface. Local file paths, validation commands, or an unmerged worktree
+are supporting context, not enough evidence by themselves.
+
+Trusted project managers may use a direct-merge override for local workflows:
+merge the task branch into `main`, push `main` when a remote is configured, and
+record `git:<main-commit>` evidence. Use the override deliberately; ordinary
+agent work should leave a PR or equivalent review state before tracker
+completion.
 
 ```bash
 agent-tracker complete --config demo-tracker/project.json write-readme \
   --lease-token <lease-token> \
   --agent agent-1 \
-  --evidence "git:main-commit-or-merged-branch" \
+  --evidence "git:<branch-or-main-commit>" \
+  --evidence "pr:https://github.com/org/repo/pull/123" \
   --evidence "file:README.md"
 ```
 
@@ -226,7 +237,7 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `task` | Show one task's prompt/context; add `--json` for stored state. | `agent-tracker task --config demo-tracker/project.json write-readme --markdown` |
 | `claim` | Atomically claim a ready task and create a lease token. | `agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200` |
 | `heartbeat` | Extend a live lease and mark the task `in_progress`. | `agent-tracker heartbeat --config demo-tracker/project.json write-readme --lease-token <token> --agent agent-1` |
-| `complete` | Mark a leased task `done` and record evidence URIs. | `agent-tracker complete --config demo-tracker/project.json write-readme --lease-token <token> --evidence "git:<main-sha>"` |
+| `complete` | Mark a leased task `done` and record evidence URIs. | `agent-tracker complete --config demo-tracker/project.json write-readme --lease-token <token> --evidence "git:<branch-sha>" --evidence "pr:<url>"` |
 | `fail` | Mark a leased task `failed` with a reason. | `agent-tracker fail --config demo-tracker/project.json write-readme --lease-token <token> --reason "validation failed"` |
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |

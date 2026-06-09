@@ -177,7 +177,7 @@
       "id": "finish-lifecycle-policy",
       "title": "Define default finish lifecycle policy",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 25,
       "prompt_key": "finish-lifecycle-policy",
       "prompt_path": "tracking/README.md",

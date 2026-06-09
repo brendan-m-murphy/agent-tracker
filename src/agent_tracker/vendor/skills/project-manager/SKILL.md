@@ -39,6 +39,14 @@ uv run agent-tracker claim --config tracking/project.json --agent <agent-id> --r
 uv run agent-tracker task --config tracking/project.json <task-id> --markdown
 ```
 
+Before implementation, read the rendered task prompt and repo-local tracker
+guide for write scope, validation, closeout, and authority rules. For tasks that
+change tracked code, docs, config, tests, or task plans, expect to work on a
+task branch, commit the scoped changes, and leave a PR or equivalent review
+state before completing the tracker task. Only use a direct merge into `main`
+when the repo-local policy or trusted manager explicitly authorizes that
+override, and record the merged commit as evidence.
+
 If claim fails, investigate before reporting a blocker:
 
 - status JSON and ready/blocked counts;
@@ -66,6 +74,9 @@ When the user gives an idea, feature request, check, concern, or planning note:
 Agents should log useful work as task evidence, notes, or spool-ingested events.
 Completion evidence should point to commits, PRs, notes, reports, or bounded
 artifact summaries. Do not store large raw outputs in coordination repos.
+
+SQLite is the canonical live queue state; commits and PRs are evidence and
+review surfaces, not live coordination state.
 
 When creating follow-up tasks:
 

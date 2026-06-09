@@ -31,9 +31,10 @@ copied configs are refused by `canonical_config_path`; older configs without
 that field can resolve relative paths to a separate local SQLite database.
 
 Agents may still make code and documentation changes in Codex worktrees. After
-those changes are integrated into canonical `main`, run any required tracker
-state updates from the canonical worktree. If an agent cannot access that
-worktree, it should stop and report the exact tracker command it would have run.
+those changes are integrated into canonical `main`, or have a reviewable PR when
+direct merge is not authorized, run any required tracker state updates from the
+canonical worktree. If an agent cannot access that worktree, it should stop and
+report the exact tracker command it would have run.
 
 For investigation, prefer read-only Git inspection or read-only SQLite queries.
 `agent-tracker status`, `next`, and `task` are read-only by default. Do not pass
@@ -126,20 +127,30 @@ Documentation tasks may also require manual review. For example:
 
 For tasks that change tracked code, docs, config, tests, or task plans, do not
 mark the tracker task complete while the work exists only in an unmerged
-worktree. First make the work accessible to others:
+worktree. First make the work accessible to others. The default closeout policy
+for agents is:
 
 - commit the scoped changes on a task branch;
 - when this committed task plan is the authoritative source, update the
   completed task's `tracking/tasks.json` status to `done` in that branch;
-- merge the task branch into `main` or open a PR when direct merge is not the
-  intended workflow;
-- push the branch or `main` when a remote is configured;
-- use integrated evidence, such as `git:<main-commit>` or `pr:<url>`, in the
-  completion command.
+- open a PR or equivalent review surface for the branch;
+- push the branch when a remote is configured;
+- use both commit and review evidence, such as `git:<branch-commit>` and
+  `pr:<url>`, in the completion command.
+
+Trusted managers may use a direct-merge override for local workflows: commit on
+a task branch, merge that branch into `main`, push `main` when a remote is
+configured, and use `git:<main-commit>` evidence. Use this only when the manager
+workflow itself is the intended review/integration authority.
 
 If integration is blocked, keep the task active with heartbeats or fail it with
 an actionable reason. Local validation evidence is necessary, but it is not
 sufficient for completion when the task changed repository files.
+
+SQLite remains the canonical queue state. Commits and PRs provide evidence and
+review surfaces; they do not replace leases, task status, evidence rows, or
+events in the tracker.
+
 Do not re-import after completing a live task unless the committed task plan
 also records that terminal status and you intentionally pass
 `--reconcile-runtime-state`. Normal import preserves live SQLite runtime status.
@@ -150,7 +161,8 @@ Complete the task with concise evidence:
 uv run agent-tracker complete --config tracking/project.json <task-id> \
   --lease-token <lease-token> \
   --agent <agent-id> \
-  --evidence "git:<main-commit-or-merged-branch>" \
+  --evidence "git:<branch-or-main-commit>" \
+  --evidence "pr:<url>" \
   --evidence "file:<path>"
 ```
 

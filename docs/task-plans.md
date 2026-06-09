@@ -192,9 +192,15 @@ task set and for imported manual statuses. If live SQLite state says a task is
 `done` but the imported task plan still says `pending`, the next import can
 reopen that task as pending.
 
-When a task changes tracked repository files, do not mark it complete until the
-work has been integrated or made reviewable. Store that evidence on completion,
-for example `git:<main-sha>` or `pr:https://github.com/org/repo/pull/123`.
+When a task changes tracked code, docs, config, tests, or task plans, do not
+mark it complete until the closeout is branch-backed and reviewable. By
+default, store both commit and PR/review evidence, for example
+`git:<branch-sha>` and `pr:https://github.com/org/repo/pull/123`. A trusted
+project manager may use a direct-merge override and store `git:<main-sha>`
+evidence after merging the task branch. In all cases, SQLite remains the
+canonical live queue state; commits and PRs are evidence/review surfaces, not
+live coordination state.
+
 If the task plan is the authoritative source for your project, update the
 completed task's imported status to `done` in the same integrated change.
 

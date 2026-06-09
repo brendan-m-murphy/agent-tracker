@@ -212,19 +212,30 @@ configured spool inbox and run `ingest-spool`.
 ## Complete Work
 
 If the task changed tracked code, docs, config, tests, or task plans, complete
-integration before marking the tracker task done. The work should be accessible
-to other collaborators first:
+the closeout before marking the tracker task done. The default closeout is
+branch-backed and reviewable:
 
 - commit the scoped changes on a task branch;
-- merge the task branch into `main` or open a PR when direct merge is not the
-  intended workflow;
-- push the branch or `main` when a remote is configured;
-- include integrated evidence such as `git:<main-commit>` or `pr:<url>`.
+- open a PR or equivalent review surface for that branch;
+- push the branch when a remote is configured;
+- include evidence such as `git:<branch-commit>` and `pr:<url>`.
+
+Use the direct-merge override only for trusted manager workflows where review is
+handled outside a PR:
+
+- commit the scoped changes on a task branch;
+- merge the task branch into `main`;
+- push `main` when a remote is configured;
+- include integrated evidence such as `git:<main-commit>`.
 
 Local validation output and file paths are useful supporting evidence, but they
 are not enough by themselves for tasks that modify repository files. If
 integration is blocked, keep the task active with heartbeats or fail it with an
 actionable reason instead of marking it complete.
+
+SQLite remains the canonical live queue state. Git commits and GitHub PRs are
+evidence and review surfaces for closeout; do not use them as live coordination
+state in place of leases, task status, evidence rows, or audit events.
 
 Mark the task done and attach evidence:
 
@@ -232,7 +243,7 @@ Mark the task done and attach evidence:
 agent-tracker complete --config project.json write-readme \
   --lease-token <lease-token> \
   --agent agent-1 \
-  --evidence "git:<main-commit-or-merged-branch>" \
+  --evidence "git:<branch-or-main-commit>" \
   --evidence "file:README.md" \
   --evidence "pr:https://github.com/org/repo/pull/123"
 ```
@@ -243,7 +254,8 @@ or bounded summaries over large raw outputs.
 Completing a task clears its lease. Downstream pending tasks become ready after
 their dependencies are done.
 
-For branch-backed local work, a typical direct-merge flow is:
+For branch-backed local work with the trusted-manager direct-merge override, a
+typical flow is:
 
 ```bash
 git switch -c codex/write-readme main
@@ -261,7 +273,9 @@ agent-tracker complete --config tracking/project.json write-readme \
 ```
 
 If `main` cannot be updated directly, open a PR and use `pr:<url>` evidence
-instead of marking the task complete from an isolated worktree.
+instead of marking the task complete from an isolated worktree. Agents that do
+not have explicit direct-merge authority should also open a PR or leave an
+equivalent review state before completion.
 
 When the committed task plan is the authoritative source, include the terminal
 task-plan status update in the integrated branch and use
@@ -421,7 +435,7 @@ When done:
 agent-tracker complete --config project.json <task-id> \
   --lease-token <lease-token> \
   --agent <agent-id> \
-  --evidence "git:<main-commit-or-merged-branch>" \
+  --evidence "git:<branch-or-main-commit>" \
   --evidence "file:<path>"
 ```
 
