@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from agent_tracker.config import ProjectConfig
-from agent_tracker.db import Store, state_to_dict
+from agent_tracker.db import Store, intake_to_dict, state_to_dict
 from agent_tracker.models import (
     ACTIVE_STATES,
     INTEGRATION_STATES,
     REVIEW_STATES,
     Claim,
     EventRecord,
+    IntakeRecord,
     RequirementState,
     TaskState,
 )
@@ -339,6 +340,70 @@ class Coordinator:
         event = EventRecord(event_id=event_id, kind=kind, task_id=task_id, payload=event.payload)
         return self.store.record_event(self.config.project_id, event, actor=actor)
 
+    def record_intake(
+        self,
+        text: str,
+        *,
+        kind: str = "idea",
+        source: str = "",
+        repo: str = "",
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        intake_id: str = "",
+        actor: str = "system",
+    ) -> IntakeRecord:
+        """Record raw project intake without creating a task."""
+        self._ensure_mutation_allowed()
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            raise ValueError("intake text is required")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("intake metadata must be a JSON object")
+        record = IntakeRecord(
+            intake_id=_first_text(intake_id) or uuid.uuid4().hex,
+            text=cleaned_text,
+            kind=_first_text(kind) or "idea",
+            source=_first_text(source),
+            repo=_first_text(repo),
+            tags=_clean_tags(tags or []),
+            metadata=metadata or {},
+        )
+        return self.store.record_intake(self.config.project_id, record, actor=actor)
+
+    def intake_records(
+        self,
+        *,
+        status: str = "",
+        kind: str = "",
+        repo: str = "",
+        limit: int = 0,
+    ) -> list[IntakeRecord]:
+        """Return raw project intake records."""
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
+        return self.store.intake_records(
+            self.config.project_id,
+            status=_first_text(status),
+            kind=_first_text(kind),
+            repo=_first_text(repo),
+            limit=limit,
+        )
+
+    def intake_payload(
+        self,
+        *,
+        status: str = "",
+        kind: str = "",
+        repo: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Return JSON-friendly intake records."""
+        records = self.intake_records(status=status, kind=kind, repo=repo, limit=limit)
+        return {
+            "project_id": self.config.project_id,
+            "intake": [intake_to_dict(record) for record in records],
+        }
+
     def ingest_event_file(self, path: str | Path, *, actor: str = "system") -> bool:
         """Record an event from a JSON file."""
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -583,6 +648,18 @@ def _first_text(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _clean_tags(tags: list[str]) -> list[str]:
+    """Normalize tag values while preserving order."""
+    cleaned = []
+    seen = set()
+    for tag in tags:
+        text = str(tag).strip()
+        if text and text not in seen:
+            cleaned.append(text)
+            seen.add(text)
+    return cleaned
 
 
 def _top_level_state_path(config: ProjectConfig, key: str) -> Path | None:

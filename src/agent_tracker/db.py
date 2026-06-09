@@ -21,6 +21,7 @@ from agent_tracker.models import (
     Claim,
     DependencyRecord,
     EventRecord,
+    IntakeRecord,
     RequirementState,
     TaskRecord,
     TaskState,
@@ -176,6 +177,22 @@ class Store:
                     payload_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (project_id, event_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS intake (
+                    project_id TEXT NOT NULL,
+                    intake_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    repo TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    text TEXT NOT NULL,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, intake_id),
                     FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
                 );
 
@@ -845,6 +862,85 @@ class Store:
                 )
             return inserted
 
+    def record_intake(
+        self,
+        project_id: str,
+        intake: IntakeRecord,
+        *,
+        actor: str = "system",
+    ) -> IntakeRecord:
+        """Record a raw intake item."""
+        self.init_schema()
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO intake (
+                    project_id, intake_id, kind, source, repo, status, text,
+                    tags_json, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    intake.intake_id,
+                    intake.kind,
+                    intake.source,
+                    intake.repo,
+                    intake.status,
+                    intake.text,
+                    dumps(intake.tags),
+                    dumps(intake.metadata),
+                    now,
+                    now,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                "",
+                "intake.record",
+                actor,
+                {"intake_id": intake.intake_id, "kind": intake.kind, "repo": intake.repo},
+            )
+        return replace(intake, created_at=now, updated_at=now)
+
+    def intake_records(
+        self,
+        project_id: str,
+        *,
+        status: str = "",
+        kind: str = "",
+        repo: str = "",
+        limit: int = 0,
+    ) -> list[IntakeRecord]:
+        """Return raw intake records newest first."""
+        clauses = ["project_id = ?"]
+        values: list[Any] = [project_id]
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        if kind:
+            clauses.append("kind = ?")
+            values.append(kind)
+        if repo:
+            clauses.append("repo = ?")
+            values.append(repo)
+        sql = f"""
+            SELECT *
+            FROM intake
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_at DESC, intake_id DESC
+        """
+        if limit:
+            sql += " LIMIT ?"
+            values.append(limit)
+        with self.transaction(read_only=True) as conn:
+            if not _table_exists(conn, "intake"):
+                return []
+            rows = list(conn.execute(sql, values))
+        return [_intake_from_row(row) for row in rows]
+
     def record_evidence(
         self,
         project_id: str,
@@ -912,6 +1008,16 @@ class Store:
         """Return a JSON-friendly project snapshot."""
         states = self.task_states(project_id)
         with self.transaction(read_only=True) as conn:
+            if _table_exists(conn, "intake"):
+                intake = [
+                    intake_to_dict(_intake_from_row(row))
+                    for row in conn.execute(
+                        "SELECT * FROM intake WHERE project_id = ? ORDER BY created_at, intake_id",
+                        (project_id,),
+                    )
+                ]
+            else:
+                intake = []
             events = [
                 {
                     "event_id": row["event_id"],
@@ -943,6 +1049,7 @@ class Store:
             "project_id": project_id,
             "generated_at": iso(),
             "tasks": [state_to_dict(state) for state in states],
+            "intake": intake,
             "events": events,
             "audit": audit,
         }
@@ -1373,6 +1480,47 @@ def _completion_evidence(
 def _has_evidence_prefix(evidence: list[str], prefix: str) -> bool:
     """Return whether any evidence URI starts with the exact prefix."""
     return any(uri.startswith(prefix) for uri in evidence)
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Return whether a SQLite table exists."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _intake_from_row(row: sqlite3.Row) -> IntakeRecord:
+    """Convert a SQLite row to an intake record."""
+    return IntakeRecord(
+        intake_id=str(row["intake_id"]),
+        text=str(row["text"]),
+        kind=str(row["kind"]),
+        source=str(row["source"]),
+        repo=str(row["repo"]),
+        status=str(row["status"]),
+        tags=list(loads(str(row["tags_json"]), [])),
+        metadata=loads(str(row["metadata_json"]), {}),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def intake_to_dict(intake: IntakeRecord) -> dict[str, Any]:
+    """Convert an intake record to a JSON-friendly dictionary."""
+    return {
+        "id": intake.intake_id,
+        "kind": intake.kind,
+        "source": intake.source,
+        "repo": intake.repo,
+        "status": intake.status,
+        "text": intake.text,
+        "tags": intake.tags,
+        "metadata": intake.metadata,
+        "created_at": intake.created_at,
+        "updated_at": intake.updated_at,
+    }
 
 
 def state_to_dict(state: TaskState) -> dict[str, Any]:

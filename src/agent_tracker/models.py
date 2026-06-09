@@ -101,3 +101,19 @@ class EventRecord:
     kind: str
     payload: dict[str, Any] = field(default_factory=dict)
     task_id: str = ""
+
+
+@dataclass(frozen=True)
+class IntakeRecord:
+    """Raw project intake that is not a claimable task."""
+
+    intake_id: str
+    text: str
+    kind: str = "idea"
+    source: str = ""
+    repo: str = ""
+    status: str = "open"
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""

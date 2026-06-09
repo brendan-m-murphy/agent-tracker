@@ -247,6 +247,8 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `pull-spool` | Copy complete JSON files from `spool.remote_inbox` to the local spool inbox; add `--dry-run` to preview. | `agent-tracker pull-spool --config demo-tracker/project.json --dry-run` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
+| `record-intake` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker record-intake --config demo-tracker/project.json --kind feature --tag inbox "Add triage workflow"` |
+| `list-intake` | List raw intake records for later project-manager triage. | `agent-tracker list-intake --config demo-tracker/project.json --json` |
 | `export` | Write the configured audit snapshot through the exporter. | `agent-tracker export --config demo-tracker/project.json` |
 
 See [docs/operations.md](docs/operations.md) for lifecycle details, stale lease
@@ -307,6 +309,19 @@ overwriting different local files.
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,
 `pr:https://github.com/org/repo/pull/123`, or `artifact:s3://bucket/key`.
 Large artifacts should be linked, not copied into the tracker.
+
+Raw intake records capture ideas, feature requests, checks, and planning notes
+without making them claimable tasks:
+
+```bash
+agent-tracker record-intake --config demo-tracker/project.json \
+  --kind feature --source user --tag triage \
+  "Add an inbox for untriaged requests"
+agent-tracker list-intake --config demo-tracker/project.json --json
+```
+
+Intake records are included in snapshots for project-manager triage, but they do
+not appear in ready-task listings and cannot be claimed.
 
 Snapshots include evaluated task state, events, and audit log entries:
 

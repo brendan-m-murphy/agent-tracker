@@ -249,6 +249,31 @@ agent-tracker ingest-event --config project.json worklog.json --actor agent-1
 For asynchronous producers, write the same kind of JSON object into the
 configured spool inbox and run `ingest-spool`.
 
+## Record Raw Intake
+
+Use intake for ideas, feature requests, checks, and planning notes that should
+not become claimable tasks yet:
+
+```bash
+agent-tracker record-intake --config project.json \
+  --kind feature \
+  --source user \
+  --repo agent-tracker \
+  --tag triage \
+  "Add an inbox for untriaged requests"
+```
+
+List intake for project-manager triage:
+
+```bash
+agent-tracker list-intake --config project.json --json
+```
+
+Intake records are stored in SQLite, audited as `intake.record`, and included
+in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`
+results until a later triage workflow promotes them into proposed task
+contracts.
+
 ## Complete Work
 
 If the task changed tracked code, docs, config, tests, or task plans, complete

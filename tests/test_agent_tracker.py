@@ -1481,6 +1481,125 @@ def test_event_ingestion_rejects_missing_event_id(tmp_path: Path) -> None:
         coord.record_event({"kind": "sample"})
 
 
+def test_intake_records_are_persisted_listed_and_exported(tmp_path: Path) -> None:
+    """Raw intake is durable project context, not a task."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    intake = coord.record_intake(
+        "Add an inbox for rough ideas.",
+        kind="feature",
+        source="user",
+        repo="agent-tracker",
+        tags=["planning", "planning", "inbox"],
+        metadata={"priority": "soon"},
+        actor="tester",
+    )
+    listed = coord.intake_records(repo="agent-tracker", kind="feature")
+    snapshot = coord.store.snapshot(config.project_id)
+    ready_ids = {state.task.task_id for state in coord.ready_tasks()}
+
+    assert intake.intake_id
+    assert intake.status == "open"
+    assert intake.tags == ["planning", "inbox"]
+    assert listed == [intake]
+    assert snapshot["intake"][0]["id"] == intake.intake_id
+    assert snapshot["intake"][0]["text"] == "Add an inbox for rough ideas."
+    assert any(
+        audit["action"] == "intake.record"
+        and audit["actor"] == "tester"
+        and audit["payload"]["intake_id"] == intake.intake_id
+        for audit in snapshot["audit"]
+    )
+    assert intake.intake_id not in ready_ids
+    with pytest.raises(ValueError, match="no matching ready task"):
+        coord.claim(agent_id="agent-1", task_id=intake.intake_id)
+
+
+def test_intake_requires_text_and_object_metadata(tmp_path: Path) -> None:
+    """Intake records require meaningful text and object metadata."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="intake text is required"):
+        coord.record_intake("   ")
+    with pytest.raises(ValueError, match="metadata"):
+        coord.record_intake("Valid text", metadata=json.loads("[]"))
+
+
+def test_intake_is_compatible_with_pre_intake_database(tmp_path: Path) -> None:
+    """Old databases without the intake table stay readable and can self-upgrade."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute("DROP TABLE intake")
+
+    listed_before = coord.intake_records()
+    snapshot_before = coord.store.snapshot(config.project_id)
+    intake = coord.record_intake("Capture later planning.", actor="tester")
+    listed_after = coord.intake_records()
+
+    assert listed_before == []
+    assert snapshot_before["intake"] == []
+    assert listed_after == [intake]
+    assert intake.text == "Capture later planning."
+
+
+def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
+    """CLI commands can record and list raw intake without creating tasks."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "record-intake",
+                "--config",
+                str(config_path),
+                "--kind",
+                "check",
+                "--source",
+                "user",
+                "--repo",
+                "agent-tracker",
+                "--tag",
+                "triage",
+                "--metadata-json",
+                '{"needs": "planning"}',
+                "Check whether intake is visible.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["kind"] == "check"
+    assert recorded["repo"] == "agent-tracker"
+    assert recorded["tags"] == ["triage"]
+    assert recorded["metadata"] == {"needs": "planning"}
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "list-intake",
+                "--config",
+                str(config_path),
+                "--json",
+                "--kind",
+                "check",
+            ]
+        )
+
+    listed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert [item["id"] for item in listed["intake"]] == [recorded["id"]]
+    assert listed["intake"][0]["text"] == "Check whether intake is visible."
+
+
 def test_project_root_plugin_loads_from_config_directory(tmp_path: Path) -> None:
     """Configured project plugins can live below the project config directory."""
     old_path = list(sys.path)

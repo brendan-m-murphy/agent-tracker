@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_tracker.config import load_config
-from agent_tracker.db import state_to_dict
+from agent_tracker.db import intake_to_dict, state_to_dict
 from agent_tracker.models import INTEGRATION_STATES
 from agent_tracker.service import Coordinator
 
@@ -310,6 +310,51 @@ def command_pull_spool(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_record_intake(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    metadata = parse_json_object(args.metadata_json, "metadata-json")
+    intake = coord.record_intake(
+        args.text,
+        kind=args.kind,
+        source=args.source,
+        repo=args.repo,
+        tags=args.tag,
+        metadata=metadata,
+        intake_id=args.id,
+        actor=args.actor,
+    )
+    print_json(intake_to_dict(intake))
+    return 0
+
+
+def command_list_intake(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.intake_payload(
+        status=args.status,
+        kind=args.kind,
+        repo=args.repo,
+        limit=args.limit,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    if not payload["intake"]:
+        print("No intake records.")
+        return 0
+    for item in payload["intake"]:
+        qualifiers = [item["kind"]]
+        if item["repo"]:
+            qualifiers.append(f"repo {item['repo']}")
+        if item["source"]:
+            qualifiers.append(f"source {item['source']}")
+        print(f"{item['id']}: {item['text']}")
+        print(f"  {'; '.join(qualifiers)}")
+        if item["tags"]:
+            print(f"  tags: {', '.join(item['tags'])}")
+    return 0
+
+
 def command_export(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -322,6 +367,14 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     """Add common project args."""
     parser.add_argument("--config", required=True, help="Project config JSON path.")
     parser.add_argument("--db", default="", help="Override SQLite DB path.")
+
+
+def parse_json_object(value: str, label: str) -> dict[str, Any]:
+    """Parse a JSON object CLI argument."""
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -495,6 +548,30 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(pull_spool)
     pull_spool.add_argument("--dry-run", action="store_true")
     pull_spool.set_defaults(func=command_pull_spool)
+
+    record_intake = sub.add_parser(
+        "record-intake",
+        help="Record raw project intake without creating a task.",
+    )
+    add_common(record_intake)
+    record_intake.add_argument("text")
+    record_intake.add_argument("--id", default="")
+    record_intake.add_argument("--kind", default="idea")
+    record_intake.add_argument("--source", default="")
+    record_intake.add_argument("--repo", default="")
+    record_intake.add_argument("--tag", action="append", default=[])
+    record_intake.add_argument("--metadata-json", default="{}")
+    record_intake.add_argument("--actor", default="system")
+    record_intake.set_defaults(func=command_record_intake)
+
+    list_intake = sub.add_parser("list-intake", help="List raw project intake.")
+    add_common(list_intake)
+    list_intake.add_argument("--json", action="store_true")
+    list_intake.add_argument("--limit", type=int, default=0)
+    list_intake.add_argument("--status", default="")
+    list_intake.add_argument("--kind", default="")
+    list_intake.add_argument("--repo", default="")
+    list_intake.set_defaults(func=command_list_intake)
 
     export = sub.add_parser("export", help="Export project audit snapshot.")
     add_common(export)
