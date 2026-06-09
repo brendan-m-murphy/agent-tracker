@@ -4,9 +4,12 @@ This guide covers the normal local lifecycle for an `agent-tracker` project:
 initialize, import, inspect, claim, heartbeat, complete or fail, ingest events,
 and export audit state.
 
-Every command takes `--config <project.json>`. Every command also accepts
-`--db <path>` when you need to override the configured SQLite path temporarily.
-When `canonical_config_path` is set, mutating commands refuse copied configs and
+Every command accepts `--config <project.json>`. If `--config` is omitted, the
+CLI uses `AGENT_TRACKER_CONFIG` as the default project config path. Every command
+also accepts `--db <path>` when you need to override the configured SQLite path
+temporarily; if `--db` is omitted, the CLI uses `AGENT_TRACKER_DB` when set.
+Explicit CLI arguments always take precedence over environment defaults. When
+`canonical_config_path` is set, mutating commands refuse copied configs and
 database overrides so live state stays attached to the canonical project.
 
 ## First Run Checklist
@@ -18,6 +21,25 @@ mkdir -p tracking/spool/inbox tracking/spool/done tracking/spool/error tracking/
 agent-tracker init --config tracking/project.json
 agent-tracker import --config tracking/project.json
 agent-tracker status --config tracking/project.json
+```
+
+In a project shell or wrapper script, set the config once and omit repeated
+`--config` arguments:
+
+```bash
+export AGENT_TRACKER_CONFIG=tracking/project.json
+agent-tracker init
+agent-tracker import
+agent-tracker status
+```
+
+For temporary read-only inspection of another SQLite file, wrappers can provide
+a database default while still allowing callers to override it explicitly:
+
+```bash
+AGENT_TRACKER_CONFIG=tracking/project.json \
+AGENT_TRACKER_DB=/tmp/agent-tracker.snapshot.sqlite \
+agent-tracker status --json
 ```
 
 Use `init` to create or refresh the project row and database schema. Use

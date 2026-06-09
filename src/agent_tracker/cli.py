@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import textwrap
 from pathlib import Path
 from typing import Any
 
-from agent_tracker.config import load_config
+from agent_tracker.config import PROJECT_CONFIG_ENV_VAR, PROJECT_DB_ENV_VAR, load_config
 from agent_tracker.db import intake_to_dict, proposed_task_to_dict, state_to_dict
 from agent_tracker.models import INTAKE_STATES, INTEGRATION_STATES
 from agent_tracker.service import Coordinator
@@ -28,9 +29,32 @@ _HUMAN_OUTPUT_WIDTH = 80
 
 def coordinator(args: argparse.Namespace) -> Coordinator:
     """Build a coordinator from CLI args."""
-    config = load_config(args.config)
-    db_path = Path(args.db).expanduser() if getattr(args, "db", "") else None
+    config_path = _resolve_config_arg(args)
+    config = load_config(config_path)
+    db_value = _resolve_db_arg(args)
+    db_path = Path(db_value).expanduser() if db_value else None
     return Coordinator(config, db_path=db_path)
+
+
+def _resolve_config_arg(args: argparse.Namespace) -> str:
+    """Return the explicit or environment-provided project config path."""
+    config_path = str(getattr(args, "config", "") or "").strip()
+    if config_path:
+        return config_path
+    env_config_path = os.environ.get(PROJECT_CONFIG_ENV_VAR, "").strip()
+    if env_config_path:
+        return env_config_path
+    raise ValueError(
+        f"Project config JSON path is required; pass --config or set {PROJECT_CONFIG_ENV_VAR}"
+    )
+
+
+def _resolve_db_arg(args: argparse.Namespace) -> str:
+    """Return the explicit or environment-provided SQLite database path."""
+    db_path = str(getattr(args, "db", "") or "").strip()
+    if db_path:
+        return db_path
+    return os.environ.get(PROJECT_DB_ENV_VAR, "").strip()
 
 
 def print_json(payload: Any) -> None:
@@ -470,8 +494,16 @@ def command_export(args: argparse.Namespace) -> int:
 
 def add_common(parser: argparse.ArgumentParser) -> None:
     """Add common project args."""
-    parser.add_argument("--config", required=True, help="Project config JSON path.")
-    parser.add_argument("--db", default="", help="Override SQLite DB path.")
+    parser.add_argument(
+        "--config",
+        default="",
+        help=f"Project config JSON path. Defaults to ${PROJECT_CONFIG_ENV_VAR}.",
+    )
+    parser.add_argument(
+        "--db",
+        default="",
+        help=f"Override SQLite DB path. Defaults to ${PROJECT_DB_ENV_VAR}.",
+    )
 
 
 def parse_json_object(value: str, label: str) -> dict[str, Any]:

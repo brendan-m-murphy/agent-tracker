@@ -1,4 +1,10 @@
-"""Project configuration loading."""
+"""Project configuration loading.
+
+This module owns validated JSON project config loading and shared configuration
+constants used by command-line and documentation surfaces. Config files remain
+the source of project semantics; environment variables only provide CLI default
+paths before the normal validation path runs.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 SUPPORTED_CONFIG_SCHEMA_VERSION = 1
+PROJECT_CONFIG_ENV_VAR = "AGENT_TRACKER_CONFIG"
+PROJECT_DB_ENV_VAR = "AGENT_TRACKER_DB"
 
 _TEXT_FIELDS = {
     "project_id",

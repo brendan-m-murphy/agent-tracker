@@ -15,7 +15,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from agent_tracker import cli  # noqa: E402
 from agent_tracker import service as service_module  # noqa: E402
-from agent_tracker.config import SUPPORTED_CONFIG_SCHEMA_VERSION, load_config  # noqa: E402
+from agent_tracker.config import (  # noqa: E402
+    PROJECT_CONFIG_ENV_VAR,
+    PROJECT_DB_ENV_VAR,
+    SUPPORTED_CONFIG_SCHEMA_VERSION,
+    load_config,
+)
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
 from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
@@ -193,6 +198,13 @@ PR_OR_REVIEW_POLICY = {
 }
 
 
+@pytest.fixture(autouse=True)
+def clear_agent_tracker_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent agent-tracker env defaults from leaking into unrelated tests."""
+    monkeypatch.delenv(PROJECT_CONFIG_ENV_VAR, raising=False)
+    monkeypatch.delenv(PROJECT_DB_ENV_VAR, raising=False)
+
+
 def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> None:
     """Configs without an explicit schema version use the current schema."""
     config_path = write_project(tmp_path)
@@ -250,6 +262,87 @@ def test_cli_reports_malformed_config_errors_without_traceback(
     assert "Traceback" not in stderr.getvalue()
     assert not (tmp_path / ".agent-tracker" / "state.sqlite").exists()
     assert not (tmp_path / "state.sqlite").exists()
+
+
+def test_cli_uses_config_env_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI commands use the config env var when --config is omitted."""
+    config_path = write_project(tmp_path)
+    monkeypatch.setenv(PROJECT_CONFIG_ENV_VAR, str(config_path))
+
+    code = cli.main(["import"])
+
+    assert code == 0
+    assert Coordinator(load_config(config_path)).get_task("ready").state == "ready"
+
+
+def test_cli_uses_db_env_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI commands use the database env var when --db is omitted."""
+    config_path = write_project(tmp_path)
+    env_db_path = tmp_path / "env-state.sqlite"
+    monkeypatch.setenv(PROJECT_CONFIG_ENV_VAR, str(config_path))
+    monkeypatch.setenv(PROJECT_DB_ENV_VAR, str(env_db_path))
+
+    code = cli.main(["import"])
+
+    assert code == 0
+    assert env_db_path.exists()
+    assert not (tmp_path / "state.sqlite").exists()
+    assert (
+        Coordinator(load_config(config_path), db_path=env_db_path).get_task("ready").state
+        == "ready"
+    )
+
+
+def test_cli_explicit_config_and_db_override_env_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit --config and --db values take precedence over env defaults."""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    env_config = write_project(env_root)
+    env_data = json.loads(env_config.read_text(encoding="utf-8"))
+    env_data["project_id"] = "env-toy"
+    env_config.write_text(json.dumps(env_data), encoding="utf-8")
+    Coordinator(load_config(env_config)).import_tasks()
+
+    explicit_root = tmp_path / "explicit"
+    explicit_root.mkdir()
+    explicit_config = write_project(explicit_root)
+    explicit_data = json.loads(explicit_config.read_text(encoding="utf-8"))
+    explicit_data["project_id"] = "explicit-toy"
+    explicit_config.write_text(json.dumps(explicit_data), encoding="utf-8")
+    explicit_db_path = tmp_path / "explicit-db.sqlite"
+    Coordinator(load_config(explicit_config), db_path=explicit_db_path).import_tasks()
+
+    env_db_path = tmp_path / "env-db.sqlite"
+    monkeypatch.setenv(PROJECT_CONFIG_ENV_VAR, str(env_config))
+    monkeypatch.setenv(PROJECT_DB_ENV_VAR, str(env_db_path))
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "status",
+                "--config",
+                str(explicit_config),
+                "--db",
+                str(explicit_db_path),
+                "--json",
+            ]
+        )
+
+    payload = json.loads(stdout.getvalue())
+    assert code == 0
+    assert payload["project_id"] == "explicit-toy"
+    assert payload["db_path"] == str(explicit_db_path)
+    assert not env_db_path.exists()
 
 
 def test_import_evaluates_ready_blocked_and_deferred_tasks(tmp_path: Path) -> None:
@@ -507,15 +600,9 @@ def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
     assert any(line.startswith("    next: Coordinate the implementation") for line in lines)
-    assert any(
-        line.startswith("          details before asking another worker")
-        for line in lines
-    )
+    assert any(line.startswith("          details before asking another worker") for line in lines)
     assert any(line.startswith("    blocker: Wait until the ready task") for line in lines)
-    assert any(
-        line.startswith("             with enough evidence")
-        for line in lines
-    )
+    assert any(line.startswith("             with enough evidence") for line in lines)
 
 
 def test_cli_next_human_output_wraps_long_next_action(tmp_path: Path) -> None:
@@ -2081,6 +2168,35 @@ def test_noncanonical_config_refuses_mutating_commands(tmp_path: Path) -> None:
                 "worker",
             ]
         )
+
+    assert code == 1
+    assert "canonical config" in stderr.getvalue()
+    assert not (copied_root / "state.sqlite").exists()
+
+
+def test_env_config_preserves_canonical_mutation_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env-derived config paths still enforce canonical mutation safety."""
+    canonical_root = tmp_path / "canonical"
+    canonical_root.mkdir()
+    config_path = write_project(canonical_root)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["canonical_config_path"] = str(config_path)
+    data["state_root"] = str(canonical_root)
+    data["task_source_root"] = str(canonical_root)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    copied_root = tmp_path / "copied"
+    copied_root.mkdir()
+    copied_config = copied_root / "project.json"
+    copied_config.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv(PROJECT_CONFIG_ENV_VAR, str(copied_config))
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(["claim", "--agent", "agent-1", "--role", "worker"])
 
     assert code == 1
     assert "canonical config" in stderr.getvalue()

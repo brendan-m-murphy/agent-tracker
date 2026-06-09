@@ -1,11 +1,16 @@
 # Configuration Reference
 
-An `agent-tracker` project is configured by a JSON file passed to every CLI
-command with `--config`.
+An `agent-tracker` project is configured by a JSON file passed to CLI commands
+with `--config` or provided as an environment default.
 
 ```bash
 agent-tracker status --config path/to/project.json
 ```
+
+If `--config` is omitted, the CLI reads `AGENT_TRACKER_CONFIG`. If `--db` is
+omitted, the CLI reads `AGENT_TRACKER_DB` as a SQLite database override.
+Explicit `--config` and `--db` arguments always take precedence over these
+environment defaults.
 
 All relative paths in the config are resolved relative to the directory
 containing the config file. This keeps commands stable no matter where they are
@@ -59,6 +64,14 @@ Run it with:
 ```bash
 agent-tracker import --config tracking/project.json
 agent-tracker status --config tracking/project.json
+```
+
+For an interactive local shell, export the config once:
+
+```bash
+export AGENT_TRACKER_CONFIG=tracking/project.json
+agent-tracker import
+agent-tracker status
 ```
 
 ## Full Local Config
@@ -145,6 +158,11 @@ through the copied config fail with a concise error naming the canonical config.
 Read-only commands such as `status`, `next`, and `task` can still inspect the
 resolved database path.
 
+Environment defaults do not bypass this authority model. A config path from
+`AGENT_TRACKER_CONFIG` is still loaded through the same validation path as
+`--config`, and mutating commands still refuse copied configs or database
+overrides when `canonical_config_path` is set.
+
 Absolute paths and `~` are also supported:
 
 ```json
@@ -152,6 +170,15 @@ Absolute paths and `~` are also supported:
   "project_id": "example",
   "db_path": "~/agent-tracker/example.sqlite"
 }
+```
+
+Wrapper scripts can set a default database path without changing the committed
+config:
+
+```bash
+AGENT_TRACKER_CONFIG=tracking/project.json \
+AGENT_TRACKER_DB=/tmp/example-agent-tracker.sqlite \
+agent-tracker status --json
 ```
 
 ## Plugin Specs
