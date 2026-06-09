@@ -63,25 +63,25 @@ agent-tracker --help
 
 ## Quickstart
 
-The quickest way to try the queue is to create a small tracker directory with a
-config, task plan, local spool, and export directory:
+The quickest way to try the queue is to scaffold a small plugin-free tracker
+directory:
 
 ```bash
-mkdir -p demo-tracker/spool/inbox demo-tracker/spool/done demo-tracker/spool/error demo-tracker/exports
+agent-tracker init-project demo-tracker --project-id demo --name "Demo Tracker"
 ```
 
-Create `demo-tracker/project.json`. Relative paths resolve beside this file, so
-the commands work from any current directory:
+This writes `project.json`, `tasks.json`, a local spool, an export directory, a
+`.agent-tracker` runtime directory, and `.gitignore` entries for runtime files.
+The generated config uses the built-in JSON task importer, default prompt
+renderer, and JSON snapshot exporter without plugin fields:
 
 ```json
 {
+  "config_schema_version": 1,
   "project_id": "demo",
   "name": "Demo Tracker",
   "db_path": ".agent-tracker/state.sqlite",
   "task_plan_path": "tasks.json",
-  "importer": "agent_tracker.importers:JsonTaskImporter",
-  "prompt_renderer": "agent_tracker.rendering:DefaultPromptRenderer",
-  "exporter": "agent_tracker.exporters:JsonSnapshotExporter",
   "export_path": "exports/snapshot.json",
   "spool": {
     "inbox": "spool/inbox",
@@ -91,8 +91,8 @@ the commands work from any current directory:
 }
 ```
 
-Create `demo-tracker/tasks.json` with one ready task and one dependent review
-task:
+Replace the starter task in `demo-tracker/tasks.json` with real work. For
+example, one ready task and one dependent review task:
 
 ```json
 {
@@ -225,11 +225,13 @@ agent-tracker export --config demo-tracker/project.json
 
 ## CLI Reference
 
-Every command requires `--config <project.json>`. Every command also accepts
-`--db <path>` to override the SQLite database path from config.
+Project-operation commands require `--config <project.json>`. They also accept
+`--db <path>` to override the SQLite database path from config. `init-project`
+is the setup exception because it creates the project config.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
+| `init-project` | Create a plugin-free project layout with config, task plan, spool, exports, and runtime ignores. | `agent-tracker init-project demo-tracker --project-id demo` |
 | `init` | Create or update the project row and database schema. | `agent-tracker init --config demo-tracker/project.json` |
 | `import` | Import tasks and dependencies from the configured importer. | `agent-tracker import --config demo-tracker/project.json` |
 | `status` | Show project counts; add `--json` for full task state. | `agent-tracker status --config demo-tracker/project.json --json` |

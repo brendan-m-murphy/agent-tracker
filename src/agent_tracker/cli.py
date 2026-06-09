@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from agent_tracker.config import load_config
+from agent_tracker.config import SUPPORTED_CONFIG_SCHEMA_VERSION, load_config
 from agent_tracker.db import intake_to_dict, proposed_task_to_dict, state_to_dict
 from agent_tracker.models import INTAKE_STATES, INTEGRATION_STATES
 from agent_tracker.service import Coordinator
@@ -21,6 +21,11 @@ OVERVIEW_GROUPS = (
     ("integration", "Integration"),
     ("blocked", "Blocked"),
     ("recently_completed", "Recently completed"),
+)
+BOOTSTRAP_GITIGNORE_LINES = (
+    ".agent-tracker/",
+    "spool/",
+    "exports/*.json",
 )
 
 
@@ -50,6 +55,156 @@ def print_path_report(coord: Coordinator) -> None:
     ):
         if key in paths:
             print(f"  {key}: {paths[key]}", file=sys.stderr)
+
+
+def command_init_project(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser()
+    created = bootstrap_project(
+        root,
+        project_id=args.project_id,
+        name=args.name,
+        task_id=args.task_id,
+        task_title=args.task_title,
+        canonical_config=args.canonical_config,
+        force=args.force,
+        write_gitignore=not args.no_gitignore,
+    )
+    config_path = root.resolve() / "project.json"
+    print(f"Created plugin-free agent-tracker project at {root.resolve()}")
+    for path in created:
+        print(f"  {path}")
+    print("Next commands:")
+    print(f"  agent-tracker init --config {config_path}")
+    print(f"  agent-tracker import --config {config_path}")
+    print(f"  agent-tracker next --config {config_path} --limit 1")
+    return 0
+
+
+def bootstrap_project(
+    root: Path,
+    *,
+    project_id: str,
+    name: str,
+    task_id: str,
+    task_title: str,
+    canonical_config: bool,
+    force: bool,
+    write_gitignore: bool,
+) -> list[Path]:
+    """Create a conventional plugin-free tracker project layout."""
+    if root.exists() and not root.is_dir():
+        raise ValueError(f"project path is not a directory: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    project_id = project_id.strip() or _default_project_id(root)
+    name = name.strip() or _default_project_name(project_id)
+    task_id = task_id.strip() or "first-task"
+    task_title = task_title.strip() or "Write the first task"
+    config_path = root / "project.json"
+    task_plan_path = root / "tasks.json"
+    if not force:
+        for path in (config_path, task_plan_path):
+            if path.exists():
+                raise ValueError(f"refusing to overwrite existing file: {path}")
+
+    for directory in (
+        root / ".agent-tracker",
+        root / "spool" / "inbox",
+        root / "spool" / "done",
+        root / "spool" / "error",
+        root / "exports",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    config_payload: dict[str, Any] = {
+        "config_schema_version": SUPPORTED_CONFIG_SCHEMA_VERSION,
+        "project_id": project_id,
+        "name": name,
+        "db_path": ".agent-tracker/state.sqlite",
+        "task_plan_path": "tasks.json",
+        "export_path": "exports/snapshot.json",
+        "spool": {
+            "inbox": "spool/inbox",
+            "done": "spool/done",
+            "error": "spool/error",
+        },
+    }
+    if canonical_config:
+        config_payload["canonical_config_path"] = str(config_path)
+        config_payload["state_root"] = str(root)
+        config_payload["task_source_root"] = str(root)
+
+    task_payload = {
+        "tasks": [
+            {
+                "id": task_id,
+                "title": task_title,
+                "status": "pending",
+                "priority": 10,
+                "summary": "Replace this starter task with the first real tracker task.",
+                "validation_checks": [
+                    "Manual check: the task description is specific enough to claim."
+                ],
+                "next_action": "Edit tasks.json with your real task plan, then run import.",
+                "metadata": {
+                    "roles": ["maintainer"],
+                    "write_scopes": ["tasks.json"],
+                },
+            }
+        ]
+    }
+
+    created = [
+        _write_json(config_path, config_payload, force=force),
+        _write_json(task_plan_path, task_payload, force=force),
+    ]
+    if write_gitignore:
+        gitignore = _update_gitignore(root)
+        if gitignore is not None:
+            created.append(gitignore)
+    return created
+
+
+def _write_json(path: Path, payload: dict[str, Any], *, force: bool) -> Path:
+    """Write a JSON file unless overwrite protection blocks it."""
+    if path.exists() and not force:
+        raise ValueError(f"refusing to overwrite existing file: {path}")
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def _update_gitignore(root: Path) -> Path | None:
+    path = root / ".gitignore"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    existing = {line.strip() for line in text.splitlines()}
+    missing = [line for line in BOOTSTRAP_GITIGNORE_LINES if line not in existing]
+    if not missing:
+        return None
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += "\n".join(missing) + "\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _default_project_id(root: Path) -> str:
+    chars: list[str] = []
+    previous_separator = False
+    for char in root.name.lower():
+        if char.isalnum():
+            chars.append(char)
+            previous_separator = False
+        elif not previous_separator:
+            chars.append("-")
+            previous_separator = True
+    return "".join(chars).strip("-") or "tracker"
+
+
+def _default_project_name(project_id: str) -> str:
+    return (
+        " ".join(part for part in project_id.replace("_", "-").split("-") if part).title()
+        or "Tracker"
+    )
 
 
 def command_init(args: argparse.Namespace) -> int:
@@ -464,6 +619,32 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    init_project = sub.add_parser(
+        "init-project",
+        help="Create a plugin-free tracker project layout.",
+    )
+    init_project.add_argument("path", help="Directory where project.json and tasks.json go.")
+    init_project.add_argument("--project-id", default="")
+    init_project.add_argument("--name", default="")
+    init_project.add_argument("--task-id", default="first-task")
+    init_project.add_argument("--task-title", default="Write the first task")
+    init_project.add_argument(
+        "--canonical-config",
+        action="store_true",
+        help="Write absolute canonical config/state roots for copied-worktree safety.",
+    )
+    init_project.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing project.json and tasks.json.",
+    )
+    init_project.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help="Do not add runtime paths to a .gitignore in the project directory.",
+    )
+    init_project.set_defaults(func=command_init_project)
 
     init = sub.add_parser("init", help="Initialize project database.")
     add_common(init)

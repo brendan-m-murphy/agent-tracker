@@ -14,11 +14,16 @@ database overrides so live state stays attached to the canonical project.
 For a new local project:
 
 ```bash
-mkdir -p tracking/spool/inbox tracking/spool/done tracking/spool/error tracking/exports
+agent-tracker init-project tracking --project-id demo --name "Demo Tracker"
 agent-tracker init --config tracking/project.json
 agent-tracker import --config tracking/project.json
 agent-tracker status --config tracking/project.json
 ```
+
+`init-project` creates a plugin-free JSON-task tracker layout with
+`project.json`, `tasks.json`, local spool directories, an export directory, and
+runtime `.gitignore` entries. Use `--canonical-config` when copied worktrees
+should be refused for mutating commands.
 
 Use `init` to create or refresh the project row and database schema. Use
 `import` whenever the committed task plan changes. `import` also initializes the

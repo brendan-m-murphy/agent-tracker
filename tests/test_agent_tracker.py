@@ -252,6 +252,112 @@ def test_cli_reports_malformed_config_errors_without_traceback(
     assert not (tmp_path / "state.sqlite").exists()
 
 
+def test_cli_init_project_bootstraps_plugin_free_layout(tmp_path: Path) -> None:
+    """A new tracker can be created and operated with built-in defaults."""
+    project_root = tmp_path / "tracking"
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "init-project",
+                str(project_root),
+                "--project-id",
+                "demo",
+                "--name",
+                "Demo Tracker",
+            ]
+        )
+
+    config_path = project_root / "project.json"
+    task_plan_path = project_root / "tasks.json"
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    task_payload = json.loads(task_plan_path.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert "agent-tracker init --config" in stdout.getvalue()
+    assert config_payload == {
+        "config_schema_version": SUPPORTED_CONFIG_SCHEMA_VERSION,
+        "project_id": "demo",
+        "name": "Demo Tracker",
+        "db_path": ".agent-tracker/state.sqlite",
+        "task_plan_path": "tasks.json",
+        "export_path": "exports/snapshot.json",
+        "spool": {
+            "inbox": "spool/inbox",
+            "done": "spool/done",
+            "error": "spool/error",
+        },
+    }
+    assert "importer" not in config_payload
+    assert "prompt_renderer" not in config_payload
+    assert "exporter" not in config_payload
+    assert task_payload["tasks"][0]["id"] == "first-task"
+    assert (project_root / ".agent-tracker").is_dir()
+    assert (project_root / "spool" / "inbox").is_dir()
+    assert (project_root / "spool" / "done").is_dir()
+    assert (project_root / "spool" / "error").is_dir()
+    assert (project_root / "exports").is_dir()
+    assert ".agent-tracker/" in (project_root / ".gitignore").read_text(encoding="utf-8")
+
+    assert cli.main(["init", "--config", str(config_path)]) == 0
+    assert cli.main(["import", "--config", str(config_path)]) == 0
+    coord = Coordinator(load_config(config_path))
+    state = coord.get_task("first-task")
+
+    assert state.state == "ready"
+    assert state.task.title == "Write the first task"
+    assert "first-task" in coord.render_prompt("first-task", markdown=True)
+
+
+def test_cli_init_project_can_write_canonical_config(tmp_path: Path) -> None:
+    """Bootstrap can opt into copied-worktree mutation safety from the start."""
+    project_root = tmp_path / "tracking"
+
+    assert (
+        cli.main(
+            [
+                "init-project",
+                str(project_root),
+                "--project-id",
+                "demo",
+                "--canonical-config",
+                "--no-gitignore",
+            ]
+        )
+        == 0
+    )
+
+    config_path = project_root / "project.json"
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config = load_config(config_path)
+
+    assert config_payload["canonical_config_path"] == str(config_path.resolve())
+    assert config_payload["state_root"] == str(project_root.resolve())
+    assert config_payload["task_source_root"] == str(project_root.resolve())
+    assert config.canonical_config_path == config_path.resolve()
+    assert not (project_root / ".gitignore").exists()
+
+
+def test_cli_init_project_refuses_to_overwrite_files(tmp_path: Path) -> None:
+    """Existing project definitions are protected unless --force is explicit."""
+    project_root = tmp_path / "tracking"
+    project_root.mkdir()
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(["init-project", str(project_root), "--project-id", "demo"])
+
+    assert code == 1
+    assert "refusing to overwrite existing file" in stderr.getvalue()
+    assert json.loads((project_root / "project.json").read_text(encoding="utf-8")) == {}
+    assert cli.main(["init-project", str(project_root), "--project-id", "demo", "--force"]) == 0
+    assert json.loads((project_root / "project.json").read_text(encoding="utf-8"))[
+        "project_id"
+    ] == "demo"
+
+
 def test_import_evaluates_ready_blocked_and_deferred_tasks(tmp_path: Path) -> None:
     """Imported task dependencies determine computed state."""
     config = load_config(write_project(tmp_path))

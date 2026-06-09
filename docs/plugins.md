@@ -22,7 +22,15 @@ arguments. If it is already an object, that object is used directly.
 ## When To Write A Plugin
 
 Start with the built-in JSON importer and default renderer when your project can
-store tasks in `tasks.json`. Add a plugin when you need to:
+store tasks in `tasks.json`:
+
+```bash
+agent-tracker init-project tracking --project-id demo
+agent-tracker import --config tracking/project.json
+```
+
+The generated config does not need `importer`, `prompt_renderer`, or `exporter`
+fields. Add a plugin only when you need to:
 
 - import tasks from an existing tracker, issue system, spreadsheet, or custom
   planning format;
