@@ -291,7 +291,7 @@
       "id": "overview-command",
       "title": "Add high-level project overview command",
       "repo": "agent-tracker",
-      "status": "pending",
+      "status": "done",
       "priority": 27,
       "prompt_key": "overview-command",
       "prompt_path": "tracking/README.md",

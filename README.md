@@ -233,6 +233,7 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `init` | Create or update the project row and database schema. | `agent-tracker init --config demo-tracker/project.json` |
 | `import` | Import tasks and dependencies from the configured importer. | `agent-tracker import --config demo-tracker/project.json` |
 | `status` | Show project counts; add `--json` for full task state. | `agent-tracker status --config demo-tracker/project.json --json` |
+| `overview` | Show grouped ready, active, review, integration, blocked, and recent completion work; add `--json` for grouped task dictionaries. | `agent-tracker overview --config demo-tracker/project.json --limit 5` |
 | `next` | List ready tasks, optionally filtered by repo or role. | `agent-tracker next --config demo-tracker/project.json --role maintainer --limit 1` |
 | `task` | Show one task's prompt/context; add `--json` for stored state. | `agent-tracker task --config demo-tracker/project.json write-readme --markdown` |
 | `claim` | Atomically claim a ready task and create a lease token. | `agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200` |

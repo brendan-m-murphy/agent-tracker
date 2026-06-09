@@ -14,6 +14,15 @@ from agent_tracker.db import state_to_dict
 from agent_tracker.models import INTEGRATION_STATES
 from agent_tracker.service import Coordinator
 
+OVERVIEW_GROUPS = (
+    ("ready", "Ready"),
+    ("active", "Active"),
+    ("review", "Review"),
+    ("integration", "Integration"),
+    ("blocked", "Blocked"),
+    ("recently_completed", "Recently completed"),
+)
+
 
 def coordinator(args: argparse.Namespace) -> Coordinator:
     """Build a coordinator from CLI args."""
@@ -79,6 +88,57 @@ def command_status(args: argparse.Namespace) -> int:
     print(f"  integration: {len(payload['integration'])}")
     print(f"  blocked: {len(payload['blocked'])}")
     return 0
+
+
+def command_overview(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.overview_payload(
+        recover_stale_leases=args.recover_stale_leases,
+        limit=args.limit,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    print_overview(payload)
+    return 0
+
+
+def print_overview(payload: dict[str, Any]) -> None:
+    """Print a grouped project overview."""
+    print(f"{payload['name']} ({payload['project_id']})")
+    for key, heading in OVERVIEW_GROUPS:
+        items = payload["groups"][key]
+        total = payload["counts"][key]
+        print(f"{heading} ({total})")
+        if not items:
+            print("  (none)")
+            continue
+        for item in items:
+            print_overview_item(key, item)
+        if len(items) < total:
+            print(f"  ... {total - len(items)} more")
+
+
+def print_overview_item(group: str, item: dict[str, Any]) -> None:
+    """Print one overview item."""
+    qualifiers = []
+    if group in {"active", "review", "integration"}:
+        qualifiers.append(str(item["state"]))
+    if item.get("lease_agent_id"):
+        qualifiers.append(f"agent {item['lease_agent_id']}")
+    qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
+    print(f"  - {item['id']}: {item['title']}{qualifier}")
+
+    for blocker in item.get("blockers", [])[:2]:
+        print(f"    blocker: {blocker}")
+    if len(item.get("blockers", [])) > 2:
+        print(f"    blocker: +{len(item['blockers']) - 2} more")
+    if item.get("next_action"):
+        print(f"    next: {item['next_action']}")
+    if item.get("latest_evidence"):
+        print(f"    evidence: {item['latest_evidence']}")
+    if group == "recently_completed" and item.get("completed_at"):
+        print(f"    completed: {item['completed_at']} by {item.get('completed_by') or 'system'}")
 
 
 def command_next(args: argparse.Namespace) -> int:
@@ -284,6 +344,18 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true")
     status.add_argument("--recover-stale-leases", action="store_true")
     status.set_defaults(func=command_status)
+
+    overview = sub.add_parser("overview", help="Show grouped project overview.")
+    add_common(overview)
+    overview.add_argument("--json", action="store_true")
+    overview.add_argument("--recover-stale-leases", action="store_true")
+    overview.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Maximum items to show per group; use 0 for all.",
+    )
+    overview.set_defaults(func=command_overview)
 
     next_cmd = sub.add_parser("next", help="Show ready tasks.")
     add_common(next_cmd)

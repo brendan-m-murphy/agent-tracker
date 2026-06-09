@@ -867,6 +867,47 @@ class Store:
                 self._audit(conn, project_id, task_id, "evidence.record", actor, {"uri": uri})
             return inserted
 
+    def recent_completion_records(self, project_id: str) -> list[dict[str, str]]:
+        """Return audit-backed completion records newest first."""
+        with self.transaction(read_only=True) as conn:
+            rows = list(
+                conn.execute(
+                    """
+                    SELECT task_id, action, actor, payload_json, created_at
+                    FROM audit_log
+                    WHERE project_id = ?
+                      AND task_id != ''
+                      AND action IN (
+                        'task.complete',
+                        'task.resolve_review',
+                        'task.resolve_integration'
+                      )
+                    ORDER BY id DESC
+                    """,
+                    (project_id,),
+                )
+            )
+        seen: set[str] = set()
+        records: list[dict[str, str]] = []
+        for row in rows:
+            task_id = str(row["task_id"])
+            if task_id in seen:
+                continue
+            action = str(row["action"])
+            payload = loads(str(row["payload_json"]), {})
+            if action != "task.complete" and payload.get("status") != "done":
+                continue
+            seen.add(task_id)
+            records.append(
+                {
+                    "task_id": task_id,
+                    "action": action,
+                    "actor": str(row["actor"]),
+                    "completed_at": str(row["created_at"]),
+                }
+            )
+        return records
+
     def snapshot(self, project_id: str) -> dict[str, Any]:
         """Return a JSON-friendly project snapshot."""
         states = self.task_states(project_id)

@@ -93,6 +93,44 @@ inspection, opt in:
 agent-tracker status --config project.json --recover-stale-leases
 ```
 
+## Project Overview
+
+Use `overview` when you need a project-log view instead of raw status IDs:
+
+```bash
+agent-tracker overview --config project.json
+```
+
+The human output is grouped under stable headings:
+
+- Ready;
+- Active;
+- Review;
+- Integration;
+- Blocked;
+- Recently completed.
+
+Blocked entries include unsatisfied requirement details from the evaluated
+`requirements` data. Ready and waiting entries show `next_action` and latest
+evidence when available. Recently completed entries are ordered from completion
+audit records, not task priority.
+
+Use JSON output for automation:
+
+```bash
+agent-tracker overview --config project.json --json
+```
+
+The JSON payload contains `counts` plus grouped task dictionaries under
+`groups.ready`, `groups.active`, `groups.review`, `groups.integration`,
+`groups.blocked`, and `groups.recently_completed`. By default, each group is
+limited to five entries for readability; pass `--limit 0` for every grouped
+task dictionary.
+
+Like `status`, `overview` is read-only by default. It reports the effective
+state without mutating stale leases. Pass `--recover-stale-leases` only when
+inspection should also write stale-lease recovery to SQLite.
+
 ## List Ready Tasks
 
 Show the next ready tasks:

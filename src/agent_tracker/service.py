@@ -10,10 +10,12 @@ from typing import Any
 from agent_tracker.config import ProjectConfig
 from agent_tracker.db import Store, state_to_dict
 from agent_tracker.models import (
+    ACTIVE_STATES,
     INTEGRATION_STATES,
     REVIEW_STATES,
     Claim,
     EventRecord,
+    RequirementState,
     TaskState,
 )
 from agent_tracker.plugins import load_plugin
@@ -415,16 +417,61 @@ class Coordinator:
             **self.config.path_summary(db_path=self.store.path),
             "tasks": [state_to_dict(state) for state in states],
             "ready": [state.task.task_id for state in states if state.state == "ready"],
-            "active": [
-                state.task.task_id
-                for state in states
-                if state.state in {"claimed", "in_progress", "waiting_evidence"}
-            ],
+            "active": [state.task.task_id for state in states if state.state in ACTIVE_STATES],
             "review": [state.task.task_id for state in states if state.state in REVIEW_STATES],
             "integration": [
                 state.task.task_id for state in states if state.state in INTEGRATION_STATES
             ],
             "blocked": [state.task.task_id for state in states if state.state == "blocked"],
+        }
+
+    def overview_payload(
+        self,
+        *,
+        recover_stale_leases: bool = False,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        """Return a grouped project overview payload."""
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
+        states = self.task_states(recover_stale_leases=recover_stale_leases)
+        states_by_id = {state.task.task_id: state for state in states}
+        completion_records = self.store.recent_completion_records(self.config.project_id)
+        completion_records_by_task = {record["task_id"]: record for record in completion_records}
+        recently_completed = [
+            state
+            for record in completion_records
+            if (state := states_by_id.get(record["task_id"])) is not None and state.state == "done"
+        ]
+        grouped_states: dict[str, list[TaskState]] = {
+            "ready": [state for state in states if state.state == "ready"],
+            "active": [state for state in states if state.state in ACTIVE_STATES],
+            "review": [state for state in states if state.state in REVIEW_STATES],
+            "integration": [state for state in states if state.state in INTEGRATION_STATES],
+            "blocked": [state for state in states if state.state == "blocked"],
+            "recently_completed": recently_completed,
+        }
+        return {
+            "project_id": self.config.project_id,
+            "name": self.config.name,
+            "db_path": str(self.store.path),
+            **self.config.path_summary(db_path=self.store.path),
+            "limit": limit,
+            "counts": {key: len(value) for key, value in grouped_states.items()},
+            "groups": {
+                key: [
+                    _overview_state_to_dict(
+                        state,
+                        completion_record=(
+                            completion_records_by_task.get(state.task.task_id)
+                            if key == "recently_completed"
+                            else None
+                        ),
+                    )
+                    for state in (value[:limit] if limit else value)
+                ]
+                for key, value in grouped_states.items()
+            },
         }
 
     def path_summary(self) -> dict[str, str]:
@@ -444,6 +491,33 @@ def _role_matches(state: TaskState, role: str) -> bool:
     if not isinstance(roles, (list, tuple, set)):
         return False
     return role in roles
+
+
+def _overview_state_to_dict(
+    state: TaskState,
+    *,
+    completion_record: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Convert a task state into the overview task shape."""
+    payload = state_to_dict(state)
+    payload["blockers"] = [
+        _requirement_summary(requirement) for requirement in state.outstanding_requirements
+    ]
+    payload["latest_evidence"] = state.evidence[-1] if state.evidence else ""
+    if completion_record is not None:
+        payload["completed_at"] = completion_record["completed_at"]
+        payload["completed_by"] = completion_record["actor"]
+        payload["completion_action"] = completion_record["action"]
+    return payload
+
+
+def _requirement_summary(requirement: RequirementState) -> str:
+    """Return a compact blocker summary for human and JSON overview output."""
+    description = requirement.description.strip()
+    detail = requirement.detail.strip()
+    if description and detail:
+        return f"{description} ({detail})"
+    return description or detail
 
 
 def _first_text(*values: Any) -> str:

@@ -94,6 +94,85 @@ def write_project(root: Path) -> Path:
     return config_path
 
 
+def write_overview_project(root: Path) -> Path:
+    """Write a project with enough tasks to exercise overview groups."""
+    config_path = write_project(root)
+    task_path = root / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    payload["tasks"].extend(
+        [
+            {
+                "id": "other-ready",
+                "title": "Other Ready",
+                "status": "pending",
+                "priority": 4,
+                "next_action": "Pick up the remaining ready task.",
+                "requirements": [{"kind": "task", "task": "foundation"}],
+            },
+            {
+                "id": "review-task",
+                "title": "Review Task",
+                "status": "pending",
+                "priority": 5,
+                "requirements": [{"kind": "task", "task": "foundation"}],
+            },
+            {
+                "id": "integration-task",
+                "title": "Integration Task",
+                "status": "pending",
+                "priority": 6,
+                "requirements": [{"kind": "task", "task": "foundation"}],
+            },
+            {
+                "id": "done-a",
+                "title": "Done A",
+                "status": "pending",
+                "priority": 7,
+                "requirements": [{"kind": "task", "task": "foundation"}],
+            },
+            {
+                "id": "done-b",
+                "title": "Done B",
+                "status": "pending",
+                "priority": 8,
+                "requirements": [{"kind": "task", "task": "foundation"}],
+            },
+        ]
+    )
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    return config_path
+
+
+def prepare_overview_state(root: Path) -> tuple[Path, Coordinator]:
+    """Create a mixed queue state for overview tests."""
+    config_path = write_overview_project(root)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    coord.claim(agent_id="agent-1", task_id="ready")
+    review_claim = coord.claim(agent_id="agent-2", task_id="review-task")
+    coord.submit_review(
+        "review-task",
+        lease_token=review_claim.lease_token,
+        agent_id="agent-2",
+        evidence=["pr:review-task"],
+    )
+    integration_claim = coord.claim(agent_id="agent-3", task_id="integration-task")
+    coord.await_integration(
+        "integration-task",
+        lease_token=integration_claim.lease_token,
+        agent_id="agent-3",
+        status="awaiting_merge",
+        evidence=["git:integration-task"],
+    )
+    done_a_claim = coord.claim(agent_id="agent-4", task_id="done-a")
+    coord.complete("done-a", lease_token=done_a_claim.lease_token, evidence=["git:done-a"])
+    done_b_claim = coord.claim(agent_id="agent-5", task_id="done-b")
+    coord.complete("done-b", lease_token=done_b_claim.lease_token, evidence=["git:done-b"])
+    return config_path, coord
+
+
 def write_project_with_completion_policy(root: Path, policy: object) -> Path:
     """Write a toy project whose ready task has completion policy metadata."""
     root.mkdir(parents=True, exist_ok=True)
@@ -218,6 +297,212 @@ def test_imported_non_ready_statuses_compute_to_themselves(
         assert "ready" in payload["active"]
     else:
         assert "ready" not in payload["active"]
+
+
+def test_overview_payload_groups_tasks_with_audit_backed_recent_completion(
+    tmp_path: Path,
+) -> None:
+    """Overview payload groups queue work and orders completion history from audit."""
+    _, coord = prepare_overview_state(tmp_path)
+
+    payload = coord.overview_payload(limit=0)
+
+    assert list(payload["groups"]) == [
+        "ready",
+        "active",
+        "review",
+        "integration",
+        "blocked",
+        "recently_completed",
+    ]
+    assert payload["counts"] == {
+        "ready": 1,
+        "active": 1,
+        "review": 1,
+        "integration": 1,
+        "blocked": 1,
+        "recently_completed": 2,
+    }
+    assert [task["id"] for task in payload["groups"]["ready"]] == ["other-ready"]
+    assert payload["groups"]["ready"][0]["next_action"] == "Pick up the remaining ready task."
+    assert [task["id"] for task in payload["groups"]["active"]] == ["ready"]
+    assert payload["groups"]["active"][0]["lease_agent_id"] == "agent-1"
+    assert payload["groups"]["review"][0]["latest_evidence"] == "pr:review-task"
+    assert payload["groups"]["integration"][0]["state"] == "awaiting_merge"
+    assert payload["groups"]["blocked"][0]["blockers"] == ["Depends on ready (ready: claimed)"]
+    assert [task["id"] for task in payload["groups"]["recently_completed"]] == [
+        "done-b",
+        "done-a",
+    ]
+    assert payload["groups"]["recently_completed"][0]["latest_evidence"] == "git:done-b"
+    assert payload["groups"]["recently_completed"][0]["completion_action"] == "task.complete"
+
+
+def test_overview_recent_completion_includes_successful_resolvers_only(
+    tmp_path: Path,
+) -> None:
+    """Recent completion includes done resolvers and excludes failed resolutions."""
+    config_path = write_overview_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    review_claim = coord.claim(agent_id="agent-1", task_id="review-task")
+    coord.submit_review(
+        "review-task",
+        lease_token=review_claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:review"],
+    )
+    coord.resolve_review(
+        "review-task",
+        status="done",
+        agent_id="reviewer-1",
+        evidence=["review:approved"],
+    )
+
+    done_claim = coord.claim(agent_id="agent-2", task_id="integration-task")
+    coord.await_integration(
+        "integration-task",
+        lease_token=done_claim.lease_token,
+        agent_id="agent-2",
+        status="awaiting_merge",
+        evidence=["git:integration"],
+    )
+    coord.resolve_integration(
+        "integration-task",
+        status="done",
+        agent_id="integrator-1",
+        evidence=["integration:merged"],
+    )
+
+    failed_claim = coord.claim(agent_id="agent-3", task_id="done-a")
+    coord.await_integration(
+        "done-a",
+        lease_token=failed_claim.lease_token,
+        agent_id="agent-3",
+        status="awaiting_merge",
+        evidence=["git:failed"],
+    )
+    coord.resolve_integration(
+        "done-a",
+        status="failed",
+        reason="merge failed",
+        agent_id="integrator-1",
+        evidence=["integration:failed"],
+    )
+
+    payload = coord.overview_payload(limit=0)
+
+    assert [task["id"] for task in payload["groups"]["recently_completed"]] == [
+        "integration-task",
+        "review-task",
+    ]
+    assert payload["groups"]["recently_completed"][0]["completion_action"] == (
+        "task.resolve_integration"
+    )
+    assert payload["groups"]["recently_completed"][1]["completion_action"] == "task.resolve_review"
+
+
+def test_cli_overview_json_groups_tasks_and_counts_limited_items(tmp_path: Path) -> None:
+    """CLI JSON overview exposes grouped task dictionaries with full counts."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "overview",
+                "--config",
+                str(config_path),
+                "--json",
+                "--limit",
+                "1",
+            ]
+        )
+    payload = json.loads(stdout.getvalue())
+
+    assert code == 0
+    assert payload["counts"]["recently_completed"] == 2
+    assert [task["id"] for task in payload["groups"]["recently_completed"]] == ["done-b"]
+    assert payload["groups"]["blocked"][0]["blockers"] == ["Depends on ready (ready: claimed)"]
+
+
+def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
+    tmp_path: Path,
+) -> None:
+    """Human overview reads like a grouped queue log."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--limit", "10"])
+    output = stdout.getvalue()
+
+    assert code == 0
+    assert "Toy Project (toy)" in output
+    assert (
+        "Ready (1)\n"
+        "  - other-ready: Other Ready\n"
+        "    next: Pick up the remaining ready task." in output
+    )
+    assert "Active (1)\n  - ready: Ready [claimed; agent agent-1]" in output
+    assert (
+        "Review (1)\n"
+        "  - review-task: Review Task [awaiting_review]\n"
+        "    evidence: pr:review-task" in output
+    )
+    assert (
+        "Integration (1)\n"
+        "  - integration-task: Integration Task [awaiting_merge]\n"
+        "    evidence: git:integration-task"
+    ) in output
+    assert (
+        "Blocked (1)\n"
+        "  - blocked: Blocked\n"
+        "    blocker: Depends on ready (ready: claimed)" in output
+    )
+    assert "Recently completed (2)\n  - done-b: Done B\n    evidence: git:done-b" in output
+    assert "    completed: " in output
+    assert "foundation: Foundation" not in output
+
+
+def test_overview_inspection_does_not_recover_stale_leases_without_flag(
+    tmp_path: Path,
+) -> None:
+    """Overview follows status stale-lease recovery semantics."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET lease_expires_at = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            ("2000-01-01T00:00:00+00:00", config.project_id, "ready"),
+        )
+
+    assert cli.main(["overview", "--config", str(config_path)]) == 0
+    with coord.store.transaction() as conn:
+        inspected = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+    assert inspected["status"] == "claimed"
+    assert inspected["lease_token"] == claim.lease_token
+
+    assert cli.main(["overview", "--config", str(config_path), "--recover-stale-leases"]) == 0
+    with coord.store.transaction() as conn:
+        recovered = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+    assert recovered["status"] == "pending"
+    assert recovered["lease_token"] == ""
 
 
 def test_claim_heartbeat_complete_and_unblock_downstream(tmp_path: Path) -> None:
