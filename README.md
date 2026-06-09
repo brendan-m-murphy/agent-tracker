@@ -161,6 +161,11 @@ agent-tracker next --config demo-tracker/project.json --role maintainer --limit 
 agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200
 ```
 
+Human `status`, `overview`, and `next` output wraps long values at a standard
+terminal width with continuation lines aligned under the field value. For
+automation, add `--json` to `next`, `status`, or `overview`; JSON output is not
+wrapped or reformatted.
+
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
 the token; `heartbeat`, `complete`, and `fail` require it.
 
@@ -171,8 +176,8 @@ agent-tracker task --config demo-tracker/project.json write-readme --markdown
 ```
 
 The rendered prompt contains the summary, execution notes, dependency state,
-validation checks, and next action. For automation, add `--json` to `next`,
-`status`, or `task`.
+validation checks, and next action. For task-level automation, add `--json` to
+`task`.
 
 Extend a lease while working:
 
@@ -225,8 +230,27 @@ agent-tracker export --config demo-tracker/project.json
 
 ## CLI Reference
 
-Every command requires `--config <project.json>`. Every command also accepts
-`--db <path>` to override the SQLite database path from config.
+Every command accepts `--config <project.json>`. If `--config` is omitted, the
+CLI uses `AGENT_TRACKER_CONFIG` as the default config path. Every command also
+accepts `--db <path>` to override the SQLite database path from config; if
+`--db` is omitted, the CLI uses `AGENT_TRACKER_DB` when set. Explicit CLI
+arguments always take precedence over environment defaults.
+
+For a local project shell:
+
+```bash
+export AGENT_TRACKER_CONFIG=demo-tracker/project.json
+agent-tracker status
+agent-tracker next --role maintainer
+```
+
+For wrapper scripts that need an isolated database:
+
+```bash
+AGENT_TRACKER_CONFIG=demo-tracker/project.json \
+AGENT_TRACKER_DB=/tmp/demo-agent-tracker.sqlite \
+agent-tracker status --json
+```
 
 | Command | Purpose | Example |
 | --- | --- | --- |
