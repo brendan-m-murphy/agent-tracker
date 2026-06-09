@@ -15,8 +15,10 @@ from typing import Any
 from agent_tracker.config import ProjectConfig
 from agent_tracker.models import (
     ACTIVE_STATES,
+    INTAKE_STATES,
     INTEGRATION_STATES,
     MANUAL_STATES,
+    PROPOSAL_STATES,
     REVIEW_STATES,
     Claim,
     DependencyRecord,
@@ -979,6 +981,51 @@ class Store:
             rows = list(conn.execute(sql, values))
         return [_intake_from_row(row) for row in rows]
 
+    def update_intake_status(
+        self,
+        project_id: str,
+        intake_id: str,
+        status: str,
+        *,
+        actor: str = "system",
+    ) -> IntakeRecord:
+        """Update the triage status for one intake record."""
+        self.init_schema()
+        if status not in INTAKE_STATES:
+            raise ValueError(f"invalid intake status: {status}")
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT * FROM intake WHERE project_id = ? AND intake_id = ?",
+                (project_id, intake_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown intake record: {intake_id}")
+            previous = str(row["status"])
+            conn.execute(
+                """
+                UPDATE intake
+                SET status = ?, updated_at = ?
+                WHERE project_id = ? AND intake_id = ?
+                """,
+                (status, now, project_id, intake_id),
+            )
+            self._audit(
+                conn,
+                project_id,
+                "",
+                "intake.status",
+                actor,
+                {"intake_id": intake_id, "previous": previous, "status": status},
+            )
+            updated = conn.execute(
+                "SELECT * FROM intake WHERE project_id = ? AND intake_id = ?",
+                (project_id, intake_id),
+            ).fetchone()
+        if updated is None:
+            raise ValueError(f"unknown intake record: {intake_id}")
+        return _intake_from_row(updated)
+
     def record_proposed_task(
         self,
         project_id: str,
@@ -994,6 +1041,8 @@ class Store:
                 raise ValueError(f"unknown intake record: {proposal.intake_id}")
             if _task_exists(conn, project_id, proposal.task.task_id):
                 raise ValueError(f"task already exists: {proposal.task.task_id}")
+            if proposal.status not in PROPOSAL_STATES:
+                raise ValueError(f"invalid proposal status: {proposal.status}")
             contract = proposed_task_to_dict(proposal)
             conn.execute(
                 """
@@ -1014,6 +1063,27 @@ class Store:
                     now,
                 ),
             )
+            cur = conn.execute(
+                """
+                UPDATE intake
+                SET status = 'triaged', updated_at = ?
+                WHERE project_id = ? AND intake_id = ? AND status = 'open'
+                """,
+                (now, project_id, proposal.intake_id),
+            )
+            if cur.rowcount:
+                self._audit(
+                    conn,
+                    project_id,
+                    "",
+                    "intake.status",
+                    actor,
+                    {
+                        "intake_id": proposal.intake_id,
+                        "previous": "open",
+                        "status": "triaged",
+                    },
+                )
             self._audit(
                 conn,
                 project_id,
@@ -1055,6 +1125,142 @@ class Store:
                 return []
             rows = list(conn.execute(sql, values))
         return [_proposed_task_from_row(row) for row in rows]
+
+    def promote_proposed_task(
+        self,
+        project_id: str,
+        proposal_id: str,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Promote a proposed task into live pending task state."""
+        self.init_schema()
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM proposed_tasks
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (project_id, proposal_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown proposed task: {proposal_id}")
+            proposal = _proposed_task_from_row(row)
+            task = replace(proposal.task, status="pending")
+            if proposal.status == "promoted":
+                if not _task_exists(conn, project_id, task.task_id):
+                    raise ValueError(f"promoted task is missing: {task.task_id}")
+                return proposal
+            if proposal.status != "proposed":
+                raise ValueError(
+                    f"cannot promote proposal {proposal_id} from status {proposal.status}"
+                )
+            if _task_exists(conn, project_id, task.task_id):
+                raise ValueError(f"task already exists: {task.task_id}")
+            if not task.task_id:
+                raise ValueError("proposed task id is required")
+            if not task.title:
+                raise ValueError("proposed task title is required")
+            for requirement in proposal.requirements:
+                dependency_task_id = str(requirement.get("task") or "").strip()
+                if dependency_task_id and not _task_exists(conn, project_id, dependency_task_id):
+                    raise ValueError(
+                        f"proposal dependency is not a live task: {dependency_task_id}"
+                    )
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    project_id, task_id, title, repo, status, priority, prompt_key,
+                    prompt_path, summary, execution_json, validation_json, next_action,
+                    metadata_json, lease_agent_id, lease_token, lease_expires_at,
+                    claimed_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', '', ?, ?)
+                """,
+                (
+                    project_id,
+                    task.task_id,
+                    task.title,
+                    task.repo,
+                    task.status,
+                    task.priority,
+                    task.prompt_key,
+                    task.prompt_path,
+                    task.summary,
+                    dumps(task.execution),
+                    dumps(task.validation_checks),
+                    task.next_action,
+                    dumps(task.metadata),
+                    now,
+                    now,
+                ),
+            )
+            for requirement in proposal.requirements:
+                dependency_task_id = str(requirement.get("task") or "").strip()
+                if not dependency_task_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO dependencies (
+                        project_id, task_id, dependency_task_id, description
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        task.task_id,
+                        dependency_task_id,
+                        str(requirement.get("description") or ""),
+                    ),
+                )
+            for uri in task.evidence:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO evidence (project_id, task_id, uri, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (project_id, task.task_id, uri, now),
+                )
+            conn.execute(
+                """
+                UPDATE proposed_tasks
+                SET status = 'promoted', updated_at = ?
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (now, project_id, proposal_id),
+            )
+            cur = conn.execute(
+                """
+                UPDATE intake
+                SET status = 'triaged', updated_at = ?
+                WHERE project_id = ? AND intake_id = ? AND status = 'open'
+                """,
+                (now, project_id, proposal.intake_id),
+            )
+            if cur.rowcount:
+                self._audit(
+                    conn,
+                    project_id,
+                    "",
+                    "intake.status",
+                    actor,
+                    {
+                        "intake_id": proposal.intake_id,
+                        "previous": "open",
+                        "status": "triaged",
+                    },
+                )
+            self._audit(
+                conn,
+                project_id,
+                task.task_id,
+                "proposal.promote",
+                actor,
+                {"proposal_id": proposal_id, "intake_id": proposal.intake_id},
+            )
+        return replace(proposal, task=task, status="promoted", updated_at=now)
 
     def record_evidence(
         self,

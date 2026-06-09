@@ -218,8 +218,16 @@ agent-tracker propose-task --config project.json <intake-id> \
 ```
 
 Use `list-proposals --json` or exported snapshots to review proposed tasks. A
-separate promotion workflow should copy approved proposals into `tasks.json` or
-another authoritative importer source.
+reviewed proposal can be promoted without editing the task plan:
+
+```bash
+agent-tracker promote-proposal --config project.json <proposal-id>
+```
+
+Promotion records the proposal as `promoted`, inserts the task contract into
+live SQLite state as a pending task, and records its dependencies. Definition
+imports preserve promoted tasks that are absent from the task-plan source unless
+you deliberately run runtime reconciliation.
 
 ## Import Semantics
 

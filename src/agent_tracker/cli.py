@@ -11,7 +11,7 @@ from typing import Any
 
 from agent_tracker.config import load_config
 from agent_tracker.db import intake_to_dict, proposed_task_to_dict, state_to_dict
-from agent_tracker.models import INTEGRATION_STATES
+from agent_tracker.models import INTAKE_STATES, INTEGRATION_STATES
 from agent_tracker.service import Coordinator
 
 OVERVIEW_GROUPS = (
@@ -355,6 +355,18 @@ def command_list_intake(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_update_intake(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    intake = coord.update_intake_status(
+        args.intake_id,
+        status=args.status,
+        actor=args.actor,
+    )
+    print_json(intake_to_dict(intake))
+    return 0
+
+
 def command_propose_task(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -377,6 +389,14 @@ def command_propose_task(args: argparse.Namespace) -> int:
         proposal_id=args.proposal_id,
         actor=args.actor,
     )
+    print_json(proposed_task_to_dict(proposal))
+    return 0
+
+
+def command_promote_proposal(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    proposal = coord.promote_proposed_task(args.proposal_id, actor=args.actor)
     print_json(proposed_task_to_dict(proposal))
     return 0
 
@@ -636,6 +656,16 @@ def build_parser() -> argparse.ArgumentParser:
     list_intake.add_argument("--repo", default="")
     list_intake.set_defaults(func=command_list_intake)
 
+    update_intake = sub.add_parser(
+        "update-intake",
+        help="Update raw intake status after triage or closeout.",
+    )
+    add_common(update_intake)
+    update_intake.add_argument("intake_id")
+    update_intake.add_argument("--status", required=True, choices=sorted(INTAKE_STATES))
+    update_intake.add_argument("--actor", default="system")
+    update_intake.set_defaults(func=command_update_intake)
+
     propose_task = sub.add_parser(
         "propose-task",
         help="Create a proposed task contract from an intake record.",
@@ -658,6 +688,15 @@ def build_parser() -> argparse.ArgumentParser:
     propose_task.add_argument("--metadata-json", default="{}")
     propose_task.add_argument("--actor", default="system")
     propose_task.set_defaults(func=command_propose_task)
+
+    promote_proposal = sub.add_parser(
+        "promote-proposal",
+        help="Promote a proposed task into live queue state.",
+    )
+    add_common(promote_proposal)
+    promote_proposal.add_argument("proposal_id")
+    promote_proposal.add_argument("--actor", default="system")
+    promote_proposal.set_defaults(func=command_promote_proposal)
 
     list_proposals = sub.add_parser("list-proposals", help="List proposed task contracts.")
     add_common(list_proposals)

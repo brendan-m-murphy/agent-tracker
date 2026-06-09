@@ -79,7 +79,7 @@ uv run agent-tracker list-intake --config tracking/project.json --json
 ```
 
 After reviewing an intake item, create a proposed task contract rather than a
-claimable task:
+claimable task. Creating a proposal marks open intake as triaged:
 
 ```bash
 uv run agent-tracker propose-task --config tracking/project.json <intake-id> \
@@ -93,9 +93,26 @@ uv run agent-tracker propose-task --config tracking/project.json <intake-id> \
 uv run agent-tracker list-proposals --config tracking/project.json --json
 ```
 
-Proposals are review artifacts. Do not add them to the live task plan or another
-authoritative importer source until the user or project workflow approves
-promotion.
+Proposals are review artifacts. When the user or project workflow approves a
+proposal, promote it into live queue state through SQLite rather than editing
+the task plan by hand:
+
+```bash
+uv run agent-tracker promote-proposal --config tracking/project.json <proposal-id> \
+  --actor <project-manager-id>
+```
+
+If an intake item should not become a task, close or defer it explicitly:
+
+```bash
+uv run agent-tracker update-intake --config tracking/project.json <intake-id> \
+  --status closed --actor <project-manager-id>
+```
+
+Promoted tasks appear in `next` and can be claimed. Definition-only imports
+preserve promoted runtime tasks that are absent from the task-plan source; do
+not use runtime reconciliation unless you intend the importer source to replace
+live queue state.
 
 ## Logging And Follow-Up
 

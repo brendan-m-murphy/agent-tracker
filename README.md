@@ -249,7 +249,9 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
 | `record-intake` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker record-intake --config demo-tracker/project.json --kind feature --tag inbox "Add triage workflow"` |
 | `list-intake` | List raw intake records for later project-manager triage. | `agent-tracker list-intake --config demo-tracker/project.json --json` |
+| `update-intake` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker update-intake --config demo-tracker/project.json <intake-id> --status closed` |
 | `propose-task` | Create a reviewed proposed task contract from an intake record without importing it as a live task. | `agent-tracker propose-task --config demo-tracker/project.json <intake-id> --task-id add-triage --title "Add triage"` |
+| `promote-proposal` | Promote a proposed task into live queue state so it appears in `next` and can be claimed. | `agent-tracker promote-proposal --config demo-tracker/project.json <proposal-id>` |
 | `list-proposals` | List proposed task contracts awaiting review or promotion. | `agent-tracker list-proposals --config demo-tracker/project.json --json` |
 | `export` | Write the configured audit snapshot through the exporter. | `agent-tracker export --config demo-tracker/project.json` |
 

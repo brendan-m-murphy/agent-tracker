@@ -25,6 +25,8 @@ REVIEW_STATES = {"awaiting_review"}
 INTEGRATION_STATES = {"awaiting_pr", "awaiting_merge", "awaiting_integration"}
 AWAITING_STATES = REVIEW_STATES | INTEGRATION_STATES
 TERMINAL_STATES = {"done", "failed", "cancelled"}
+INTAKE_STATES = {"open", "triaged", "closed", "deferred"}
+PROPOSAL_STATES = {"proposed", "promoted", "rejected"}
 
 
 @dataclass(frozen=True)

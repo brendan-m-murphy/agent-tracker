@@ -12,7 +12,9 @@ from agent_tracker.config import ProjectConfig
 from agent_tracker.db import Store, intake_to_dict, proposed_task_to_dict, state_to_dict
 from agent_tracker.models import (
     ACTIVE_STATES,
+    INTAKE_STATES,
     INTEGRATION_STATES,
+    PROPOSAL_STATES,
     REVIEW_STATES,
     Claim,
     EventRecord,
@@ -391,6 +393,28 @@ class Coordinator:
             limit=limit,
         )
 
+    def update_intake_status(
+        self,
+        intake_id: str,
+        *,
+        status: str,
+        actor: str = "system",
+    ) -> IntakeRecord:
+        """Update the triage status for a raw intake record."""
+        self._ensure_mutation_allowed()
+        cleaned_intake_id = _first_text(intake_id)
+        cleaned_status = _first_text(status)
+        if not cleaned_intake_id:
+            raise ValueError("intake id is required")
+        if cleaned_status not in INTAKE_STATES:
+            raise ValueError(f"invalid intake status: {cleaned_status}")
+        return self.store.update_intake_status(
+            self.config.project_id,
+            cleaned_intake_id,
+            cleaned_status,
+            actor=actor,
+        )
+
     def intake_payload(
         self,
         *,
@@ -492,6 +516,26 @@ class Coordinator:
             intake_id=_first_text(intake_id),
             limit=limit,
         )
+
+    def promote_proposed_task(
+        self,
+        proposal_id: str,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Promote a proposed task into live queue state."""
+        self._ensure_mutation_allowed()
+        cleaned_proposal_id = _first_text(proposal_id)
+        if not cleaned_proposal_id:
+            raise ValueError("proposal id is required")
+        proposal = self.store.promote_proposed_task(
+            self.config.project_id,
+            cleaned_proposal_id,
+            actor=actor,
+        )
+        if proposal.status not in PROPOSAL_STATES:
+            raise ValueError(f"invalid proposal status: {proposal.status}")
+        return proposal
 
     def proposed_tasks_payload(
         self,

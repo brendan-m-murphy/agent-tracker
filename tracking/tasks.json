@@ -1169,6 +1169,73 @@
       }
     },
     {
+      "id": "intake-proposal-closeout",
+      "title": "Close intake and promote proposed tasks",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 112,
+      "prompt_key": "intake-proposal-closeout",
+      "prompt_path": "docs/research/2026-06-08-coordination-intake-dispatch.md",
+      "summary": "Remove the triage friction where intake records stay open after proposal creation and proposed tasks cannot be promoted into live claimable queue state.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "docs/operations.md",
+          "docs/task-plans.md"
+        ],
+        "notes": "Keep raw intake, proposed tasks, and live task state distinct. Promotion should be explicit, auditable, idempotent enough for retry, and should not require editing tracking/tasks.json for ordinary triage."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "uv run ruff format --check .",
+        "uv run ty check",
+        "Manual check: an intake item can be marked triaged or closed without editing SQLite directly.",
+        "Manual check: a proposed task can be promoted into live task state and then appears in next/overview without editing tracking/tasks.json."
+      ],
+      "next_action": "Add explicit CLI/service/store transitions for intake status closeout and proposed-task promotion into live pending tasks, then use them on the current dogfood intake proposals.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "project-manager-triage-workflow",
+          "description": "Raw intake and proposed-task persistence must exist before closeout and promotion can be implemented."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "docs"
+        ],
+        "lane": "planning/intake",
+        "conflict_risk": "high",
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "write_scopes": [
+          "src/agent_tracker/models.py",
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "src/agent_tracker/vendor/skills/project-manager/SKILL.md",
+          "tests/test_agent_tracker.py",
+          "README.md",
+          "docs/operations.md",
+          "docs/task-plans.md",
+          "tracking/tasks.json"
+        ],
+        "authority": "May add task-plan entry for this bootstrap task and implement explicit intake/proposal lifecycle commands; must preserve JSON task imports as source definitions and SQLite as live state.",
+        "dogfood": true
+      }
+    },
+    {
       "id": "intervention-queue",
       "title": "Add a human intervention queue",
       "repo": "agent-tracker",

@@ -1529,6 +1529,36 @@ def test_intake_requires_text_and_object_metadata(tmp_path: Path) -> None:
         coord.record_intake("Valid text", metadata=json.loads("[]"))
 
 
+def test_intake_status_can_be_updated_after_triage(tmp_path: Path) -> None:
+    """Project managers can close or defer intake without editing SQLite."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Capture a planning note.", actor="tester")
+
+    updated = coord.update_intake_status(
+        intake.intake_id,
+        status="closed",
+        actor="pm",
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert updated.status == "closed"
+    assert coord.intake_records(status="closed") == [updated]
+    assert coord.intake_records(status="open") == []
+    assert any(
+        audit["action"] == "intake.status"
+        and audit["actor"] == "pm"
+        and audit["payload"]["intake_id"] == intake.intake_id
+        and audit["payload"]["status"] == "closed"
+        for audit in snapshot["audit"]
+    )
+    with pytest.raises(ValueError, match="invalid intake status"):
+        coord.update_intake_status(intake.intake_id, status="unknown")
+    with pytest.raises(ValueError, match="unknown intake"):
+        coord.update_intake_status("missing", status="closed")
+
+
 def test_intake_is_compatible_with_pre_intake_database(tmp_path: Path) -> None:
     """Old databases without the intake table stay readable and can self-upgrade."""
     config = load_config(write_project(tmp_path))
@@ -1627,6 +1657,7 @@ def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> No
     listed = coord.proposed_task_records(intake_id=intake.intake_id)
     snapshot = coord.store.snapshot(config.project_id)
     ready_ids = {state.task.task_id for state in coord.ready_tasks()}
+    triaged_intake = coord.intake_records(status="triaged")
 
     assert proposal.task.task_id == "add-triage"
     assert proposal.task.metadata["roles"] == ["maintainer"]
@@ -1640,6 +1671,7 @@ def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> No
     assert proposal.requirements == [
         {"kind": "task", "task": "foundation", "description": "Base queue exists."}
     ]
+    assert [item.intake_id for item in triaged_intake] == [intake.intake_id]
     assert listed == [proposal]
     assert snapshot["proposed_tasks"][0]["id"] == proposal.proposal_id
     assert snapshot["proposed_tasks"][0]["task"]["id"] == "add-triage"
@@ -1652,6 +1684,53 @@ def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> No
     assert "add-triage" not in ready_ids
     with pytest.raises(ValueError, match="no matching ready task"):
         coord.claim(agent_id="agent-1", task_id="add-triage")
+
+
+def test_promote_proposed_task_creates_claimable_live_task(tmp_path: Path) -> None:
+    """Reviewed proposals can become live queue tasks without task-plan edits."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        repo="agent-tracker",
+        summary="Promote reviewed intake into live task state.",
+        next_action="Implement the triage promotion.",
+        validation_checks=["uv run pytest"],
+        requirements=[{"task": "foundation", "description": "Base queue exists."}],
+        actor="pm",
+    )
+
+    promoted = coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+    promoted_again = coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+    coord.import_tasks()
+    state = coord.get_task("add-triage")
+    ready_ids = {item.task.task_id for item in coord.ready_tasks()}
+    overview_ready_ids = {item["id"] for item in coord.overview_payload()["groups"]["ready"]}
+    claim = coord.claim(agent_id="agent-1", task_id="add-triage")
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert promoted.status == "promoted"
+    assert promoted_again.status == "promoted"
+    assert coord.proposed_task_records(status="promoted") == [promoted]
+    assert coord.intake_records(status="triaged")[0].intake_id == intake.intake_id
+    assert state.state == "ready"
+    assert state.task.status == "pending"
+    assert state.task.summary == "Promote reviewed intake into live task state."
+    assert state.task.validation_checks == ["uv run pytest"]
+    assert state.requirements[0].detail == "foundation: done"
+    assert "add-triage" in ready_ids
+    assert "add-triage" in overview_ready_ids
+    assert claim.task_id == "add-triage"
+    assert any(
+        audit["action"] == "proposal.promote"
+        and audit["actor"] == "pm"
+        and audit["task_id"] == "add-triage"
+        for audit in snapshot["audit"]
+    )
 
 
 def test_triage_rejects_missing_intake_and_existing_task_id(tmp_path: Path) -> None:
@@ -1775,6 +1854,46 @@ def test_cli_propose_and_list_proposals_json(tmp_path: Path) -> None:
     assert [proposal["id"] for proposal in listed["proposals"]] == [proposed["id"]]
     with pytest.raises(ValueError, match="no matching ready task"):
         Coordinator(load_config(config_path)).claim(agent_id="agent-1", task_id="add-triage")
+
+    close_intake = Coordinator(load_config(config_path)).record_intake("Close me.")
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "update-intake",
+                "--config",
+                str(config_path),
+                close_intake.intake_id,
+                "--status",
+                "closed",
+                "--actor",
+                "pm",
+            ]
+        )
+
+    updated_intake = json.loads(stdout.getvalue())
+    assert code == 0
+    assert updated_intake["status"] == "closed"
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "promote-proposal",
+                "--config",
+                str(config_path),
+                proposed["id"],
+                "--actor",
+                "pm",
+            ]
+        )
+
+    promoted = json.loads(stdout.getvalue())
+    state = Coordinator(load_config(config_path)).get_task("add-triage")
+    assert code == 0
+    assert promoted["status"] == "promoted"
+    assert state.state == "ready"
+    assert state.task.task_id == "add-triage"
 
 
 def test_project_root_plugin_loads_from_config_directory(tmp_path: Path) -> None:

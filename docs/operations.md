@@ -274,10 +274,17 @@ in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`
 results until a later triage workflow promotes them into proposed task
 contracts.
 
+If an intake item needs no task, close or defer it explicitly:
+
+```bash
+agent-tracker update-intake --config project.json <intake-id> --status closed
+```
+
 ## Triage Intake
 
 Project-manager triage turns a raw intake item into a proposed task contract.
-The proposal is durable and reviewable, but it is still not live queue state:
+The proposal is durable and reviewable, but it is still not live queue state.
+Creating a proposal marks open intake as `triaged`:
 
 ```bash
 agent-tracker propose-task --config project.json <intake-id> \
@@ -299,8 +306,19 @@ agent-tracker list-proposals --config project.json --json
 
 Proposed task records are stored in SQLite, audited as `proposal.record`, and
 included in snapshots. They do not appear in ready-task listings and cannot be
-claimed. A separate promotion workflow should review and approve proposals
-before adding them to the task plan or another authoritative task importer.
+claimed until promoted.
+
+After review, promote a proposal into live queue state:
+
+```bash
+agent-tracker promote-proposal --config project.json <proposal-id> --actor pm
+```
+
+Promotion audits `proposal.promote`, changes the proposal status to
+`promoted`, creates a pending live task with its dependency records, and leaves
+the task-plan JSON untouched. Normal definition imports preserve promoted
+runtime tasks; use destructive runtime reconciliation only when you intend to
+make the importer source authoritative again.
 
 ## Complete Work
 
