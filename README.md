@@ -384,6 +384,22 @@ database is ignored runtime state.
 Use [tracking/README.md](tracking/README.md) when asking an agent to pull the
 next task, log work, complete work, or repair claim failures.
 
+## Documentation Site
+
+The browsable documentation is built with Sphinx and MyST from the Markdown
+files in `docs/`, plus selected repository instructions such as the root
+README, `tracking/README.md`, and the vendored skill docs.
+
+Build the site locally with:
+
+```bash
+uv sync --group docs
+uv run sphinx-build -W --keep-going -b html docs docs/_build/html
+```
+
+GitHub Actions builds the same HTML docs on pull requests and publishes them to
+GitHub Pages on pushes to `main` or `master`.
+
 ## Development
 
 ```bash
