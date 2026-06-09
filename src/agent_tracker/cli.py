@@ -303,6 +303,13 @@ def command_ingest_spool(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_pull_spool(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    print_json(coord.pull_spool(dry_run=args.dry_run))
+    return 0
+
+
 def command_export(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -480,6 +487,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(spool)
     spool.add_argument("--actor", default="system")
     spool.set_defaults(func=command_ingest_spool)
+
+    pull_spool = sub.add_parser(
+        "pull-spool",
+        help="Copy complete remote spool JSON files into the configured local inbox.",
+    )
+    add_common(pull_spool)
+    pull_spool.add_argument("--dry-run", action="store_true")
+    pull_spool.set_defaults(func=command_pull_spool)
 
     export = sub.add_parser("export", help="Export project audit snapshot.")
     add_common(export)

@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from agent_tracker import cli  # noqa: E402
+from agent_tracker import service as service_module  # noqa: E402
 from agent_tracker.config import SUPPORTED_CONFIG_SCHEMA_VERSION, load_config  # noqa: E402
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
@@ -224,6 +225,10 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
         (
             {"project_id": "toy", "spool": {"inbox": 1}},
             "config field 'spool.inbox' must be a string",
+        ),
+        (
+            {"project_id": "toy", "spool": {"remote_inbox": 1}},
+            "config field 'spool.remote_inbox' must be a string",
         ),
     ],
 )
@@ -1257,6 +1262,213 @@ def test_event_ingestion_is_idempotent_and_spool_moves_files(tmp_path: Path) -> 
     assert result == {"processed": 1, "inserted": 1, "errors": 0}
     assert duplicate is False
     assert moved is True
+
+
+def test_pull_spool_dry_run_lists_complete_files_without_copying(
+    tmp_path: Path,
+) -> None:
+    """Dry-run reports complete remote events without mutating the local inbox."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    local = tmp_path / "spool" / "inbox"
+    remote.mkdir()
+    (remote / "event.json").write_text(
+        json.dumps({"event_id": "evt-1", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    (remote / "event.json.partial").write_text("{}", encoding="utf-8")
+    (remote / "other.tmp").write_text("{}", encoding="utf-8")
+    (remote / "notes.txt").write_text("not json", encoding="utf-8")
+
+    result = Coordinator(load_config(config_path)).pull_spool(dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["processed"] == 1
+    assert result["copied"] == 0
+    assert result["skipped"] == 3
+    assert result["conflicts"] == 0
+    assert result["files"] == [
+        {
+            "source": str(remote / "event.json"),
+            "target": str(local / "event.json"),
+            "action": "copy",
+        }
+    ]
+    assert not (local / "event.json").exists()
+
+
+def test_pull_spool_copies_complete_files_idempotently_and_ingests(
+    tmp_path: Path,
+) -> None:
+    """Pulled remote events can be processed by the existing spool ingest flow."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    local = tmp_path / "spool" / "inbox"
+    remote.mkdir()
+    remote_event = remote / "event.json"
+    remote_event.write_text(
+        json.dumps({"event_id": "evt-1", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    first_pull = coord.pull_spool()
+    second_pull = coord.pull_spool()
+    ingest = coord.ingest_spool(actor="spool")
+
+    assert first_pull["processed"] == 1
+    assert first_pull["copied"] == 1
+    assert first_pull["conflicts"] == 0
+    assert second_pull["processed"] == 0
+    assert second_pull["copied"] == 0
+    assert second_pull["skipped"] == 1
+    assert second_pull["files"][0]["action"] == "skip_existing"
+    assert second_pull["files"][0]["existing"] == str(local / "event.json")
+    assert remote_event.exists()
+    assert not (local / "event.json").exists()
+    assert (tmp_path / "spool" / "done" / "event.json").exists()
+    assert ingest == {"processed": 1, "inserted": 1, "errors": 0}
+    third_pull = coord.pull_spool()
+    assert third_pull["processed"] == 0
+    assert third_pull["copied"] == 0
+    assert third_pull["skipped"] == 1
+    assert third_pull["files"][0]["action"] == "skip_done"
+    assert third_pull["files"][0]["existing"] == str(tmp_path / "spool" / "done" / "event.json")
+    assert not (local / "event.json").exists()
+
+
+def test_pull_spool_uses_temporary_path_before_publishing_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pulled files are copied to a non-JSON temp name before final publish."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    remote.mkdir()
+    source = remote / "event.json"
+    source.write_text(
+        json.dumps({"event_id": "evt-1", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    copied_to: list[Path] = []
+
+    def fake_copy2(source_path: Path, target_path: Path) -> None:
+        copied_to.append(target_path)
+        target_path.write_bytes(source_path.read_bytes())
+
+    monkeypatch.setattr(service_module.shutil, "copy2", fake_copy2)
+
+    result = Coordinator(load_config(config_path)).pull_spool()
+
+    target = tmp_path / "spool" / "inbox" / "event.json"
+    assert result["copied"] == 1
+    assert target.exists()
+    assert len(copied_to) == 1
+    assert copied_to[0].parent == target.parent
+    assert copied_to[0].name != target.name
+    assert copied_to[0].name.endswith(".tmp")
+    assert not copied_to[0].exists()
+
+
+def test_pull_spool_and_ingest_share_legacy_local_spool_paths(
+    tmp_path: Path,
+) -> None:
+    """A legacy local spool plus nested remote inbox uses one local path set."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"] = {"remote_inbox": "remote-spool"}
+    config_payload["spool_inbox"] = "legacy/inbox"
+    config_payload["spool_done"] = "legacy/done"
+    config_payload["spool_error"] = "legacy/error"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    remote.mkdir()
+    (remote / "event.json").write_text(
+        json.dumps({"event_id": "evt-1", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    pull = coord.pull_spool()
+    ingest = coord.ingest_spool(actor="spool")
+
+    assert pull["processed"] == 1
+    assert pull["copied"] == 1
+    assert not (tmp_path / "legacy" / "inbox" / "event.json").exists()
+    assert (tmp_path / "legacy" / "done" / "event.json").exists()
+    assert ingest == {"processed": 1, "inserted": 1, "errors": 0}
+
+
+def test_pull_spool_reports_conflicting_existing_file(tmp_path: Path) -> None:
+    """Different local files are reported as conflicts instead of overwritten."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    local = tmp_path / "spool" / "inbox"
+    remote.mkdir()
+    local.mkdir(parents=True)
+    (remote / "event.json").write_text(
+        json.dumps({"event_id": "evt-1", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    local_file = local / "event.json"
+    local_file.write_text(
+        json.dumps({"event_id": "evt-local", "kind": "sample"}),
+        encoding="utf-8",
+    )
+
+    result = Coordinator(load_config(config_path)).pull_spool()
+
+    assert result["processed"] == 0
+    assert result["copied"] == 0
+    assert result["conflicts"] == 1
+    assert result["files"] == [
+        {
+            "source": str(remote / "event.json"),
+            "target": str(local_file),
+            "existing": str(local_file),
+            "action": "conflict",
+        }
+    ]
+    assert json.loads(local_file.read_text(encoding="utf-8"))["event_id"] == "evt-local"
+
+
+def test_cli_pull_spool_dry_run_outputs_json_without_mutation(tmp_path: Path) -> None:
+    """The pull-spool CLI exposes dry-run counts as JSON."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    remote.mkdir()
+    (remote / "event.json").write_text(
+        json.dumps({"event_id": "evt-1", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["pull-spool", "--config", str(config_path), "--dry-run"])
+
+    result = json.loads(stdout.getvalue())
+    assert code == 0
+    assert result["dry_run"] is True
+    assert result["processed"] == 1
+    assert result["copied"] == 0
+    assert not (tmp_path / "spool" / "inbox" / "event.json").exists()
 
 
 def test_event_ingestion_rejects_missing_event_id(tmp_path: Path) -> None:

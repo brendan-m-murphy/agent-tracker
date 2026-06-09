@@ -80,7 +80,8 @@ agent-tracker status --config tracking/project.json
   "spool": {
     "inbox": "spool/inbox",
     "done": "spool/done",
-    "error": "spool/error"
+    "error": "spool/error",
+    "remote_inbox": "/shared/demo/spool/outbox"
   }
 }
 ```
@@ -101,7 +102,7 @@ agent-tracker status --config tracking/project.json
 | `event_adapter` | No | Built-in generic event normalization | Plugin that converts incoming event JSON into an `EventRecord`. |
 | `exporter` | No | `agent_tracker.exporters:JsonSnapshotExporter` | Plugin that writes audit snapshots. |
 | `export_path` | No | `agent-tracker-snapshot.json` | Output path used by the default JSON exporter. Relative paths resolve below `state_root`. |
-| `spool` | No | None | Local spool paths for `ingest-spool`. Relative paths resolve below `state_root`. |
+| `spool` | No | None | Spool paths for `pull-spool` and `ingest-spool`. Relative paths resolve below `state_root`. |
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
 | `spool_error` | No | `<inbox>/error` | Legacy top-level error path used when `spool` is absent. |
@@ -179,13 +180,20 @@ Prefer the nested `spool` block:
   "spool": {
     "inbox": "spool/inbox",
     "done": "spool/done",
-    "error": "spool/error"
+    "error": "spool/error",
+    "remote_inbox": "/shared/agent-tracker/spool/outbox"
   }
 }
 ```
 
 `agent-tracker ingest-spool` reads `*.json` files from `inbox`. Valid event
 files move to `done`; files that raise an error move to `error`.
+`agent-tracker pull-spool` copies complete `*.json` files from
+`remote_inbox` into `inbox` before ingestion. It skips names ending in
+`.partial`, `.part`, or `.tmp`, publishes local files through a temporary
+non-JSON name, leaves remote files in place, skips identical local files already
+present in `inbox`, `done`, or `error`, and reports conflicting local files
+without overwriting them.
 
 If `done` or `error` is omitted, defaults are created below the inbox:
 
@@ -197,8 +205,8 @@ If `done` or `error` is omitted, defaults are created below the inbox:
 }
 ```
 
-The current spool implementation is local-only. It does not copy files from a
-remote machine or run a daemon.
+`pull-spool` copies between configured filesystem paths. It does not provide a
+network protocol or run as a daemon.
 
 ## Current Validation Behavior
 

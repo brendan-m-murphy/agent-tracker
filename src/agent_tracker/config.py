@@ -26,7 +26,7 @@ _TEXT_FIELDS = {
     "spool_done",
     "spool_error",
 }
-_SPOOL_PATH_FIELDS = {"inbox", "done", "error"}
+_SPOOL_PATH_FIELDS = {"inbox", "done", "error", "remote_inbox"}
 
 
 @dataclass(frozen=True)

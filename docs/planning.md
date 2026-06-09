@@ -19,10 +19,11 @@ The first pass provides a local, SQLite-backed coordination package with:
   export;
 - a project-specific adapter in `hpc-ci-project-tracker`.
 
-The current spool support is local only. `agent-tracker` can ingest JSON files
-from a configured local inbox directory and move them to done/error folders, but
-it does not yet provide a cross-network spool bridge, polling daemon, SSH/rsync
-puller, HTTP receiver, or shared-filesystem transport.
+The current spool support can ingest JSON files from a configured local inbox
+directory and move them to done/error folders. It can also pull complete JSON
+files from a configured shared-filesystem `remote_inbox` into the local inbox
+before ingestion. It does not provide a polling daemon, SSH/rsync puller, HTTP
+receiver, or network protocol.
 
 ## Subagent Recommendations To Preserve
 

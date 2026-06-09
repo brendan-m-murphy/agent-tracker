@@ -245,6 +245,7 @@ Every command requires `--config <project.json>`. Every command also accepts
 | `resolve-integration` | Resolve a task waiting for integration as `done` or `failed`. | `agent-tracker resolve-integration --config demo-tracker/project.json write-readme --agent reviewer --evidence "git:<main-sha>"` |
 | `fail` | Mark a leased task `failed` with a reason. | `agent-tracker fail --config demo-tracker/project.json write-readme --lease-token <token> --reason "validation failed"` |
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
+| `pull-spool` | Copy complete JSON files from `spool.remote_inbox` to the local spool inbox; add `--dry-run` to preview. | `agent-tracker pull-spool --config demo-tracker/project.json --dry-run` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
 | `export` | Write the configured audit snapshot through the exporter. | `agent-tracker export --config demo-tracker/project.json` |
 
@@ -295,6 +296,13 @@ agent-tracker ingest-spool --config demo-tracker/project.json --actor ci
 
 Valid or duplicate JSON files move to `done`; files that cannot be parsed or
 normalized move to `error`.
+
+When another process writes events to a shared filesystem, configure
+`spool.remote_inbox` and run `pull-spool` before `ingest-spool`. `pull-spool`
+copies complete `*.json` files into the local inbox, skips `.partial`, `.part`,
+and `.tmp` names, leaves remote files in place, skips identical files already
+present in the local inbox/done/error paths, and reports conflicts instead of
+overwriting different local files.
 
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,
 `pr:https://github.com/org/repo/pull/123`, or `artifact:s3://bucket/key`.

@@ -476,12 +476,13 @@ Configure a local spool:
   "spool": {
     "inbox": "spool/inbox",
     "done": "spool/done",
-    "error": "spool/error"
+    "error": "spool/error",
+    "remote_inbox": "/shared/agent-tracker/spool/outbox"
   }
 }
 ```
 
-Write event files into the inbox, then ingest:
+Write event files directly into the local inbox, then ingest:
 
 ```bash
 agent-tracker ingest-spool --config project.json --actor spool
@@ -504,8 +505,25 @@ For each `*.json` file in the inbox:
 - files that cannot be parsed or normalized are moved to `error`;
 - non-JSON files are ignored.
 
-Current spool support is local only. It does not yet copy from a remote inbox,
-skip partial files, or run continuously as a daemon.
+When a shared filesystem or other outbox is available, configure
+`spool.remote_inbox` and pull complete files into the local inbox first:
+
+```bash
+agent-tracker pull-spool --config project.json --dry-run
+agent-tracker pull-spool --config project.json
+agent-tracker ingest-spool --config project.json --actor spool
+```
+
+`pull-spool` copies complete `*.json` files from `remote_inbox` to `inbox`.
+Remote files are left in place. Names ending in `.partial`, `.part`, or `.tmp`
+are skipped so producers can write files atomically and rename them when
+complete. Files are copied to a temporary non-JSON name in the local inbox and
+then atomically renamed to the final `*.json` path. Existing identical local
+files in `inbox`, `done`, or `error` are skipped; existing different files are
+reported as conflicts and are not overwritten.
+
+`pull-spool` is a bounded copy step, not a daemon. Run it from an attendant,
+cron, or supervisor when polling is needed.
 
 ## Export Audit State
 

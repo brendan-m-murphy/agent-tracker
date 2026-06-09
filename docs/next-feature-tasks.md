@@ -122,7 +122,58 @@ Acceptance criteria:
 - Repeated pulls are idempotent.
 - Pulled files can then be processed by the existing `ingest-spool` flow.
 
-### 4. Add An MCP Server Entrypoint
+### 4. Add Queue Lanes And Conflict Risk Planning
+
+Goal:
+
+- Let agent-coordinators telegraph non-blocking plans and choose parallel-safe
+  work across multiple objectives.
+
+Scope:
+
+- Define durable lane metadata for task groups such as coordination plumbing,
+  planning/intake, human/review authority, exports/reporting, and feature work.
+- Add a conflict-risk field or convention covering likely write-scope overlap,
+  sequencing pressure, and whether a task can run beside other active work.
+- Decide how `overview` should display lanes and plan notes without becoming
+  noisy.
+- Document how coordinators should add or update planning signals while the
+  full intake/task-ingest path is still missing.
+
+Acceptance criteria:
+
+- The queue can show multiple objectives without implying a single linear path.
+- A coordinator can identify at least one low-conflict feature task and one
+  coordination-plumbing task from the overview/planning docs.
+- The design avoids requiring agents to edit runtime tracker state through git.
+
+### 5. Add A Repository Boundary For In-Memory Tests
+
+Goal:
+
+- Make service tests cheaper and less coupled to SQLite file setup by placing a
+  repository boundary between coordinator logic and persistence.
+
+Scope:
+
+- Define the smallest protocol or interface that `Coordinator` needs from the
+  current SQLite `Store`.
+- Keep the SQLite implementation as the production repository.
+- Add an in-memory repository option for focused unit tests where database
+  behavior is not the subject under test.
+- Preserve existing integration tests that exercise real SQLite migrations,
+  constraints, and path handling.
+
+Acceptance criteria:
+
+- Service-level behavior can be tested without creating temporary SQLite files
+  when persistence semantics are not relevant.
+- SQLite-backed tests still cover schema, constraints, audit persistence, and
+  import/claim/complete flows.
+- The abstraction does not force plugin or CLI callers to know about test-only
+  repository types.
+
+### 6. Add An MCP Server Entrypoint
 
 Goal:
 

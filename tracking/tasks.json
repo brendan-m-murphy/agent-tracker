@@ -872,6 +872,122 @@
       }
     },
     {
+      "id": "queue-lanes-conflict-risk",
+      "title": "Add queue lanes and conflict risk planning",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 34,
+      "prompt_key": "queue-lanes-conflict-risk",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Add lane/objective metadata and conflict-risk guidance so agent-coordinators can telegraph plans and choose parallel-safe work.",
+      "execution": {
+        "primary_files": [
+          "tracking/tasks.json",
+          "docs/",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "notes": "This should make the queue read as a DAG across objectives instead of a mostly linear list."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: overview or planning docs make lanes and conflict risk visible without requiring git-based runtime status edits."
+      ],
+      "next_action": "Define lane metadata and conflict-risk fields, update overview/planning docs to show non-blocking coordinator plans, and decide which dependencies can be loosened for parallel work.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "overview-command",
+          "description": "Lane and conflict-risk planning should build on the high-level overview command."
+        },
+        {
+          "kind": "task",
+          "task": "agent-coordinator-skill",
+          "description": "Coordinator guidance should already exist before extending planning semantics."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "docs",
+          "architecture"
+        ],
+        "lane": "planning/intake",
+        "conflict_risk": "medium",
+        "write_scopes": [
+          "tracking/tasks.json",
+          "docs/",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
+      "id": "repository-boundary-inmemory-tests",
+      "title": "Add repository boundary for in-memory tests",
+      "repo": "agent-tracker",
+      "status": "pending",
+      "priority": 92,
+      "prompt_key": "repository-boundary-inmemory-tests",
+      "prompt_path": "docs/next-feature-tasks.md",
+      "summary": "Abstract the persistence boundary enough to support focused in-memory service tests while keeping SQLite integration coverage.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "notes": "This is testability architecture, not a replacement for SQLite-backed integration tests."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: the repository boundary is narrow and does not leak test-only types into CLI or plugin callers."
+      ],
+      "next_action": "Define the smallest repository protocol needed by Coordinator, keep Store as the SQLite implementation, and add in-memory tests for service behavior that does not need persistence semantics.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "canonical-state-and-task-source-contract",
+          "description": "The canonical state contract should exist before abstracting persistence access."
+        },
+        {
+          "kind": "task",
+          "task": "config-schema-versioning",
+          "description": "Schema/version behavior should remain covered by SQLite integration tests."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python",
+          "architecture"
+        ],
+        "lane": "feature/testability",
+        "conflict_risk": "high",
+        "write_scopes": [
+          "src/agent_tracker/db.py",
+          "src/agent_tracker/service.py",
+          "tests/test_agent_tracker.py",
+          "docs/"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
       "id": "intake-inbox",
       "title": "Add an intake inbox for ideas, features, and checks",
       "repo": "agent-tracker",

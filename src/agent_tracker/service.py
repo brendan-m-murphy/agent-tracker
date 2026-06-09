@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -348,14 +349,7 @@ class Coordinator:
     def ingest_spool(self, *, actor: str = "system") -> dict[str, int]:
         """Ingest configured spool JSON files."""
         self._ensure_mutation_allowed()
-        spool = self.config.raw.get("spool", {})
-        inbox = _top_level_state_path(self.config, "spool_inbox")
-        done = _top_level_state_path(self.config, "spool_done")
-        error = _top_level_state_path(self.config, "spool_error")
-        if isinstance(spool, dict) and spool:
-            inbox = _spool_path(self.config, spool.get("inbox"))
-            done = _spool_path(self.config, spool.get("done"))
-            error = _spool_path(self.config, spool.get("error"))
+        inbox, done, error = _local_spool_paths(self.config)
         if inbox is None or not inbox.exists():
             return {"processed": 0, "inserted": 0, "errors": 0}
         if done is None:
@@ -377,6 +371,66 @@ class Coordinator:
                 errors += 1
                 shutil.move(str(event_path), str(error / event_path.name))
         return {"processed": processed, "inserted": inserted, "errors": errors}
+
+    def pull_spool(self, *, dry_run: bool = False) -> dict[str, Any]:
+        """Copy complete remote spool files into the local spool inbox."""
+        self._ensure_mutation_allowed()
+        spool = self.config.raw.get("spool", {})
+        if not isinstance(spool, dict):
+            spool = {}
+        remote_inbox = _spool_path(self.config, spool.get("remote_inbox"))
+        local_inbox, done, error = _local_spool_paths(self.config)
+        if remote_inbox is None:
+            raise ValueError("spool.remote_inbox is required for pull-spool")
+        if local_inbox is None:
+            raise ValueError("spool.inbox or spool_inbox is required for pull-spool")
+        if done is None:
+            done = local_inbox / "done"
+        if error is None:
+            error = local_inbox / "error"
+        if not remote_inbox.exists():
+            return _pull_spool_result(remote_inbox, local_inbox, dry_run=dry_run)
+        if not remote_inbox.is_dir():
+            raise ValueError(f"spool.remote_inbox is not a directory: {remote_inbox}")
+        if not dry_run:
+            local_inbox.mkdir(parents=True, exist_ok=True)
+
+        result = _pull_spool_result(remote_inbox, local_inbox, dry_run=dry_run)
+        for source in sorted(remote_inbox.iterdir()):
+            if source.is_dir() or not _is_spool_event_file(source):
+                result["skipped"] += 1
+                continue
+            target = local_inbox / source.name
+            item = {"source": str(source), "target": str(target)}
+            existing_candidates = [
+                (target, "skip_existing", "conflict"),
+                (done / source.name, "skip_done", "conflict_done"),
+                (error / source.name, "skip_error", "conflict_error"),
+            ]
+            handled = False
+            for existing, skip_action, conflict_action in existing_candidates:
+                if not existing.exists():
+                    continue
+                if existing.is_file() and existing.read_bytes() == source.read_bytes():
+                    result["skipped"] += 1
+                    result["files"].append(
+                        {**item, "existing": str(existing), "action": skip_action}
+                    )
+                else:
+                    result["conflicts"] += 1
+                    result["files"].append(
+                        {**item, "existing": str(existing), "action": conflict_action}
+                    )
+                handled = True
+                break
+            if handled:
+                continue
+            result["processed"] += 1
+            result["files"].append({**item, "action": "copy"})
+            if not dry_run:
+                _copy_spool_file_atomic(source, target)
+                result["copied"] += 1
+        return result
 
     def render_prompt(
         self,
@@ -546,3 +600,62 @@ def _spool_path(config: ProjectConfig, value: Any) -> Path | None:
         return None
     path = Path(text).expanduser()
     return path if path.is_absolute() else config.effective_state_root / path
+
+
+def _local_spool_paths(
+    config: ProjectConfig,
+) -> tuple[Path | None, Path | None, Path | None]:
+    """Return local inbox, done, and error paths for spool operations."""
+    top_level_paths = (
+        _top_level_state_path(config, "spool_inbox"),
+        _top_level_state_path(config, "spool_done"),
+        _top_level_state_path(config, "spool_error"),
+    )
+    spool = config.raw.get("spool", {})
+    if not isinstance(spool, dict) or not spool:
+        return top_level_paths
+    inbox = _spool_path(config, spool.get("inbox"))
+    if inbox is None:
+        return top_level_paths
+    return (
+        inbox,
+        _spool_path(config, spool.get("done")),
+        _spool_path(config, spool.get("error")),
+    )
+
+
+def _pull_spool_result(
+    remote_inbox: Path,
+    local_inbox: Path,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Return the initial pull-spool result payload."""
+    return {
+        "dry_run": dry_run,
+        "remote_inbox": str(remote_inbox),
+        "local_inbox": str(local_inbox),
+        "processed": 0,
+        "copied": 0,
+        "skipped": 0,
+        "conflicts": 0,
+        "files": [],
+    }
+
+
+def _is_spool_event_file(path: Path) -> bool:
+    """Return whether a remote spool path is a complete JSON event file."""
+    partial_suffixes = {".partial", ".part", ".tmp"}
+    if any(path.name.endswith(suffix) for suffix in partial_suffixes):
+        return False
+    return path.suffix == ".json"
+
+
+def _copy_spool_file_atomic(source: Path, target: Path) -> None:
+    """Copy a spool file to a temporary name before publishing it as JSON."""
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
