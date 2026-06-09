@@ -17,11 +17,16 @@ database overrides so live state stays attached to the canonical project.
 For a new local project:
 
 ```bash
-mkdir -p tracking/spool/inbox tracking/spool/done tracking/spool/error tracking/exports
+agent-tracker init-project tracking --project-id demo --name "Demo Tracker"
 agent-tracker init --config tracking/project.json
 agent-tracker import --config tracking/project.json
 agent-tracker status --config tracking/project.json
 ```
+
+`init-project` creates a plugin-free JSON-task tracker layout with
+`project.json`, `tasks.json`, local spool directories, an export directory, and
+runtime `.gitignore` entries. Use `--canonical-config` when copied worktrees
+should be refused for mutating commands.
 
 In a project shell or wrapper script, set the config once and omit repeated
 `--config` arguments:
@@ -300,6 +305,9 @@ List intake for project-manager triage:
 ```bash
 agent-tracker list-intake --config project.json --json
 ```
+
+Without `--json`, `list-intake` prints each record with its current status, such
+as `status open`, `status triaged`, `status closed`, or `status deferred`.
 
 Intake records are stored in SQLite, audited as `intake.record`, and included
 in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`

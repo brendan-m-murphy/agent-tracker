@@ -9,3 +9,4 @@ docs/_build/
 state.sqlite
 *.sqlite
 tracking/spool/**/*.json
+.codex/environments/environment.toml

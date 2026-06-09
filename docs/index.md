@@ -8,6 +8,8 @@ readme
 configuration
 operations
 planning
+task-ingest-command-contract
+remote-spooling-ssh-codex
 task-plans
 plugins
 next-feature-tasks

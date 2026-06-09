@@ -324,6 +324,7 @@ def test_cli_explicit_config_and_db_override_env_defaults(
     env_db_path = tmp_path / "env-db.sqlite"
     monkeypatch.setenv(PROJECT_CONFIG_ENV_VAR, str(env_config))
     monkeypatch.setenv(PROJECT_DB_ENV_VAR, str(env_db_path))
+
     stdout = StringIO()
 
     with redirect_stdout(stdout):
@@ -343,6 +344,113 @@ def test_cli_explicit_config_and_db_override_env_defaults(
     assert payload["project_id"] == "explicit-toy"
     assert payload["db_path"] == str(explicit_db_path)
     assert not env_db_path.exists()
+
+
+def test_cli_init_project_bootstraps_plugin_free_layout(tmp_path: Path) -> None:
+    """A new tracker can be created and operated with built-in defaults."""
+    project_root = tmp_path / "tracking"
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "init-project",
+                str(project_root),
+                "--project-id",
+                "demo",
+                "--name",
+                "Demo Tracker",
+            ]
+        )
+
+    config_path = project_root / "project.json"
+    task_plan_path = project_root / "tasks.json"
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    task_payload = json.loads(task_plan_path.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert "agent-tracker init --config" in stdout.getvalue()
+    assert config_payload == {
+        "config_schema_version": SUPPORTED_CONFIG_SCHEMA_VERSION,
+        "project_id": "demo",
+        "name": "Demo Tracker",
+        "db_path": ".agent-tracker/state.sqlite",
+        "task_plan_path": "tasks.json",
+        "export_path": "exports/snapshot.json",
+        "spool": {
+            "inbox": "spool/inbox",
+            "done": "spool/done",
+            "error": "spool/error",
+        },
+    }
+    assert "importer" not in config_payload
+    assert "prompt_renderer" not in config_payload
+    assert "exporter" not in config_payload
+    assert task_payload["tasks"][0]["id"] == "first-task"
+    assert (project_root / ".agent-tracker").is_dir()
+    assert (project_root / "spool" / "inbox").is_dir()
+    assert (project_root / "spool" / "done").is_dir()
+    assert (project_root / "spool" / "error").is_dir()
+    assert (project_root / "exports").is_dir()
+    assert ".agent-tracker/" in (project_root / ".gitignore").read_text(encoding="utf-8")
+
+    assert cli.main(["init", "--config", str(config_path)]) == 0
+    assert cli.main(["import", "--config", str(config_path)]) == 0
+    coord = Coordinator(load_config(config_path))
+    state = coord.get_task("first-task")
+
+    assert state.state == "ready"
+    assert state.task.title == "Write the first task"
+    assert "first-task" in coord.render_prompt("first-task", markdown=True)
+
+
+def test_cli_init_project_can_write_canonical_config(tmp_path: Path) -> None:
+    """Bootstrap can opt into copied-worktree mutation safety from the start."""
+    project_root = tmp_path / "tracking"
+
+    assert (
+        cli.main(
+            [
+                "init-project",
+                str(project_root),
+                "--project-id",
+                "demo",
+                "--canonical-config",
+                "--no-gitignore",
+            ]
+        )
+        == 0
+    )
+
+    config_path = project_root / "project.json"
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config = load_config(config_path)
+
+    assert config_payload["canonical_config_path"] == str(config_path.resolve())
+    assert config_payload["state_root"] == str(project_root.resolve())
+    assert config_payload["task_source_root"] == str(project_root.resolve())
+    assert config.canonical_config_path == config_path.resolve()
+    assert not (project_root / ".gitignore").exists()
+
+
+def test_cli_init_project_refuses_to_overwrite_files(tmp_path: Path) -> None:
+    """Existing project definitions are protected unless --force is explicit."""
+    project_root = tmp_path / "tracking"
+    project_root.mkdir()
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(["init-project", str(project_root), "--project-id", "demo"])
+
+    assert code == 1
+    assert "refusing to overwrite existing file" in stderr.getvalue()
+    assert json.loads((project_root / "project.json").read_text(encoding="utf-8")) == {}
+    assert cli.main(["init-project", str(project_root), "--project-id", "demo", "--force"]) == 0
+    assert (
+        json.loads((project_root / "project.json").read_text(encoding="utf-8"))["project_id"]
+        == "demo"
+    )
 
 
 def test_import_evaluates_ready_blocked_and_deferred_tasks(tmp_path: Path) -> None:
@@ -1532,6 +1640,73 @@ def test_pull_spool_copies_complete_files_idempotently_and_ingests(
     assert third_pull["files"][0]["action"] == "skip_done"
     assert third_pull["files"][0]["existing"] == str(tmp_path / "spool" / "done" / "event.json")
     assert not (local / "event.json").exists()
+
+
+def test_remote_spooling_harness_models_ssh_codex_project_outbox(
+    tmp_path: Path,
+) -> None:
+    """A separate SSH-style project outbox can feed the canonical event spool."""
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_project = tmp_path / "ssh-codex-project"
+    remote_outbox = remote_project / ".agent-tracker" / "spool" / "outbox"
+    remote_outbox.mkdir(parents=True)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = str(remote_outbox)
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    partial = remote_outbox / "remote-event.json.partial"
+    partial.write_text(
+        json.dumps({"event_id": "ssh-partial", "kind": "codex.remote_spool"}),
+        encoding="utf-8",
+    )
+    remote_event = remote_outbox / "remote-event.json"
+    remote_artifact = "file:ssh-codex-project/.agent-tracker/spool/outbox/remote-event.json"
+    remote_event.write_text(
+        json.dumps(
+            {
+                "event_id": "ssh-codex-evt-1",
+                "kind": "codex.remote_spool",
+                "task_id": "ready",
+                "artifact": remote_artifact,
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    dry_run = coord.pull_spool(dry_run=True)
+    first_pull = coord.pull_spool()
+    ingest = coord.ingest_spool(actor="ssh-codex-spool")
+    repeat_pull = coord.pull_spool()
+    snapshot = coord.store.snapshot(coord.config.project_id)
+
+    local_event = canonical / "spool" / "inbox" / "remote-event.json"
+    done_event = canonical / "spool" / "done" / "remote-event.json"
+    assert dry_run["dry_run"] is True
+    assert dry_run["processed"] == 1
+    assert dry_run["skipped"] == 1
+    assert not local_event.exists()
+    assert first_pull["processed"] == 1
+    assert first_pull["copied"] == 1
+    assert remote_event.exists()
+    assert partial.exists()
+    assert ingest == {"processed": 1, "inserted": 1, "errors": 0}
+    assert done_event.exists()
+    assert repeat_pull["processed"] == 0
+    assert repeat_pull["copied"] == 0
+    assert repeat_pull["skipped"] == 2
+    assert repeat_pull["files"] == [
+        {
+            "source": str(remote_event),
+            "target": str(local_event),
+            "existing": str(done_event),
+            "action": "skip_done",
+        }
+    ]
+    assert snapshot["events"][0]["event_id"] == "ssh-codex-evt-1"
+    assert snapshot["events"][0]["payload"]["artifact"] == remote_artifact
 
 
 def test_pull_spool_uses_temporary_path_before_publishing_json(

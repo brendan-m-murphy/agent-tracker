@@ -24,19 +24,23 @@ file.
 
 ## Create A Project Layout
 
-Keep project coordination files together when possible:
+For the common JSON-task case, create the standard layout with one command:
 
 ```bash
-mkdir -p tracking/spool/inbox tracking/spool/done tracking/spool/error tracking/exports
+agent-tracker init-project tracking --project-id demo --name "Demo Tracker"
 ```
 
-Commit the config and task plan:
+This creates:
 
 - `tracking/project.json`
 - `tracking/tasks.json`
+- `tracking/.agent-tracker/`
+- `tracking/spool/inbox`, `tracking/spool/done`, and `tracking/spool/error`
+- `tracking/exports/`
+- `tracking/.gitignore` entries for runtime state
 
-Leave runtime files out of git unless a project explicitly asks for an exported
-artifact:
+Commit the config and task plan. Leave runtime files out of git unless a
+project explicitly asks for an exported artifact:
 
 - `tracking/.agent-tracker/state.sqlite` for the minimal config below, or
   `tracking/state.sqlite` when a project chooses that `db_path`;
@@ -44,6 +48,11 @@ artifact:
 - `tracking/spool/done/*.json`
 - `tracking/spool/error/*.json`
 - `tracking/exports/*.json`
+
+If the project will be managed from copied worktrees, add
+`--canonical-config`. The generated config then records absolute
+`canonical_config_path`, `state_root`, and `task_source_root` values so mutating
+commands must use the canonical config.
 
 ## Minimal Config
 
@@ -75,6 +84,9 @@ agent-tracker status
 ```
 
 ## Full Local Config
+
+Plugin fields are optional. Include them only when you want to be explicit or
+when replacing a built-in default with project-specific behavior.
 
 ```json
 {
