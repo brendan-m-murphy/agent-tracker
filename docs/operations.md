@@ -115,6 +115,11 @@ Blocked entries include unsatisfied requirement details from the evaluated
 evidence when available. Recently completed entries are ordered from completion
 audit records, not task priority.
 
+Human overview output wraps long task titles, blockers, next actions, evidence,
+and completion details at a standard terminal width with continuation lines
+aligned under the field value. JSON output is unchanged and should be used for
+automation.
+
 Use JSON output for automation:
 
 ```bash
@@ -152,6 +157,9 @@ agent-tracker next --config project.json --role maintainer --json
 ```
 
 Ready tasks are ordered by `priority`, then task ID.
+Human `next` output wraps long task titles and next actions with continuation
+lines aligned under the wrapped value. JSON output is unchanged and should be
+used for automation.
 `next` is read-only by default. Use `claim` to recover stale leases and claim
 work atomically, or pass `--recover-stale-leases` when inspection should also
 write stale-lease recovery to SQLite.

@@ -472,6 +472,78 @@ def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
     assert "foundation: Foundation" not in output
 
 
+def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
+    """Human overview wraps long next-action and blocker lines with hanging indents."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["next_action"] = (
+                "Coordinate the implementation notes, review evidence, and handoff "
+                "details before asking another worker to continue the queue."
+            )
+        if raw_task["id"] == "blocked":
+            raw_task["requirements"] = [
+                {
+                    "kind": "task",
+                    "task": "ready",
+                    "description": (
+                        "Wait until the ready task publishes a detailed operational "
+                        "handoff with enough evidence for a reviewer to resume safely."
+                    ),
+                }
+            ]
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    coord.claim(agent_id="agent-1", task_id="ready")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--limit", "10"])
+    lines = stdout.getvalue().splitlines()
+
+    assert code == 0
+    assert all(len(line) <= 80 for line in lines)
+    assert any(line.startswith("    next: Coordinate the implementation") for line in lines)
+    assert any(
+        line.startswith("          details before asking another worker")
+        for line in lines
+    )
+    assert any(line.startswith("    blocker: Wait until the ready task") for line in lines)
+    assert any(
+        line.startswith("             with enough evidence")
+        for line in lines
+    )
+
+
+def test_cli_next_human_output_wraps_long_next_action(tmp_path: Path) -> None:
+    """Human next output wraps long next-action lines under the field value."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["next_action"] = (
+                "Prepare the branch, run the focused checks, capture the evidence, "
+                "and leave a short handoff that another maintainer can act on."
+            )
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["next", "--config", str(config_path), "--limit", "1"])
+    lines = stdout.getvalue().splitlines()
+
+    assert code == 0
+    assert all(len(line) <= 80 for line in lines)
+    assert any(line.startswith("  next: Prepare the branch") for line in lines)
+    assert any(line.startswith("        leave a short handoff") for line in lines)
+
+
 def test_overview_inspection_does_not_recover_stale_leases_without_flag(
     tmp_path: Path,
 ) -> None:
@@ -1627,7 +1699,33 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     listed = json.loads(stdout.getvalue())
     assert code == 0
     assert [item["id"] for item in listed["intake"]] == [recorded["id"]]
+    assert listed["intake"][0]["status"] == "open"
     assert listed["intake"][0]["text"] == "Check whether intake is visible."
+
+
+def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
+    """Human intake listings show status for all intake closeout states."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    records = {
+        "open": coord.record_intake("Open intake.", kind="idea"),
+        "triaged": coord.record_intake("Triaged intake.", kind="feature"),
+        "closed": coord.record_intake("Closed intake.", kind="check"),
+        "deferred": coord.record_intake("Deferred intake.", kind="note"),
+    }
+    for status in ("triaged", "closed", "deferred"):
+        coord.update_intake_status(records[status].intake_id, status=status)
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-intake", "--config", str(config_path)])
+
+    output = stdout.getvalue()
+    assert code == 0
+    for status, record in records.items():
+        assert f"{record.intake_id}: {status.title()} intake." in output
+        assert f"  status {status}; {record.kind}" in output
 
 
 def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ OVERVIEW_GROUPS = (
     ("blocked", "Blocked"),
     ("recently_completed", "Recently completed"),
 )
+_HUMAN_OUTPUT_WIDTH = 80
 
 
 def coordinator(args: argparse.Namespace) -> Coordinator:
@@ -34,6 +36,31 @@ def coordinator(args: argparse.Namespace) -> Coordinator:
 def print_json(payload: Any) -> None:
     """Print JSON."""
     print(json.dumps(payload, indent=2))
+
+
+def _print_human_line(
+    text: str,
+    *,
+    initial_indent: str = "",
+    subsequent_indent: str = "",
+) -> None:
+    """Print a human-oriented line with stable wrapping indentation."""
+    print(
+        textwrap.fill(
+            text,
+            width=_HUMAN_OUTPUT_WIDTH,
+            initial_indent=initial_indent,
+            subsequent_indent=subsequent_indent or initial_indent,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    )
+
+
+def _print_human_field(label: str, value: object, *, indent: int = 2) -> None:
+    """Print a labeled human field with wrapped continuation lines."""
+    prefix = f"{' ' * indent}{label}: "
+    _print_human_line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
 
 
 def print_path_report(coord: Coordinator) -> None:
@@ -78,15 +105,15 @@ def command_status(args: argparse.Namespace) -> int:
         print_json(payload)
         return 0
     print(f"{payload['name']} ({payload['project_id']})")
-    print(f"  config: {payload['config_path']}")
-    print(f"  db: {payload['db_path']}")
+    _print_human_field("config", payload["config_path"])
+    _print_human_field("db", payload["db_path"])
     if payload.get("task_source_path"):
-        print(f"  task source: {payload['task_source_path']}")
-    print(f"  ready: {len(payload['ready'])}")
-    print(f"  active: {len(payload['active'])}")
-    print(f"  review: {len(payload['review'])}")
-    print(f"  integration: {len(payload['integration'])}")
-    print(f"  blocked: {len(payload['blocked'])}")
+        _print_human_field("task source", payload["task_source_path"])
+    _print_human_field("ready", len(payload["ready"]))
+    _print_human_field("active", len(payload["active"]))
+    _print_human_field("review", len(payload["review"]))
+    _print_human_field("integration", len(payload["integration"]))
+    _print_human_field("blocked", len(payload["blocked"]))
     return 0
 
 
@@ -127,18 +154,26 @@ def print_overview_item(group: str, item: dict[str, Any]) -> None:
     if item.get("lease_agent_id"):
         qualifiers.append(f"agent {item['lease_agent_id']}")
     qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
-    print(f"  - {item['id']}: {item['title']}{qualifier}")
+    _print_human_line(
+        f"- {item['id']}: {item['title']}{qualifier}",
+        initial_indent="  ",
+        subsequent_indent="    ",
+    )
 
     for blocker in item.get("blockers", [])[:2]:
-        print(f"    blocker: {blocker}")
+        _print_human_field("blocker", blocker, indent=4)
     if len(item.get("blockers", [])) > 2:
-        print(f"    blocker: +{len(item['blockers']) - 2} more")
+        _print_human_field("blocker", f"+{len(item['blockers']) - 2} more", indent=4)
     if item.get("next_action"):
-        print(f"    next: {item['next_action']}")
+        _print_human_field("next", item["next_action"], indent=4)
     if item.get("latest_evidence"):
-        print(f"    evidence: {item['latest_evidence']}")
+        _print_human_field("evidence", item["latest_evidence"], indent=4)
     if group == "recently_completed" and item.get("completed_at"):
-        print(f"    completed: {item['completed_at']} by {item.get('completed_by') or 'system'}")
+        _print_human_field(
+            "completed",
+            f"{item['completed_at']} by {item.get('completed_by') or 'system'}",
+            indent=4,
+        )
 
 
 def command_next(args: argparse.Namespace) -> int:
@@ -157,11 +192,11 @@ def command_next(args: argparse.Namespace) -> int:
         return 0
     for state in ready:
         task = state.task
-        print(f"{task.task_id}: {task.title}")
+        _print_human_line(f"{task.task_id}: {task.title}", subsequent_indent="  ")
         if task.repo:
-            print(f"  repo: {task.repo}")
+            _print_human_field("repo", task.repo)
         if task.next_action:
-            print(f"  next: {task.next_action}")
+            _print_human_field("next", task.next_action)
     return 0
 
 
@@ -343,7 +378,7 @@ def command_list_intake(args: argparse.Namespace) -> int:
         print("No intake records.")
         return 0
     for item in payload["intake"]:
-        qualifiers = [item["kind"]]
+        qualifiers = [f"status {item['status']}", item["kind"]]
         if item["repo"]:
             qualifiers.append(f"repo {item['repo']}")
         if item["source"]:

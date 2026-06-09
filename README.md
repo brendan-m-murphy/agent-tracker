@@ -161,6 +161,11 @@ agent-tracker next --config demo-tracker/project.json --role maintainer --limit 
 agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200
 ```
 
+Human `status`, `overview`, and `next` output wraps long values at a standard
+terminal width with continuation lines aligned under the field value. For
+automation, add `--json` to `next`, `status`, or `overview`; JSON output is not
+wrapped or reformatted.
+
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
 the token; `heartbeat`, `complete`, and `fail` require it.
 
@@ -171,8 +176,8 @@ agent-tracker task --config demo-tracker/project.json write-readme --markdown
 ```
 
 The rendered prompt contains the summary, execution notes, dependency state,
-validation checks, and next action. For automation, add `--json` to `next`,
-`status`, or `task`.
+validation checks, and next action. For task-level automation, add `--json` to
+`task`.
 
 Extend a lease while working:
 
