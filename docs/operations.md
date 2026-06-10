@@ -11,6 +11,10 @@ temporarily; if `--db` is omitted, the CLI uses `AGENT_TRACKER_DB` when set.
 Explicit CLI arguments always take precedence over environment defaults. When
 `canonical_config_path` is set, mutating commands refuse copied configs and
 database overrides so live state stays attached to the canonical project.
+The durable parser-migration baseline is recorded in the
+[CLI command contract inventory](research/2026-06-10-cli-command-contracts.md);
+consult it before changing command names, aliases, JSON roots, stream behavior,
+exit codes, or shell completion policy.
 
 ## First Run Checklist
 

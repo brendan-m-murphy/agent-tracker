@@ -5192,8 +5192,9 @@ def test_cli_export_pr_notifications_outputs_json_payload(
 
     monkeypatch.setattr(Coordinator, "export_pr_notifications", fake_export)
     stdout = StringIO()
+    stderr = StringIO()
 
-    with redirect_stdout(stdout):
+    with redirect_stdout(stdout), redirect_stderr(stderr):
         code = cli.main(
             [
                 "export-pr-notifications",
@@ -5207,6 +5208,57 @@ def test_cli_export_pr_notifications_outputs_json_payload(
 
     assert code == 0
     assert json.loads(stdout.getvalue()) == expected
+    assert stderr.getvalue() == ""
+
+
+def test_cli_export_pr_notifications_stream_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JSON export stays parseable while human export keeps the path report."""
+    config_path = write_project(tmp_path)
+    expected = {
+        "project_id": "toy",
+        "ok": True,
+        "action": "prepared",
+        "status": "prepared",
+        "target_key": "github:github.com/example/library#pull/123",
+        "payload_hash": "abc",
+        "setup": {},
+        "prepared_payload": {"body": "body", "intervention_ids": ["i1"]},
+        "prepared_payload_path": str(tmp_path / "exports" / "pr.json"),
+        "delivery": None,
+        "issues": [],
+    }
+
+    def fake_export(self: Coordinator, **_: object) -> dict[str, Any]:
+        return expected
+
+    monkeypatch.setattr(Coordinator, "export_pr_notifications", fake_export)
+    json_stdout = StringIO()
+    json_stderr = StringIO()
+    human_stdout = StringIO()
+    human_stderr = StringIO()
+
+    with redirect_stdout(json_stdout), redirect_stderr(json_stderr):
+        json_code = cli.main(
+            [
+                "export-pr-notifications",
+                "--config",
+                str(config_path),
+                "--json",
+            ]
+        )
+    with redirect_stdout(human_stdout), redirect_stderr(human_stderr):
+        human_code = cli.main(["export-pr-notifications", "--config", str(config_path)])
+
+    assert json_code == 0
+    assert human_code == 0
+    assert json.loads(json_stdout.getvalue()) == expected
+    assert json_stderr.getvalue() == ""
+    assert "PR notification export" in human_stdout.getvalue()
+    assert "agent-tracker paths:" in human_stderr.getvalue()
+    assert "config_path:" in human_stderr.getvalue()
 
 
 def test_cli_export_pr_notifications_returns_nonzero_when_refused(
@@ -5290,6 +5342,25 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "show-completion" not in intake_help
     assert_no_box_drawing(root_help)
     assert_no_box_drawing(intake_help)
+
+
+def test_cli_root_contract_hides_completion_helpers_and_preserves_aliases() -> None:
+    """The root parser keeps compatibility aliases without completion helpers."""
+    root_help = cli.build_parser().format_help()
+    parser = cli.build_parser()
+
+    release_args = parser.parse_args(
+        ["release", "ready", "--lease-token", "token", "--reason", "stop"]
+    )
+    alias_args = parser.parse_args(
+        ["release-lease", "ready", "--lease-token", "token", "--reason", "stop"]
+    )
+
+    assert "install-completion" not in root_help
+    assert "show-completion" not in root_help
+    assert "release-lease" in root_help
+    assert release_args.func is cli.command_release
+    assert alias_args.func is cli.command_release
 
 
 def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> None:
