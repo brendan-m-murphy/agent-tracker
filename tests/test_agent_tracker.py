@@ -5286,6 +5286,8 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "record" in intake_help
     assert "list" in intake_help
     assert "update" in intake_help
+    assert "install-completion" not in intake_help
+    assert "show-completion" not in intake_help
     assert_no_box_drawing(root_help)
     assert_no_box_drawing(intake_help)
 
