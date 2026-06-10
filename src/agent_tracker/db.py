@@ -769,6 +769,65 @@ class Store:
             payload={"reason": reason},
         )
 
+    def release_task(
+        self,
+        project_id: str,
+        task_id: str,
+        *,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> dict[str, str]:
+        """Release an active leased task back to the queue."""
+        clean_reason = reason.strip()
+        if not clean_reason:
+            raise ValueError("release reason is required")
+        if status != "pending":
+            raise ValueError("release status must be pending")
+        now_dt = utcnow()
+        with self.transaction(immediate=True) as conn:
+            row = self._locked_task(
+                conn,
+                project_id,
+                task_id,
+                lease_token,
+                agent_id=agent_id,
+                now=now_dt,
+            )
+            actor = agent_id or str(row["lease_agent_id"])
+            if not actor.strip():
+                raise ValueError("agent is required when releasing a lease without recorded owner")
+            from_status = str(row["status"])
+            now = iso(now_dt)
+            conn.execute(
+                """
+                UPDATE tasks SET
+                    status = ?,
+                    lease_agent_id = '',
+                    lease_token = '',
+                    lease_expires_at = '',
+                    claimed_at = '',
+                    updated_at = ?
+                WHERE project_id = ? AND task_id = ?
+                """,
+                (status, now, project_id, task_id),
+            )
+            payload = {
+                "from_status": from_status,
+                "status": status,
+                "reason": clean_reason,
+            }
+            self._audit(conn, project_id, task_id, "task.release", actor, payload)
+        return {
+            "project_id": project_id,
+            "task_id": task_id,
+            "from_status": from_status,
+            "status": status,
+            "agent_id": actor,
+            "reason": clean_reason,
+        }
+
     def submit_review_task(
         self,
         project_id: str,

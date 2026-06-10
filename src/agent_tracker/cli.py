@@ -374,6 +374,23 @@ def command_complete(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_release(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    payload = coord.release(
+        args.task_id,
+        lease_token=args.lease_token,
+        reason=args.reason,
+        agent_id=args.agent,
+        status=args.status,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    print(f"Released {args.task_id} to {payload['status']}")
+    return 0
+
+
 def command_record_evidence(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -1088,6 +1105,20 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat.add_argument("--agent", default="")
     heartbeat.add_argument("--lease-seconds", type=int, default=3600)
     heartbeat.set_defaults(func=command_heartbeat)
+
+    release = sub.add_parser(
+        "release",
+        aliases=["release-lease"],
+        help="Release a leased task back to the queue.",
+    )
+    add_common(release)
+    release.add_argument("task_id")
+    release.add_argument("--lease-token", required=True)
+    release.add_argument("--agent", default="")
+    release.add_argument("--reason", required=True)
+    release.add_argument("--status", choices=["pending"], default="pending")
+    release.add_argument("--json", action="store_true")
+    release.set_defaults(func=command_release)
 
     complete = sub.add_parser("complete", help="Complete a task.")
     add_common(complete)

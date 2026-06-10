@@ -320,6 +320,9 @@ payloads:
   `lease_expires_at`, and `agent_id`.
 - `heartbeat(task_id, lease_token, lease_seconds=3600, agent_id="")`: the same
   claim-shaped lease payload after extending the lease.
+- `release(task_id, lease_token, reason, agent_id="", status="pending")`:
+  release an active owned lease back to the queue and return the audited release
+  payload.
 - `complete(task_id, lease_token, evidence=None, agent_id="",
   direct_merge=False)`: `{"ok": true}` after successful completion.
 - `record_evidence(task_id, uri, actor="system")`: idempotently append one
@@ -340,13 +343,13 @@ back through normal tracker state, evidence, and event APIs.
 
 Existing method names remain supported as compatibility aliases:
 `get_project_status()`, `claim_task(...)`, `heartbeat_task(...)`,
-`complete_task(...)`, `list_ready_tasks(...)`, `get_task_context(...)`, and
-`render_prompt(...)`.
+`release_task(...)`, `complete_task(...)`, `list_ready_tasks(...)`,
+`get_task_context(...)`, and `render_prompt(...)`.
 
 These wrappers are adapters over `Coordinator`, not a second queue authority.
 Canonical config and database override checks still run for mutating calls, and
 lease tokens and optional `agent_id` ownership checks still apply to heartbeat,
-completion, review, integration, and failure operations. `status` and
+release, completion, review, integration, and failure operations. `status` and
 `overview` remain read-only unless their `recover_stale_leases` flag is set.
 
 ## List Ready Tasks
@@ -506,6 +509,25 @@ agent-tracker heartbeat --config project.json write-readme \
 
 Use heartbeats for longer tasks so stale-lease recovery does not return active
 work to the ready queue.
+
+## Release A Lease
+
+Release a task when the current owner is stopping early, switching scope, or
+handing unstarted work back to the queue:
+
+```bash
+agent-tracker release --config project.json write-readme \
+  --lease-token <lease-token> \
+  --agent agent-1 \
+  --reason "switching to higher-priority release work"
+```
+
+`release` requires the active lease token and records the reason in audit
+history. It clears the lease and returns the task to `pending`; if dependencies
+are already satisfied, the task appears ready for another claim. Use
+`submit-review` or `await-integration` instead when implementation is complete
+but review, PR, merge, or other integration evidence is still pending. Use
+`fail` only when the task should become terminally failed.
 
 ## Log Work While Active
 
@@ -787,7 +809,7 @@ metadata remains legacy behavior and is not reported as a policy issue.
 
 ## Await Review Or Integration
 
-When implementation work is finished but the task is not done yet, release the
+When implementation work is finished but the task is not done yet, move the
 active lease into an explicit non-terminal queue state. This prevents the task
 from being reclaimed as active work while preserving that dependencies are not
 satisfied until the task is `done`.
@@ -1127,6 +1149,16 @@ agent-tracker await-integration --config project.json <task-id> \
   --agent <agent-id> \
   --status awaiting_pr \
   --evidence "git:<branch-commit>"
+```
+
+If you need to stop early or switch scope before work is ready for review,
+return the task to the queue with an audited reason:
+
+```bash
+agent-tracker release --config project.json <task-id> \
+  --lease-token <lease-token> \
+  --agent <agent-id> \
+  --reason "<why this lease is being released>"
 ```
 
 After review or integration is finished:

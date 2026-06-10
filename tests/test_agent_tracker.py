@@ -1352,6 +1352,88 @@ def test_completion_integrity_check_reports_file_evidence_git_hygiene(
     assert tool_payload == payload
 
 
+def test_release_returns_active_lease_to_pending_and_audits(tmp_path: Path) -> None:
+    """Lease owners can release active work without terminally failing it."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    heartbeat = coord.heartbeat("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    payload = coord.release(
+        "ready",
+        lease_token=heartbeat.lease_token,
+        agent_id="agent-1",
+        reason="  switching tasks  ",
+    )
+    states = {state.task.task_id: state for state in coord.task_states()}
+    status_payload = coord.status_payload()
+    snapshot = coord.store.snapshot(config.project_id)
+    release_audit = next(audit for audit in snapshot["audit"] if audit["action"] == "task.release")
+
+    assert payload == {
+        "project_id": "toy",
+        "task_id": "ready",
+        "from_status": "in_progress",
+        "status": "pending",
+        "agent_id": "agent-1",
+        "reason": "switching tasks",
+    }
+    assert states["ready"].task.status == "pending"
+    assert states["ready"].state == "ready"
+    assert states["ready"].lease_token == ""
+    assert states["ready"].lease_agent_id == ""
+    assert states["ready"].lease_expires_at == ""
+    assert states["blocked"].state == "blocked"
+    assert status_payload["ready"] == ["ready"]
+    assert "ready" not in status_payload["active"]
+    assert release_audit["actor"] == "agent-1"
+    assert release_audit["payload"] == {
+        "from_status": "in_progress",
+        "reason": "switching tasks",
+        "status": "pending",
+    }
+    with pytest.raises(ValueError, match="not active"):
+        coord.heartbeat("ready", lease_token=heartbeat.lease_token, agent_id="agent-1")
+
+
+def test_release_requires_reason_owner_and_active_lease(tmp_path: Path) -> None:
+    """Release is distinct from privileged recovery and awaiting handoffs."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="release reason is required"):
+        coord.release("ready", lease_token=claim.lease_token, agent_id="agent-1", reason=" ")
+    with pytest.raises(ValueError, match="different agent"):
+        coord.release(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-2",
+            reason="return to queue",
+        )
+    with pytest.raises(ValueError, match="release status must be pending"):
+        coord.release(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            reason="return to queue",
+            status="awaiting_review",
+        )
+
+    coord.submit_review("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    with pytest.raises(ValueError, match="not active"):
+        coord.release(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            reason="return to queue",
+        )
+    assert coord.get_task("ready").state == "awaiting_review"
+
+
 def test_submit_review_clears_lease_records_evidence_and_preserves_blocking(
     tmp_path: Path,
 ) -> None:
@@ -4580,6 +4662,43 @@ def test_mcp_handlers_submit_review_and_await_integration(tmp_path: Path) -> Non
     }
 
 
+def test_mcp_release_task_returns_payload_and_enforces_owner(tmp_path: Path) -> None:
+    """MCP release keeps lease ownership checks and returns release details."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="different agent"):
+        tools.release_task(
+            task_id="ready",
+            lease_token=claim["lease_token"],
+            reason="wrong owner",
+            agent_id="agent-2",
+        )
+
+    payload = tools.release_task(
+        task_id="ready",
+        lease_token=claim["lease_token"],
+        reason="return to queue",
+        agent_id="agent-1",
+    )
+    state = tools.get_task_context("ready")
+
+    assert payload == {
+        "project_id": "toy",
+        "task_id": "ready",
+        "from_status": "claimed",
+        "status": "pending",
+        "agent_id": "agent-1",
+        "reason": "return to queue",
+    }
+    assert state["manual_status"] == "pending"
+    assert state["state"] == "ready"
+    assert state["lease_agent_id"] == ""
+
+
 def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     tmp_path: Path,
 ) -> None:
@@ -4890,6 +5009,48 @@ def test_cli_submit_review_updates_state_and_records_repeated_evidence(
     assert "Submitted ready for review" in stdout.getvalue()
     assert state.state == "awaiting_review"
     assert state.evidence == ["evidence://one", "evidence://two"]
+
+
+def test_cli_release_returns_task_to_pending_with_json(tmp_path: Path) -> None:
+    """CLI release prints a JSON payload and clears the active lease."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "release",
+                "--config",
+                str(config_path),
+                "ready",
+                "--lease-token",
+                claim.lease_token,
+                "--agent",
+                "agent-1",
+                "--reason",
+                "returning scoped work",
+                "--json",
+            ]
+        )
+    payload = json.loads(stdout.getvalue())
+    state = coord.get_task("ready")
+
+    assert code == 0
+    assert payload == {
+        "project_id": "toy",
+        "task_id": "ready",
+        "from_status": "claimed",
+        "status": "pending",
+        "agent_id": "agent-1",
+        "reason": "returning scoped work",
+    }
+    assert state.task.status == "pending"
+    assert state.state == "ready"
+    assert state.lease_token == ""
 
 
 def test_cli_submit_review_reports_validation_errors_without_traceback(

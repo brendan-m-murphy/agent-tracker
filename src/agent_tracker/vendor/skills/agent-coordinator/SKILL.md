@@ -40,13 +40,16 @@ If no config is discoverable, ask for the config path.
    the project has no task-ingest path yet, make the task-plan edit narrow,
    call it friction, import it, and record that fact as evidence.
 4. Claim one task with a stable agent ID. Keep the lease token in your working
-   notes until completion or failure.
+   notes until completion, release, failure, or explicit review/integration
+   handoff.
 5. Render the task prompt, then coordinate bounded workers by default when the
    user requested agent coordination. Local work is fine for tiny coordination
    mutations or when subagents are unavailable, but do not silently replace
    requested agent coordination with solo implementation.
-6. Use review/integration states when code, docs, config, tests, or task plans
-   changed and final evidence is not available yet.
+6. Use `release` with an audited reason when stopping early, switching scope, or
+   returning untouched work to the queue. Use review/integration states when
+   code, docs, config, tests, or task plans changed and final evidence is not
+   available yet.
 7. Complete only after evidence satisfies the task's completion policy.
 8. Re-run `overview` and report ready work, active work, and any friction that
    remains.
@@ -65,6 +68,17 @@ A healthy lease has a non-empty token, an expiry in the future, and an active
 overview entry showing the same `lease_agent_id`. Invalid owner, missing token,
 or expired lease errors are good signs: the queue is enforcing ownership. Use
 `--recover-stale-leases` only when you intend to mutate SQLite recovery state.
+
+When you intentionally stop early or switch scope, return the task to `pending`
+with an explicit audit reason instead of waiting for stale-lease recovery:
+
+```bash
+uv run agent-tracker release --config tracking/project.json <task-id> --lease-token <lease-token> --agent <agent-id> --reason "<why the lease is being released>"
+```
+
+Do not use `release` for completed work waiting on review, PRs, merges, or other
+integration evidence; use `submit-review` or `await-integration` for those
+handoffs. Do not use `fail` unless the task should be terminally failed.
 
 ## Planning And Creating Work
 

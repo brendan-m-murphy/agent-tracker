@@ -202,6 +202,39 @@ class Coordinator:
             agent_id=agent_id,
         )
 
+    def release(
+        self,
+        task_id: str,
+        *,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> dict[str, str]:
+        """Release an active leased task back to the queue.
+
+        Args:
+            task_id: Task identifier to release.
+            lease_token: Current active lease token for the task.
+            reason: Non-empty audit reason for returning the work to the queue.
+            agent_id: Optional agent ID used to validate lease ownership.
+            status: Target queue status. Only `pending` is currently supported.
+
+        Raises:
+            ValueError: If mutation is refused, the release reason is empty, the
+                lease is invalid, or the requested target status is unsupported.
+            KeyError: If the task does not exist.
+        """
+        self._ensure_mutation_allowed()
+        return self.store.release_task(
+            self.config.project_id,
+            task_id,
+            lease_token=lease_token,
+            reason=reason,
+            agent_id=agent_id,
+            status=status,
+        )
+
     def submit_review(
         self,
         task_id: str,
