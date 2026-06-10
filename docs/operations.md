@@ -175,6 +175,9 @@ agent-tracker status --config project.json
 Human `status` output is rendered with Rich and grouped into `Paths` and
 `Queue` sections with aligned labels. It avoids Rich panels or box-drawing
 characters by default so output can be copied into logs and plain-text handoffs.
+Line-oriented human output for `status`, `overview`, `next`, intake listings,
+and proposal listings flows through the built-in `HumanOutputRenderer` boundary.
+Task prompt output remains on the separate prompt-renderer plugin path.
 
 Print full JSON task state:
 
@@ -202,11 +205,17 @@ agent-tracker status --config project.json --recover-stale-leases
 
 ## Project Overview
 
-Use `overview` when you need a project-log view instead of raw status IDs:
+Use `overview` when you need a compact project-log view instead of raw status
+IDs:
 
 ```bash
 agent-tracker overview --config project.json
 ```
+
+The default human output is no-box and copy-paste safe: plain section headings,
+stable labels, no decorative panels, and readable wrapping when copied into
+logs, chat, or pull request comments. It is a coordination summary, not a full
+task dump.
 
 The human output is grouped under stable headings:
 
@@ -217,7 +226,7 @@ The human output is grouped under stable headings:
 - Blocked;
 - Recently completed.
 
-Blocked entries include unsatisfied requirement details from the evaluated
+Blocked entries include short blocker summaries derived from the evaluated
 `requirements` data. Ready and waiting entries show `next_action` and latest
 evidence when available. Recently completed entries are ordered from completion
 audit records, not task priority.
@@ -225,9 +234,8 @@ audit records, not task priority.
 Human overview output wraps long task titles, blockers, next actions, evidence,
 and completion details at a standard terminal width. Wrapped task titles use a
 distinct continuation indent so they do not read like `next`, `blocker`, or
-other detail fields. JSON output is unchanged and should be used for automation.
-See `docs/research/2026-06-09-cli-tui-helper-evaluation.md` before adding a
-runtime dependency for richer human output or TUI behavior.
+other detail fields. Each group reports a count and defaults to five visible
+items for readability; pass `--limit 0` to show every grouped task.
 
 Use JSON output for automation:
 
@@ -244,6 +252,20 @@ task dictionary.
 Like `status`, `overview` is read-only by default. It reports the effective
 state without mutating stale leases. Pass `--recover-stale-leases` only when
 inspection should also write stale-lease recovery to SQLite.
+
+Raw intake and proposed tasks are planning records, not live queue tasks. They
+stay out of overview's live task groups until promoted. If a future planning
+section shows intake or proposals, it should be visibly distinct from Ready,
+Active, Review, Integration, Blocked, and Recently completed.
+
+Keep the default overview compact. Downstream work that needs more task
+metadata should add an explicit human detail drilldown instead of expanding the
+default summary. The detailed UX contract for future overview work is in
+`docs/research/2026-06-10-overview-ux-contract.md`; it covers compact defaults,
+copy-paste-safe output, JSON compatibility, summary/detail drilldown, output
+modes, intake/proposal consistency, and the deferred Textual TUI posture. See
+`docs/research/2026-06-09-cli-tui-helper-evaluation.md` before adding a runtime
+dependency for richer human output or TUI behavior.
 
 ## Typed Tool Surface
 

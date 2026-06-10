@@ -864,6 +864,30 @@ def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
     assert "foundation: Foundation" not in output
 
 
+def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
+    tmp_path: Path,
+) -> None:
+    """Importable overview helpers remain as renderer-backed compatibility APIs."""
+    _, coord = prepare_overview_state(tmp_path)
+    payload = coord.overview_payload(limit=1)
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        cli.print_overview(payload)
+    overview_output = stdout.getvalue()
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        cli.print_overview_item("ready", payload["groups"]["ready"][0])
+    item_output = stdout.getvalue()
+
+    assert "Toy Project (toy)" in overview_output
+    assert "Ready (1)" in overview_output
+    assert "  - other-ready: Other Ready" in item_output
+    assert_no_box_drawing(overview_output)
+    assert_no_box_drawing(item_output)
+
+
 def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
     """Human overview wraps long next-action and blocker lines with hanging indents."""
     config_path = write_project(tmp_path)
@@ -2089,6 +2113,45 @@ def test_cli_launch_worker_records_explicit_coordination_assignment(
     }
 
 
+def test_cli_launch_worker_human_output_includes_coordination_assignment(
+    tmp_path: Path,
+) -> None:
+    """Human launch-worker output includes assigned branch and worktree context."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--task-id",
+                "ready",
+                "--branch",
+                "codex/ready-custom",
+                "--base-ref",
+                "origin/main",
+                "--worktree-path",
+                str(assigned_worktree),
+                "--dry-run",
+            ]
+        )
+
+    output = stdout.getvalue()
+    unwrapped_output = output.replace("\n", "")
+    assert code == 0
+    assert "Worker launch " in output
+    assert "  branch    codex/ready-custom" in output
+    assert f"  worktree  {assigned_worktree}" in unwrapped_output
+    assert_no_box_drawing(output)
+
+
 def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
     tmp_path: Path,
 ) -> None:
@@ -3150,6 +3213,46 @@ def test_cli_human_status_and_intake_output_are_plain_text(tmp_path: Path) -> No
     assert_no_box_drawing(intake_output)
 
 
+def test_cli_empty_human_lists_use_renderer_boundary(tmp_path: Path) -> None:
+    """Empty human intake and proposal listings stay plain and unchanged."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        intake_code = cli.main(["list-intake", "--config", str(config_path)])
+    intake_output = stdout.getvalue()
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        proposal_code = cli.main(["list-proposals", "--config", str(config_path)])
+    proposal_output = stdout.getvalue()
+
+    assert intake_code == 0
+    assert proposal_code == 0
+    assert intake_output == "No intake records.\n"
+    assert proposal_output == "No proposed tasks.\n"
+    assert_no_box_drawing(intake_output)
+    assert_no_box_drawing(proposal_output)
+
+
+def test_cli_task_human_output_stays_prompt_renderer(tmp_path: Path) -> None:
+    """Task human output remains the prompt renderer output."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["task", "--config", str(config_path), "ready", "--markdown"])
+
+    output = stdout.getvalue()
+    assert code == 0
+    assert output.startswith("# Ready\n")
+    assert "## Summary\nReady to run." in output
+    assert "Paths\n" not in output
+    assert_no_box_drawing(output)
+
+
 def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     """Root and grouped help output stay copy-paste-safe plain text."""
     root_help = cli.build_parser().format_help()
@@ -3613,6 +3716,33 @@ def test_cli_propose_and_list_proposals_json(tmp_path: Path) -> None:
     assert promoted["status"] == "promoted"
     assert state.state == "ready"
     assert state.task.task_id == "add-triage"
+
+
+def test_cli_list_proposals_human_output_uses_renderer_boundary(tmp_path: Path) -> None:
+    """Human proposal listings stay readable and no-box through the renderer boundary."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        repo="agent-tracker",
+        next_action="Review and promote the proposed task.",
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["list-proposals", "--config", str(config_path)])
+
+    output = stdout.getvalue()
+    assert code == 0
+    assert f"{proposal.proposal_id}: add-triage - Add triage workflow" in output
+    assert f"  intake: {intake.intake_id}; status: proposed" in output
+    assert "  repo: agent-tracker" in output
+    assert "  next: Review and promote the proposed task." in output
+    assert_no_box_drawing(output)
 
 
 def test_cli_update_and_withdraw_proposal_json(tmp_path: Path) -> None:
