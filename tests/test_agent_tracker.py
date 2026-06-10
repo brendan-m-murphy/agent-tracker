@@ -76,6 +76,15 @@ def render_wide_overview_payload(payload: dict[str, Any], *, width: int) -> str:
     return stdout.getvalue()
 
 
+def run_cli_captured(argv: list[str]) -> tuple[int, str, str]:
+    """Run the in-process CLI and capture stdout and stderr."""
+    stdout = StringIO()
+    stderr = StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        code = cli.main(argv)
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
 def write_project(root: Path) -> Path:
     """Write a toy non-project-specific config and task plan."""
     (root / "tasks.json").write_text(
@@ -504,6 +513,17 @@ def test_cli_reports_malformed_config_errors_without_traceback(
     assert not (tmp_path / "state.sqlite").exists()
 
 
+def test_cli_missing_config_fails_with_actionable_stderr_only() -> None:
+    """Commands that need project config fail on stderr without stdout noise."""
+    code, stdout, stderr = run_cli_captured(["status", "--json"])
+
+    assert code == 1
+    assert stdout == ""
+    assert "error: Project config JSON path is required" in stderr
+    assert "pass --config or set AGENT_TRACKER_CONFIG" in stderr
+    assert "Traceback" not in stderr
+
+
 def test_cli_uses_config_env_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -584,6 +604,51 @@ def test_cli_explicit_config_and_db_override_env_defaults(
     assert payload["project_id"] == "explicit-toy"
     assert payload["db_path"] == str(explicit_db_path)
     assert not env_db_path.exists()
+
+
+def test_cli_grouped_intake_leaf_config_and_db_override_env_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grouped intake leaf --config and --db options override env defaults."""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    env_config = write_project(env_root)
+    env_data = json.loads(env_config.read_text(encoding="utf-8"))
+    env_data["project_id"] = "env-toy"
+    env_config.write_text(json.dumps(env_data), encoding="utf-8")
+    Coordinator(load_config(env_config)).import_tasks()
+
+    explicit_root = tmp_path / "explicit"
+    explicit_root.mkdir()
+    explicit_config = write_project(explicit_root)
+    explicit_db_path = tmp_path / "explicit-intake.sqlite"
+    Coordinator(load_config(explicit_config), db_path=explicit_db_path).import_tasks()
+    env_db_path = tmp_path / "env-intake.sqlite"
+    monkeypatch.setenv(PROJECT_CONFIG_ENV_VAR, str(env_config))
+    monkeypatch.setenv(PROJECT_DB_ENV_VAR, str(env_db_path))
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "intake",
+            "record",
+            "--config",
+            str(explicit_config),
+            "--db",
+            str(explicit_db_path),
+            "--kind",
+            "check",
+            "Grouped intake precedence.",
+        ]
+    )
+
+    recorded = json.loads(stdout)
+    assert code == 0
+    assert recorded["text"] == "Grouped intake precedence."
+    assert explicit_db_path.exists()
+    assert not env_db_path.exists()
+    assert str(explicit_config) in stderr
+    assert str(explicit_db_path) in stderr
 
 
 def test_cli_init_project_bootstraps_plugin_free_layout(tmp_path: Path) -> None:
@@ -875,6 +940,101 @@ def test_cli_overview_json_groups_tasks_and_counts_limited_items(tmp_path: Path)
     assert payload["groups"]["blocked"][0]["blockers"] == ["Depends on ready (ready: claimed)"]
     assert payload["groups"]["ready"][0]["next_action"] == "Pick up the remaining ready task."
     assert payload["groups"]["recently_completed"][0]["latest_evidence"] == "git:done-b"
+
+
+def test_cli_representative_json_roots_and_streams_are_stable(tmp_path: Path) -> None:
+    """Representative JSON commands keep parseable stdout and stable root shapes."""
+    workspace = tmp_path / "workspace"
+    config_path = write_project_with_workspace(tmp_path, workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    intake = coord.record_intake("Create a parser parity task.", kind="check")
+    coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="parser-parity",
+        title="Add parser parity checks",
+        summary="Guard CLI contracts before parser migration.",
+    )
+    coord.record_intervention(
+        reason="approval_required",
+        summary="Need parser migration decision.",
+        actor="pm",
+    )
+
+    read_only_cases = [
+        (
+            ["status", "--config", str(config_path), "--json"],
+            {"project_id", "name", "tasks", "ready", "active", "review", "integration", "blocked"},
+        ),
+        (
+            ["overview", "--config", str(config_path), "--json", "--limit", "1"],
+            {"project_id", "name", "limit", "counts", "groups"},
+        ),
+        (
+            ["next", "--config", str(config_path), "--json"],
+            None,
+        ),
+        (
+            ["list-intake", "--config", str(config_path), "--json"],
+            {"project_id", "intake"},
+        ),
+        (
+            ["list-proposals", "--config", str(config_path), "--json"],
+            {"project_id", "proposals"},
+        ),
+        (
+            ["list-interventions", "--config", str(config_path), "--json"],
+            {"project_id", "interventions"},
+        ),
+        (
+            ["list-workspaces", "--config", str(config_path), "--json"],
+            {"project_id", "workspaces"},
+        ),
+    ]
+
+    for argv, expected_root_keys in read_only_cases:
+        code, stdout, stderr = run_cli_captured(argv)
+        payload = json.loads(stdout)
+
+        assert code == 0
+        assert stderr == ""
+        if expected_root_keys is None:
+            assert isinstance(payload, list)
+            assert payload[0]["id"] == "ready"
+        else:
+            assert expected_root_keys <= set(payload)
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "launch-worker",
+            "--config",
+            str(config_path),
+            "--workspace",
+            "hpc",
+            "--prompt",
+            "Check parser parity.",
+            "--dry-run",
+            "--json",
+        ]
+    )
+    launch_payload = json.loads(stdout)
+
+    assert code == 0
+    assert {
+        "project_id",
+        "workspace",
+        "status",
+        "dry_run",
+        "execute",
+        "coordination",
+        "artifacts",
+        "command",
+    } <= set(launch_payload)
+    assert launch_payload["status"] == "dry_run"
+    assert launch_payload["dry_run"] is True
+    assert launch_payload["command"] == []
+    assert "agent-tracker paths:" in stderr
+    assert stdout.lstrip().startswith("{")
 
 
 def test_cli_overview_plain_outputs_line_oriented_key_values(tmp_path: Path) -> None:
@@ -2953,7 +3113,7 @@ def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
 
 
 def test_cli_launch_worker_command_remainder_keeps_later_options_in_command() -> None:
-    """Tokens after --command belong to the worker command argv."""
+    """Tokens after --command stay in worker argv even if they look like CLI flags."""
     args = cli.build_parser().parse_args(
         [
             "launch-worker",
@@ -2978,13 +3138,22 @@ def test_cli_launch_worker_command_remainder_keeps_later_options_in_command() ->
             "-c",
             "print(1)",
             "--json",
+            "--config",
+            "worker-project.json",
         ]
     )
 
     assert args.json is True
     assert args.command == ["python", "-c", "print(1)"]
     assert trailing_args.json is False
-    assert trailing_args.command == ["python", "-c", "print(1)", "--json"]
+    assert trailing_args.command == [
+        "python",
+        "-c",
+        "print(1)",
+        "--json",
+        "--config",
+        "worker-project.json",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -4055,6 +4224,182 @@ def test_cli_grouped_intake_capture_matches_flat_json_behavior(tmp_path: Path) -
     assert recorded["tags"] == ["validation"]
     assert recorded["metadata"] == {"lane": "planning/intake"}
     assert recorded["text"] == "Verify grouped intake capture."
+
+
+def test_cli_grouped_and_flat_intake_json_contracts_stay_in_parity(
+    tmp_path: Path,
+) -> None:
+    """Flat intake commands and grouped aliases keep matching JSON contracts."""
+
+    def normalize_intake(payload: dict[str, Any]) -> dict[str, Any]:
+        """Remove generated timestamps before comparing intake payloads."""
+        return {
+            key: value for key, value in payload.items() if key not in {"created_at", "updated_at"}
+        }
+
+    flat_root = tmp_path / "flat"
+    grouped_root = tmp_path / "grouped"
+    flat_root.mkdir()
+    grouped_root.mkdir()
+    flat_config = write_project(flat_root)
+    grouped_config = write_project(grouped_root)
+    Coordinator(load_config(flat_config)).import_tasks()
+    Coordinator(load_config(grouped_config)).import_tasks()
+    record_options = [
+        "--id",
+        "record-parity",
+        "--kind",
+        "check",
+        "--source",
+        "project-manager",
+        "--repo",
+        "agent-tracker",
+        "--tag",
+        "parser",
+        "--metadata",
+        "scope=cli",
+        "--metadata-json",
+        '{"baseline": "inventory"}',
+    ]
+    common_options = [
+        "--id",
+        "intake-parity",
+        "--kind",
+        "check",
+        "--source",
+        "project-manager",
+        "--repo",
+        "agent-tracker",
+        "--tag",
+        "parser",
+        "--metadata",
+        "scope=cli",
+        "--metadata-json",
+        '{"baseline": "inventory"}',
+    ]
+
+    flat_record_code, flat_record_stdout, flat_record_stderr = run_cli_captured(
+        [
+            "record-intake",
+            "--config",
+            str(flat_config),
+            *record_options,
+            "Record parser parity.",
+        ]
+    )
+    grouped_record_code, grouped_record_stdout, grouped_record_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(grouped_config),
+            "record",
+            *record_options,
+            "Record parser parity.",
+        ]
+    )
+
+    flat_code, flat_stdout, flat_stderr = run_cli_captured(
+        [
+            "capture-intake",
+            "--config",
+            str(flat_config),
+            *common_options,
+            "Check parser parity.",
+        ]
+    )
+    grouped_code, grouped_stdout, grouped_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(grouped_config),
+            "capture",
+            *common_options,
+            "Check parser parity.",
+        ]
+    )
+
+    flat_raw_recorded = json.loads(flat_record_stdout)
+    grouped_raw_recorded = json.loads(grouped_record_stdout)
+    flat_captured = json.loads(flat_stdout)
+    grouped_captured = json.loads(grouped_stdout)
+    assert flat_record_code == 0
+    assert grouped_record_code == 0
+    assert flat_code == 0
+    assert grouped_code == 0
+    assert "agent-tracker paths:" in flat_record_stderr
+    assert "agent-tracker paths:" in grouped_record_stderr
+    assert json.loads(flat_record_stdout)
+    assert json.loads(grouped_record_stdout)
+    assert "agent-tracker paths:" in flat_stderr
+    assert "agent-tracker paths:" in grouped_stderr
+    assert normalize_intake(flat_raw_recorded) == normalize_intake(grouped_raw_recorded)
+    assert normalize_intake(flat_captured) == normalize_intake(grouped_captured)
+
+    flat_list_code, flat_list_stdout, flat_list_stderr = run_cli_captured(
+        [
+            "list-intake",
+            "--config",
+            str(flat_config),
+            "--json",
+            "--kind",
+            "check",
+        ]
+    )
+    grouped_list_code, grouped_list_stdout, grouped_list_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(grouped_config),
+            "list",
+            "--json",
+            "--kind",
+            "check",
+        ]
+    )
+    flat_listed = json.loads(flat_list_stdout)
+    grouped_listed = json.loads(grouped_list_stdout)
+    assert flat_list_code == 0
+    assert grouped_list_code == 0
+    assert flat_list_stderr == ""
+    assert grouped_list_stderr == ""
+    assert set(flat_listed) == {"project_id", "intake"}
+    assert set(grouped_listed) == {"project_id", "intake"}
+    assert [normalize_intake(item) for item in flat_listed["intake"]] == [
+        normalize_intake(item) for item in grouped_listed["intake"]
+    ]
+
+    flat_update_code, flat_update_stdout, flat_update_stderr = run_cli_captured(
+        [
+            "update-intake",
+            "--config",
+            str(flat_config),
+            "intake-parity",
+            "--status",
+            "triaged",
+            "--actor",
+            "pm",
+        ]
+    )
+    grouped_update_code, grouped_update_stdout, grouped_update_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(grouped_config),
+            "update",
+            "intake-parity",
+            "--status",
+            "triaged",
+            "--actor",
+            "pm",
+        ]
+    )
+    assert flat_update_code == 0
+    assert grouped_update_code == 0
+    assert "agent-tracker paths:" in flat_update_stderr
+    assert "agent-tracker paths:" in grouped_update_stderr
+    assert normalize_intake(json.loads(flat_update_stdout)) == normalize_intake(
+        json.loads(grouped_update_stdout)
+    )
 
 
 def test_cli_record_intake_rejects_malformed_metadata_pair(tmp_path: Path) -> None:
@@ -5317,14 +5662,16 @@ def test_cli_export_pr_notifications_returns_nonzero_when_refused(
 def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     """Root and grouped help output stay copy-paste-safe plain text."""
     root_help = cli.build_parser().format_help()
-    stdout = StringIO()
-
-    with redirect_stdout(stdout):
-        code = cli.main(["intake", "--help"])
-
-    intake_help = stdout.getvalue()
+    code, intake_help, intake_stderr = run_cli_captured(["intake", "--help"])
+    record_code, record_help, record_stderr = run_cli_captured(["intake", "record", "--help"])
+    list_code, list_help, list_stderr = run_cli_captured(["intake", "list", "--help"])
     normalized_root_help = " ".join(root_help.split())
     assert code == 0
+    assert record_code == 0
+    assert list_code == 0
+    assert intake_stderr == ""
+    assert record_stderr == ""
+    assert list_stderr == ""
     assert "record-intake" in root_help
     assert "capture-intake" in root_help
     assert "intake" in root_help
@@ -5338,10 +5685,17 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "record" in intake_help
     assert "list" in intake_help
     assert "update" in intake_help
-    assert "install-completion" not in intake_help
-    assert "show-completion" not in intake_help
+    assert "--kind" in record_help
+    assert "--metadata-json" in record_help
+    assert "--json" in list_help
+    assert "--no-color" in list_help
+    for help_output in (root_help, intake_help, record_help, list_help):
+        assert "install-completion" not in help_output
+        assert "show-completion" not in help_output
     assert_no_box_drawing(root_help)
     assert_no_box_drawing(intake_help)
+    assert_no_box_drawing(record_help)
+    assert_no_box_drawing(list_help)
 
 
 def test_cli_root_contract_hides_completion_helpers_and_preserves_aliases() -> None:
