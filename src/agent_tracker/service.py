@@ -18,16 +18,25 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from agent_tracker.config import ProjectConfig
-from agent_tracker.db import Store, intake_to_dict, proposed_task_to_dict, state_to_dict
+from agent_tracker.db import (
+    Store,
+    intake_to_dict,
+    intervention_to_dict,
+    proposed_task_to_dict,
+    state_to_dict,
+)
 from agent_tracker.models import (
     ACTIVE_STATES,
     INTAKE_STATES,
     INTEGRATION_STATES,
+    INTERVENTION_REASONS,
+    INTERVENTION_STATES,
     PROPOSAL_STATES,
     REVIEW_STATES,
     Claim,
     EventRecord,
     IntakeRecord,
+    InterventionRecord,
     ProposedTaskRecord,
     RequirementState,
     TaskRecord,
@@ -677,6 +686,103 @@ class Coordinator:
         return {
             "project_id": self.config.project_id,
             "proposals": [proposed_task_to_dict(record) for record in records],
+        }
+
+    def record_intervention(
+        self,
+        *,
+        reason: str,
+        task_id: str = "",
+        summary: str = "",
+        metadata: dict[str, Any] | None = None,
+        intervention_id: str = "",
+        actor: str = "system",
+    ) -> InterventionRecord:
+        """Record a durable human intervention need without notifying anyone."""
+        self._ensure_mutation_allowed()
+        cleaned_reason = _first_text(reason)
+        if cleaned_reason not in INTERVENTION_REASONS:
+            allowed = ", ".join(sorted(INTERVENTION_REASONS))
+            raise ValueError(f"intervention reason must be one of: {allowed}")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("intervention metadata must be a JSON object")
+        record = InterventionRecord(
+            intervention_id=_first_text(intervention_id) or uuid.uuid4().hex,
+            task_id=_first_text(task_id),
+            reason=cleaned_reason,
+            summary=_first_text(summary),
+            metadata=metadata or {},
+        )
+        return self.store.record_intervention(
+            self.config.project_id,
+            record,
+            actor=actor,
+        )
+
+    def intervention_records(
+        self,
+        *,
+        status: str = "",
+        reason: str = "",
+        task_id: str = "",
+        limit: int = 0,
+    ) -> list[InterventionRecord]:
+        """Return durable intervention records."""
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
+        cleaned_status = _first_text(status)
+        if cleaned_status and cleaned_status not in INTERVENTION_STATES:
+            raise ValueError(f"invalid intervention status: {cleaned_status}")
+        cleaned_reason = _first_text(reason)
+        if cleaned_reason and cleaned_reason not in INTERVENTION_REASONS:
+            raise ValueError(f"invalid intervention reason: {cleaned_reason}")
+        return self.store.intervention_records(
+            self.config.project_id,
+            status=cleaned_status,
+            reason=cleaned_reason,
+            task_id=_first_text(task_id),
+            limit=limit,
+        )
+
+    def resolve_intervention(
+        self,
+        intervention_id: str,
+        *,
+        resolution: str = "",
+        evidence: list[str] | None = None,
+        actor: str = "system",
+    ) -> InterventionRecord:
+        """Resolve one intervention with evidence or a resolution reason."""
+        self._ensure_mutation_allowed()
+        cleaned_intervention_id = _first_text(intervention_id)
+        if not cleaned_intervention_id:
+            raise ValueError("intervention id is required")
+        return self.store.resolve_intervention(
+            self.config.project_id,
+            cleaned_intervention_id,
+            resolution=_first_text(resolution),
+            evidence=_clean_strings(evidence or []),
+            actor=actor,
+        )
+
+    def interventions_payload(
+        self,
+        *,
+        status: str = "",
+        reason: str = "",
+        task_id: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Return JSON-friendly intervention records."""
+        records = self.intervention_records(
+            status=status,
+            reason=reason,
+            task_id=task_id,
+            limit=limit,
+        )
+        return {
+            "project_id": self.config.project_id,
+            "interventions": [intervention_to_dict(record) for record in records],
         }
 
     def ingest_event_file(self, path: str | Path, *, actor: str = "system") -> bool:

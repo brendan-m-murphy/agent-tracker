@@ -27,7 +27,7 @@ from agent_tracker.config import (  # noqa: E402
 )
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
-from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
+from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES, InterventionRecord  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import (  # noqa: E402
     available_skill_names,
@@ -3047,6 +3047,203 @@ def test_cli_task_human_output_stays_prompt_renderer(tmp_path: Path) -> None:
     assert output.startswith("# Ready\n")
     assert "## Summary\nReady to run." in output
     assert "Paths\n" not in output
+    assert_no_box_drawing(output)
+
+
+def test_interventions_are_recorded_resolved_audited_and_exported(tmp_path: Path) -> None:
+    """Interventions are durable state separate from notification delivery."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    intervention = coord.record_intervention(
+        reason="setup_missing",
+        task_id="ready",
+        summary="PR notification setup is missing.",
+        metadata={"target": "pull-request"},
+        actor="coordinator",
+    )
+    listed = coord.intervention_records(
+        status="open",
+        reason="setup_missing",
+        task_id="ready",
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert intervention.intervention_id
+    assert intervention.status == "open"
+    assert listed == [intervention]
+    assert snapshot["interventions"][0]["id"] == intervention.intervention_id
+    assert snapshot["interventions"][0]["reason"] == "setup_missing"
+    assert snapshot["interventions"][0]["metadata"] == {"target": "pull-request"}
+    assert any(
+        audit["action"] == "intervention.record"
+        and audit["actor"] == "coordinator"
+        and audit["task_id"] == "ready"
+        and audit["payload"]["intervention_id"] == intervention.intervention_id
+        for audit in snapshot["audit"]
+    )
+
+    with pytest.raises(ValueError, match="resolution requires evidence or reason"):
+        coord.resolve_intervention(intervention.intervention_id, actor="pm")
+
+    resolved = coord.resolve_intervention(
+        intervention.intervention_id,
+        evidence=["evidence://setup-check"],
+        actor="pm",
+    )
+    resolved_snapshot = coord.store.snapshot(config.project_id)
+
+    assert resolved.status == "resolved"
+    assert resolved.evidence == ["evidence://setup-check"]
+    assert resolved.resolved_by == "pm"
+    assert coord.intervention_records(status="open") == []
+    assert coord.intervention_records(status="resolved") == [resolved]
+    assert any(
+        audit["action"] == "intervention.resolve"
+        and audit["actor"] == "pm"
+        and audit["payload"]["evidence"] == ["evidence://setup-check"]
+        for audit in resolved_snapshot["audit"]
+    )
+    with pytest.raises(ValueError, match="already resolved"):
+        coord.resolve_intervention(
+            intervention.intervention_id,
+            resolution="Already handled.",
+            actor="pm",
+        )
+
+
+def test_interventions_validate_reason_task_and_reason_only_resolution(
+    tmp_path: Path,
+) -> None:
+    """Intervention records use the documented reason set and resolution rules."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="intervention reason"):
+        coord.record_intervention(reason="unknown", summary="Bad reason.")
+    with pytest.raises(ValueError, match="unknown task"):
+        coord.record_intervention(
+            reason="setup_missing",
+            task_id="missing",
+            summary="Missing task.",
+        )
+    with pytest.raises(ValueError, match="resolution state"):
+        coord.store.record_intervention(
+            config.project_id,
+            InterventionRecord(
+                intervention_id="prefilled",
+                reason="setup_missing",
+                resolution="Already done.",
+            ),
+        )
+
+    intervention = coord.record_intervention(
+        reason="approval_required",
+        summary="Need a human decision.",
+    )
+    resolved = coord.resolve_intervention(
+        intervention.intervention_id,
+        resolution="Approved by project owner.",
+        actor="pm",
+    )
+
+    assert resolved.status == "resolved"
+    assert resolved.resolution == "Approved by project owner."
+    assert resolved.evidence == []
+
+
+def test_interventions_are_compatible_with_pre_intervention_database(
+    tmp_path: Path,
+) -> None:
+    """Old databases without intervention tables stay readable and self-upgrade."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute("DROP TABLE interventions")
+
+    assert coord.intervention_records() == []
+    assert coord.store.snapshot(config.project_id)["interventions"] == []
+
+    intervention = coord.record_intervention(
+        reason="missing_evidence",
+        summary="Need final evidence.",
+    )
+
+    assert coord.intervention_records() == [intervention]
+
+
+def test_cli_record_list_and_resolve_interventions(tmp_path: Path) -> None:
+    """CLI commands expose intervention state as JSON and readable text."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "record-intervention",
+                "--config",
+                str(config_path),
+                "--task-id",
+                "ready",
+                "--reason",
+                "pr_review_needed",
+                "--metadata-json",
+                '{"surface": "pull-request"}',
+                "--actor",
+                "coordinator",
+                "PR review is needed.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["task_id"] == "ready"
+    assert recorded["reason"] == "pr_review_needed"
+    assert recorded["metadata"] == {"surface": "pull-request"}
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-interventions", "--config", str(config_path), "--json"])
+
+    listed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert [item["id"] for item in listed["interventions"]] == [recorded["id"]]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "resolve-intervention",
+                "--config",
+                str(config_path),
+                recorded["id"],
+                "--reason",
+                "Review completed.",
+                "--actor",
+                "pm",
+            ]
+        )
+
+    resolved = json.loads(stdout.getvalue())
+    assert code == 0
+    assert resolved["status"] == "resolved"
+    assert resolved["resolution"] == "Review completed."
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-interventions", "--config", str(config_path)])
+
+    output = stdout.getvalue()
+    assert code == 0
+    assert "PR review is needed." in output
+    assert "  status     resolved" in output
+    assert "  reason     pr_review_needed" in output
+    assert "  task       ready" in output
+    assert "  resolution Review completed." in output
     assert_no_box_drawing(output)
 
 

@@ -173,6 +173,40 @@ inspection, opt in:
 agent-tracker status --config project.json --recover-stale-leases
 ```
 
+## Human Intervention State
+
+Use interventions when a human action is needed but the task should not be
+silently completed, failed, or used as a notification delivery record.
+Interventions are live SQLite state and are exported in snapshots alongside
+audit logs.
+
+Record an intervention:
+
+```bash
+agent-tracker record-intervention --config project.json \
+  --task-id write-readme \
+  --reason pr_review_needed \
+  "PR review is needed before completion"
+```
+
+List open interventions for dashboards, PR notification setup checks, or later
+exporters:
+
+```bash
+agent-tracker list-interventions --config project.json --status open --json
+```
+
+Resolve an intervention only with evidence or a clear reason:
+
+```bash
+agent-tracker resolve-intervention --config project.json <intervention-id> \
+  --evidence "review:approved"
+```
+
+PR comments, issue comments, and prepared notification payloads should refer to
+these intervention records. They should not replace SQLite as the coordination
+state.
+
 ## Project Overview
 
 Use `overview` when you need a compact project-log view instead of raw status

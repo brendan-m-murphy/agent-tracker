@@ -316,6 +316,9 @@ agent-tracker status --json
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
 | `list-workspaces` | List configured cross-project worker workspaces. | `agent-tracker list-workspaces --config demo-tracker/project.json` |
 | `launch-worker` | Prepare or run a one-shot local worker in a configured workspace. | `agent-tracker launch-worker --config demo-tracker/project.json --workspace hpc --task-id write-readme` |
+| `record-intervention` | Record durable human intervention state without sending a notification. | `agent-tracker record-intervention --config demo-tracker/project.json --task-id write-readme --reason pr_review_needed "PR review is needed"` |
+| `list-interventions` | List open or resolved human intervention records; add `--json` for exporter input. | `agent-tracker list-interventions --config demo-tracker/project.json --status open --json` |
+| `resolve-intervention` | Resolve an intervention with evidence or a reason. | `agent-tracker resolve-intervention --config demo-tracker/project.json <intervention-id> --evidence "review:approved"` |
 | `intake record` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker intake --config demo-tracker/project.json record --kind feature --tag inbox "Add triage workflow"` |
 | `intake list` | List raw intake records for later project-manager triage. | `agent-tracker intake --config demo-tracker/project.json list --json` |
 | `intake update` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker intake --config demo-tracker/project.json update <intake-id> --status closed` |

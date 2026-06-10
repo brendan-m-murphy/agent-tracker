@@ -27,6 +27,17 @@ AWAITING_STATES = REVIEW_STATES | INTEGRATION_STATES
 TERMINAL_STATES = {"done", "failed", "cancelled"}
 INTAKE_STATES = {"open", "triaged", "closed", "deferred"}
 PROPOSAL_STATES = {"proposed", "promoted", "rejected"}
+INTERVENTION_STATES = {"open", "resolved"}
+INTERVENTION_REASONS = {
+    "approval_required",
+    "failed_verdict",
+    "ambiguous_diagnosis",
+    "stale_claim",
+    "missing_evidence",
+    "unsafe_operation",
+    "pr_review_needed",
+    "setup_missing",
+}
 
 
 @dataclass(frozen=True)
@@ -132,3 +143,21 @@ class ProposedTaskRecord:
     status: str = "proposed"
     created_at: str = ""
     updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class InterventionRecord:
+    """Durable human intervention state, separate from notification delivery."""
+
+    intervention_id: str
+    reason: str
+    task_id: str = ""
+    status: str = "open"
+    summary: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    resolution: str = ""
+    evidence: list[str] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+    resolved_at: str = ""
+    resolved_by: str = ""

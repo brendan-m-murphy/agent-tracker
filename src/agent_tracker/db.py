@@ -17,6 +17,7 @@ from agent_tracker.models import (
     ACTIVE_STATES,
     INTAKE_STATES,
     INTEGRATION_STATES,
+    INTERVENTION_REASONS,
     MANUAL_STATES,
     PROPOSAL_STATES,
     REVIEW_STATES,
@@ -24,6 +25,7 @@ from agent_tracker.models import (
     DependencyRecord,
     EventRecord,
     IntakeRecord,
+    InterventionRecord,
     ProposedTaskRecord,
     RequirementState,
     TaskRecord,
@@ -213,6 +215,24 @@ class Store:
                     FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE,
                     FOREIGN KEY(project_id, intake_id) REFERENCES intake(project_id, intake_id)
                         ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS interventions (
+                    project_id TEXT NOT NULL,
+                    intervention_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    summary TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    resolution TEXT NOT NULL DEFAULT '',
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    resolved_by TEXT NOT NULL DEFAULT '',
+                    resolved_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, intervention_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS artifacts (
@@ -1435,6 +1455,174 @@ class Store:
             )
         return withdrawn
 
+    def record_intervention(
+        self,
+        project_id: str,
+        intervention: InterventionRecord,
+        *,
+        actor: str = "system",
+    ) -> InterventionRecord:
+        """Record an unresolved human intervention need."""
+        self.init_schema()
+        if intervention.reason not in INTERVENTION_REASONS:
+            raise ValueError(f"invalid intervention reason: {intervention.reason}")
+        if intervention.status != "open":
+            raise ValueError("new interventions must start open")
+        if (
+            intervention.resolution
+            or intervention.evidence
+            or intervention.resolved_by
+            or intervention.resolved_at
+        ):
+            raise ValueError("new interventions cannot include resolution state")
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            if intervention.task_id and not _task_exists(conn, project_id, intervention.task_id):
+                raise ValueError(f"unknown task: {intervention.task_id}")
+            conn.execute(
+                """
+                INSERT INTO interventions (
+                    project_id, intervention_id, task_id, reason, status, summary,
+                    metadata_json, resolution, evidence_json, resolved_by,
+                    resolved_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, 'open', ?, ?, '', '[]', '', '', ?, ?)
+                """,
+                (
+                    project_id,
+                    intervention.intervention_id,
+                    intervention.task_id,
+                    intervention.reason,
+                    intervention.summary,
+                    dumps(intervention.metadata),
+                    now,
+                    now,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                intervention.task_id,
+                "intervention.record",
+                actor,
+                {
+                    "intervention_id": intervention.intervention_id,
+                    "reason": intervention.reason,
+                    "summary": intervention.summary,
+                },
+            )
+        return replace(intervention, created_at=now, updated_at=now)
+
+    def intervention_records(
+        self,
+        project_id: str,
+        *,
+        status: str = "",
+        reason: str = "",
+        task_id: str = "",
+        limit: int = 0,
+    ) -> list[InterventionRecord]:
+        """Return durable intervention records newest first."""
+        clauses = ["project_id = ?"]
+        values: list[Any] = [project_id]
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        if reason:
+            clauses.append("reason = ?")
+            values.append(reason)
+        if task_id:
+            clauses.append("task_id = ?")
+            values.append(task_id)
+        sql = f"""
+            SELECT *
+            FROM interventions
+            WHERE {" AND ".join(clauses)}
+            ORDER BY created_at DESC, intervention_id DESC
+        """
+        if limit:
+            sql += " LIMIT ?"
+            values.append(limit)
+        with self.transaction(read_only=True) as conn:
+            if not _table_exists(conn, "interventions"):
+                return []
+            rows = list(conn.execute(sql, values))
+        return [_intervention_from_row(row) for row in rows]
+
+    def resolve_intervention(
+        self,
+        project_id: str,
+        intervention_id: str,
+        *,
+        resolution: str = "",
+        evidence: list[str] | None = None,
+        actor: str = "system",
+    ) -> InterventionRecord:
+        """Resolve one intervention with evidence or a resolution reason."""
+        self.init_schema()
+        clean_evidence = [str(uri).strip() for uri in evidence or [] if str(uri).strip()]
+        if not resolution.strip() and not clean_evidence:
+            raise ValueError("resolution requires evidence or reason")
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM interventions
+                WHERE project_id = ? AND intervention_id = ?
+                """,
+                (project_id, intervention_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown intervention: {intervention_id}")
+            if str(row["status"]) != "open":
+                raise ValueError(f"intervention is already {row['status']}")
+            conn.execute(
+                """
+                UPDATE interventions
+                SET status = 'resolved',
+                    resolution = ?,
+                    evidence_json = ?,
+                    resolved_by = ?,
+                    resolved_at = ?,
+                    updated_at = ?
+                WHERE project_id = ? AND intervention_id = ?
+                """,
+                (
+                    resolution.strip(),
+                    dumps(clean_evidence),
+                    actor,
+                    now,
+                    now,
+                    project_id,
+                    intervention_id,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                str(row["task_id"]),
+                "intervention.resolve",
+                actor,
+                {
+                    "intervention_id": intervention_id,
+                    "reason": str(row["reason"]),
+                    "resolution": resolution.strip(),
+                    "evidence": clean_evidence,
+                },
+            )
+            updated = conn.execute(
+                """
+                SELECT *
+                FROM interventions
+                WHERE project_id = ? AND intervention_id = ?
+                """,
+                (project_id, intervention_id),
+            ).fetchone()
+        if updated is None:
+            raise ValueError(f"unknown intervention: {intervention_id}")
+        return _intervention_from_row(updated)
+
     def record_evidence(
         self,
         project_id: str,
@@ -1544,6 +1732,21 @@ class Store:
                 ]
             else:
                 proposed_tasks = []
+            if _table_exists(conn, "interventions"):
+                interventions = [
+                    intervention_to_dict(_intervention_from_row(row))
+                    for row in conn.execute(
+                        """
+                        SELECT *
+                        FROM interventions
+                        WHERE project_id = ?
+                        ORDER BY created_at, intervention_id
+                        """,
+                        (project_id,),
+                    )
+                ]
+            else:
+                interventions = []
             events = [
                 {
                     "event_id": row["event_id"],
@@ -1577,6 +1780,7 @@ class Store:
             "tasks": [state_to_dict(state) for state in states],
             "intake": intake,
             "proposed_tasks": proposed_tasks,
+            "interventions": interventions,
             "events": events,
             "audit": audit,
         }
@@ -2137,6 +2341,42 @@ def intake_to_dict(intake: IntakeRecord) -> dict[str, Any]:
         "metadata": intake.metadata,
         "created_at": intake.created_at,
         "updated_at": intake.updated_at,
+    }
+
+
+def _intervention_from_row(row: sqlite3.Row) -> InterventionRecord:
+    """Convert a SQLite row to an intervention record."""
+    return InterventionRecord(
+        intervention_id=str(row["intervention_id"]),
+        task_id=str(row["task_id"]),
+        reason=str(row["reason"]),
+        status=str(row["status"]),
+        summary=str(row["summary"]),
+        metadata=loads(str(row["metadata_json"]), {}),
+        resolution=str(row["resolution"]),
+        evidence=list(loads(str(row["evidence_json"]), [])),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+        resolved_at=str(row["resolved_at"]),
+        resolved_by=str(row["resolved_by"]),
+    )
+
+
+def intervention_to_dict(intervention: InterventionRecord) -> dict[str, Any]:
+    """Convert an intervention record to a JSON-friendly dictionary."""
+    return {
+        "id": intervention.intervention_id,
+        "task_id": intervention.task_id,
+        "reason": intervention.reason,
+        "status": intervention.status,
+        "summary": intervention.summary,
+        "metadata": intervention.metadata,
+        "resolution": intervention.resolution,
+        "evidence": intervention.evidence,
+        "created_at": intervention.created_at,
+        "updated_at": intervention.updated_at,
+        "resolved_at": intervention.resolved_at,
+        "resolved_by": intervention.resolved_by,
     }
 
 

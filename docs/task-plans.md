@@ -217,6 +217,42 @@ It is still worth keeping accurate because rendered prompts, reviews,
 project-local plugins, and coordinators can use it to spot parallel-safe work
 before the tracker enforces lanes or write locks.
 
+## Human Intervention State
+
+Task metadata can say that a task may need human intervention, but live
+intervention state is stored separately from task definitions. Use
+`record-intervention` when a coordinator needs a durable "human should act"
+record without changing task status or sending a notification.
+
+Core intervention reasons are deliberately small:
+
+- `approval_required`
+- `failed_verdict`
+- `ambiguous_diagnosis`
+- `stale_claim`
+- `missing_evidence`
+- `unsafe_operation`
+- `pr_review_needed`
+- `setup_missing`
+
+Interventions can be listed for dashboards, exporters, or notification setup
+checks:
+
+```bash
+agent-tracker list-interventions --config project.json --status open --json
+```
+
+Resolve an intervention only after there is evidence or a clear reason:
+
+```bash
+agent-tracker resolve-intervention --config project.json <intervention-id> \
+  --evidence "review:approved"
+```
+
+SQLite remains the canonical state for interventions. PR comments, issue
+comments, and prepared notification payloads should point at intervention
+records rather than becoming the coordination state themselves.
+
 ## Proposed Task Contracts
 
 Project-manager triage can create proposed task contracts from raw intake. A
