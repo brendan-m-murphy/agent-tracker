@@ -145,6 +145,9 @@ agent-tracker status --config project.json
 Human `status` output is rendered with Rich and grouped into `Paths` and
 `Queue` sections with aligned labels. It avoids Rich panels or box-drawing
 characters by default so output can be copied into logs and plain-text handoffs.
+Line-oriented human output for `status`, `overview`, `next`, intake listings,
+and proposal listings flows through the built-in `HumanOutputRenderer` boundary.
+Task prompt output remains on the separate prompt-renderer plugin path.
 
 Print full JSON task state:
 
