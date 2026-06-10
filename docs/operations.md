@@ -529,6 +529,16 @@ are already satisfied, the task appears ready for another claim. Use
 but review, PR, merge, or other integration evidence is still pending. Use
 `fail` only when the task should become terminally failed.
 
+Command choice summary:
+
+- `release`: active owned work is stopping early and should become claimable
+  again as `pending`.
+- `submit-review` / `await-integration`: implementation is finished, the lease
+  should clear, and the task should wait in a non-terminal review or integration
+  state without unblocking dependents.
+- `fail`: the leased task should become terminally failed; use a separate
+  follow-up task for any new recovery work.
+
 ## Log Work While Active
 
 Use concise events or spool records for durable progress that another agent or
@@ -908,7 +918,10 @@ agent-tracker fail --config project.json write-readme \
 ```
 
 Failure is terminal for the task. Create or import follow-up tasks separately if
-more work is needed.
+more work is needed. Do not use `fail` just to stop work, switch priorities, or
+hand a task to another coordinator; use `release` when the task should return to
+the queue, or `submit-review` / `await-integration` when finished work is
+waiting on handoff evidence.
 
 ## Stale Lease Recovery
 
@@ -1173,7 +1186,7 @@ agent-tracker resolve-integration --config project.json <task-id> \
   --evidence "git:<main-commit>"
 ```
 
-If blocked after investigation:
+If investigation shows the leased task should terminally fail:
 
 ```bash
 agent-tracker fail --config project.json <task-id> \

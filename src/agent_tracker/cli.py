@@ -1109,14 +1109,30 @@ def build_parser() -> argparse.ArgumentParser:
     release = sub.add_parser(
         "release",
         aliases=["release-lease"],
-        help="Release a leased task back to the queue.",
+        help="Return active owned work to pending; not for finished handoffs.",
+        description=(
+            "Return active owned work to pending. Use this when stopping early, "
+            "switching scope, or handing untouched work back to the queue. "
+            "Finished work waiting on review, PR, merge, or integration belongs "
+            "in submit-review or await-integration. Use fail only for terminal "
+            "failure."
+        ),
     )
     add_common(release)
     release.add_argument("task_id")
     release.add_argument("--lease-token", required=True)
     release.add_argument("--agent", default="")
-    release.add_argument("--reason", required=True)
-    release.add_argument("--status", choices=["pending"], default="pending")
+    release.add_argument(
+        "--reason",
+        required=True,
+        help="Audited reason for returning this active lease to pending.",
+    )
+    release.add_argument(
+        "--status",
+        choices=["pending"],
+        default="pending",
+        help="Release target status; only pending is supported.",
+    )
     release.add_argument("--json", action="store_true")
     release.set_defaults(func=command_release)
 
@@ -1155,7 +1171,15 @@ def build_parser() -> argparse.ArgumentParser:
     check_completion.add_argument("--json", action="store_true")
     check_completion.set_defaults(func=command_check_completion_integrity)
 
-    submit_review = sub.add_parser("submit-review", help="Submit a leased task for review.")
+    submit_review = sub.add_parser(
+        "submit-review",
+        help="Mark finished leased work awaiting review; clears the lease.",
+        description=(
+            "Move finished leased work to awaiting_review and clear the lease. "
+            "Use this instead of release when implementation is ready for review "
+            "but should not unblock dependents yet."
+        ),
+    )
     add_common(submit_review)
     submit_review.add_argument("task_id")
     submit_review.add_argument("--lease-token", required=True)
@@ -1165,7 +1189,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     await_integration = sub.add_parser(
         "await-integration",
-        help="Move a leased task to an integration wait state.",
+        help="Mark finished leased work awaiting PR, merge, or integration.",
+        description=(
+            "Move finished leased work to an integration wait state and clear the "
+            "lease. Use this instead of release when work is complete but a PR, "
+            "merge, deployment, or other integration step is still pending."
+        ),
     )
     add_common(await_integration)
     await_integration.add_argument("task_id")
@@ -1213,12 +1242,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve_integration.set_defaults(func=command_resolve_integration)
 
-    fail = sub.add_parser("fail", help="Fail a task.")
+    fail = sub.add_parser(
+        "fail",
+        help="Terminally fail a leased task with an actionable reason.",
+        description=(
+            "Terminally fail a leased task with an actionable reason. Do not use "
+            "this to pause work, switch scope, return work to pending, or wait for "
+            "review/integration."
+        ),
+    )
     add_common(fail)
     fail.add_argument("task_id")
     fail.add_argument("--lease-token", required=True)
     fail.add_argument("--agent", default="")
-    fail.add_argument("--reason", required=True)
+    fail.add_argument(
+        "--reason",
+        required=True,
+        help="Actionable terminal failure reason.",
+    )
     fail.set_defaults(func=command_fail)
 
     event = sub.add_parser("ingest-event", help="Ingest one event JSON file.")

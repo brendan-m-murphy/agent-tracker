@@ -76,9 +76,14 @@ with an explicit audit reason instead of waiting for stale-lease recovery:
 uv run agent-tracker release --config tracking/project.json <task-id> --lease-token <lease-token> --agent <agent-id> --reason "<why the lease is being released>"
 ```
 
-Do not use `release` for completed work waiting on review, PRs, merges, or other
-integration evidence; use `submit-review` or `await-integration` for those
-handoffs. Do not use `fail` unless the task should be terminally failed.
+Closeout command choice:
+
+- `release` returns active owned work to `pending` for another claim when you are
+  stopping early, switching scope, or returning untouched work.
+- `submit-review` and `await-integration` clear the lease for finished work that
+  is waiting on review, PR, merge, deployment, or other integration evidence.
+- `fail` is terminal for the task. Use it only when the current task should be
+  failed, not for pauses or review/integration handoffs.
 
 ## Planning And Creating Work
 

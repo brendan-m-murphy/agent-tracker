@@ -3805,9 +3805,14 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
         code = cli.main(["intake", "--help"])
 
     intake_help = stdout.getvalue()
+    normalized_root_help = " ".join(root_help.split())
     assert code == 0
     assert "record-intake" in root_help
     assert "intake" in root_help
+    assert "Return active owned work to pending; not for finished handoffs." in normalized_root_help
+    assert "Mark finished leased work awaiting review; clears the lease." in normalized_root_help
+    assert "Mark finished leased work awaiting PR, merge, or integration." in normalized_root_help
+    assert "Terminally fail a leased task with an actionable reason." in normalized_root_help
     assert "Usage: agent-tracker intake" in intake_help
     assert "--config TEXT" in intake_help
     assert "record" in intake_help
@@ -5051,6 +5056,37 @@ def test_cli_release_returns_task_to_pending_with_json(tmp_path: Path) -> None:
     assert state.task.status == "pending"
     assert state.state == "ready"
     assert state.lease_token == ""
+
+
+def test_cli_handoff_help_distinguishes_release_review_integration_and_fail() -> None:
+    """CLI help explains which lease closeout command fits each work state."""
+
+    def command_help(command: str) -> str:
+        stdout = StringIO()
+        with redirect_stdout(stdout), pytest.raises(SystemExit) as exc_info:
+            cli.main([command, "--help"])
+        assert exc_info.value.code == 0
+        return " ".join(stdout.getvalue().split())
+
+    release_help = command_help("release")
+    submit_review_help = command_help("submit-review")
+    await_integration_help = command_help("await-integration")
+    fail_help = command_help("fail")
+
+    assert "Return active owned work to pending" in release_help
+    assert "Finished work waiting on review" in release_help
+    assert "submit-review" in release_help
+    assert "await-" in release_help and "integration" in release_help
+    assert "Use fail only for terminal failure" in release_help
+    assert "awaiting_review" in submit_review_help
+    assert "instead of release" in submit_review_help
+    assert "should not unblock dependents" in submit_review_help
+    assert "integration wait state" in await_integration_help
+    assert "PR, merge, deployment" in await_integration_help
+    assert "instead of release" in await_integration_help
+    assert "Terminally fail" in fail_help
+    assert "pause work" in fail_help
+    assert "review/integration" in fail_help
 
 
 def test_cli_submit_review_reports_validation_errors_without_traceback(
