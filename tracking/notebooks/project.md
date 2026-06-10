@@ -67,3 +67,13 @@ Agents should wake only when new evidence exists.
 - PR notification setup and exporter: depend on durable intervention states.
 - Worker adapter: claim a task, render a prompt, run a Codex thread, and record
   thread/report evidence without owning coordination state.
+
+
+## 2026-06-10 - codex-remote-agent-coordinator
+
+## 2026-06-10 bp1 SSH Project-Manager Smoke Test
+
+- Ran the new SSH launch-worker path with a temporary workspace for bm13805@bp1:/group/chem/acrg/brendan_for_codex/hpc-ci-project-tracker.
+- Launch succeeded with return code 0. Local report artifact: /private/tmp/agent-tracker-bp1-smoke-state/workers/bp1-hpc-ci/agent-tracker-bp1-smoke-bp1-hpc-ci-cdd20fcc6750/report.md. Remote report artifact: /group/chem/acrg/brendan_for_codex/hpc-ci-project-tracker/.agent-tracker/workers/agent-tracker-bp1-smoke-bp1-hpc-ci-cdd20fcc6750/report.md.
+- Remote status report: tracker is on main at b20f965, clean, tracking origin/main. Ready work: acrg-data-validation-profiles, hpc-ci-collect-hpc-validation, hpc-ci-compare-design. No active or review/integration work was visible from committed tracker files. Blocked follow-ups include hpc-ci-pr-collection-automation, hpc-ci-compare-implementation, hpc-ci-worktrees, and hpc-ci-report-sync-cleanup.
+- Structural limitations reported by the remote worker: project-manager skill was not available in that Codex session; no local .venv exists; uv status/overview was blocked by cache/environment constraints; default python3 is 3.6.8 so scripts/hpc_tracker.py needs python3.11 or an environment wrapper. The report was derived directly from committed tracker files and recent notes/results.
