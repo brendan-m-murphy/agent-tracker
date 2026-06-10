@@ -484,6 +484,43 @@ def command_complete(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_record_evidence(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    inserted = coord.record_evidence(args.task_id, args.uri, actor=args.actor)
+    if args.json:
+        print_json({"task_id": args.task_id, "uri": args.uri, "inserted": inserted})
+        return 0
+    verb = "Recorded" if inserted else "Evidence already recorded"
+    print(f"{verb} for {args.task_id}: {args.uri}")
+    return 0
+
+
+def command_check_completion_integrity(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.completion_integrity_payload()
+    if args.json:
+        print_json(payload)
+        return 0 if payload["ok"] else 1
+    if payload["ok"]:
+        print("Completion integrity OK")
+        return 0
+    _print_human_section(f"Completion integrity issues ({payload['issue_count']})")
+    for issue in payload["issues"]:
+        _print_human_line(
+            f"- {issue['task_id']}: {issue['reason']}",
+            initial_indent="  ",
+            subsequent_indent="      ",
+        )
+        if issue.get("completion_action"):
+            _print_human_field("completion", issue["completion_action"], indent=4)
+        if issue.get("direct_merge"):
+            _print_human_field("direct_merge", "true", indent=4)
+        if issue.get("evidence"):
+            _print_human_field("evidence", ", ".join(issue["evidence"]), indent=4)
+    return 1
+
+
 def command_submit_review(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -1057,6 +1094,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply an explicit direct-merge completion override when task metadata allows it.",
     )
     complete.set_defaults(func=command_complete)
+
+    record_evidence = sub.add_parser(
+        "record-evidence",
+        help="Record an evidence URI for a task without changing task state.",
+    )
+    add_common(record_evidence)
+    record_evidence.add_argument("task_id")
+    record_evidence.add_argument("uri")
+    record_evidence.add_argument("--actor", default="system")
+    record_evidence.add_argument("--json", action="store_true")
+    record_evidence.set_defaults(func=command_record_evidence)
+
+    check_completion = sub.add_parser(
+        "check-completion-integrity",
+        help="Check completed tasks for evidence that no longer satisfies policy.",
+    )
+    add_common(check_completion)
+    check_completion.add_argument("--json", action="store_true")
+    check_completion.set_defaults(func=command_check_completion_integrity)
 
     submit_review = sub.add_parser("submit-review", help="Submit a leased task for review.")
     add_common(submit_review)

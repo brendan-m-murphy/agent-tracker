@@ -975,6 +975,34 @@ def test_completion_policy_accepts_git_with_integration_evidence(
     )
 
     assert coord.get_task("ready").state == "done"
+    assert coord.completion_integrity_payload() == {
+        "project_id": "toy",
+        "ok": True,
+        "issue_count": 0,
+        "issues": [],
+    }
+
+
+def test_completion_policy_complete_uses_recorded_and_new_evidence(
+    tmp_path: Path,
+) -> None:
+    """Direct completion counts evidence recorded before the final command."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.record_evidence("ready", "git:branch-abc123", actor="agent-1")
+
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["pr:https://example.invalid/pr/1"],
+    )
+
+    state = coord.get_task("ready")
+    assert state.state == "done"
+    assert state.evidence == ["git:branch-abc123", "pr:https://example.invalid/pr/1"]
 
 
 def test_completion_policy_direct_merge_requires_permission_and_git_evidence(
@@ -1098,6 +1126,83 @@ def test_completion_policy_malformed_or_unknown_metadata_is_legacy(
     )
 
     assert coord.get_task("ready").state == "done"
+
+
+def test_completion_integrity_check_flags_corruption_and_ignores_legacy_metadata(
+    tmp_path: Path,
+) -> None:
+    """Integrity check flags corrupted policy tasks but preserves legacy metadata."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'done', lease_agent_id = '', lease_token = '', lease_expires_at = ''
+            WHERE project_id = ? AND task_id = ?
+            """,
+            (config.project_id, "ready"),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET metadata_json = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            (
+                json.dumps({"completion_policy": {"default": "unknown"}}),
+                config.project_id,
+                "foundation",
+            ),
+        )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["check-completion-integrity", "--config", str(config_path), "--json"])
+    payload = json.loads(stdout.getvalue())
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["issue_count"] == 1
+    assert payload["issues"][0]["task_id"] == "ready"
+    assert payload["issues"][0]["reason"] == (
+        "completion requires git: and pr:/review:/integration: evidence"
+    )
+    assert payload["issues"][0]["direct_merge"] is False
+
+
+def test_completion_integrity_check_reports_direct_merge_git_only_completion(
+    tmp_path: Path,
+) -> None:
+    """Integrity check reports direct-merge completions without integrated evidence."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:main-abc123"],
+        direct_merge=True,
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["check-completion-integrity", "--config", str(config_path), "--json"])
+    payload = json.loads(stdout.getvalue())
+    tool_payload = AgentTrackerTools(config_path).check_completion_integrity()
+
+    assert code == 1
+    assert payload["issues"][0]["task_id"] == "ready"
+    assert payload["issues"][0]["direct_merge"] is True
+    assert payload["issues"][0]["completion_action"] == "task.complete"
+    assert payload["issues"][0]["evidence"] == ["git:main-abc123"]
+    assert "pr:/review:/integration:" in payload["issues"][0]["reason"]
+    assert tool_payload == payload
 
 
 def test_submit_review_clears_lease_records_evidence_and_preserves_blocking(
@@ -3580,6 +3685,53 @@ def test_mcp_ready_task_limit_rejects_negative_values(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="greater than or equal to zero"):
         tools.list_ready_tasks(limit=-1)
+
+
+def test_cli_record_evidence_appends_idempotently_and_audits(
+    tmp_path: Path,
+) -> None:
+    """CLI record-evidence appends once and audits only inserted evidence."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        first_code = cli.main(
+            [
+                "record-evidence",
+                "--config",
+                str(config_path),
+                "ready",
+                "evidence://one",
+                "--actor",
+                "agent-1",
+            ]
+        )
+        second_code = cli.main(
+            [
+                "record-evidence",
+                "--config",
+                str(config_path),
+                "ready",
+                "evidence://one",
+                "--actor",
+                "agent-1",
+            ]
+        )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert first_code == 0
+    assert second_code == 0
+    assert coord.get_task("ready").evidence == ["evidence://one"]
+    assert "Recorded for ready: evidence://one" in stdout.getvalue()
+    assert "Evidence already recorded for ready: evidence://one" in stdout.getvalue()
+    evidence_audits = [audit for audit in snapshot["audit"] if audit["action"] == "evidence.record"]
+    assert len(evidence_audits) == 1
+    assert evidence_audits[0]["task_id"] == "ready"
+    assert evidence_audits[0]["actor"] == "agent-1"
+    assert evidence_audits[0]["payload"] == {"uri": "evidence://one"}
 
 
 def test_cli_submit_review_updates_state_and_records_repeated_evidence(

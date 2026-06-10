@@ -243,6 +243,10 @@ payloads:
   claim-shaped lease payload after extending the lease.
 - `complete(task_id, lease_token, evidence=None, agent_id="",
   direct_merge=False)`: `{"ok": true}` after successful completion.
+- `record_evidence(task_id, uri, actor="system")`: idempotently append one
+  evidence URI without changing task state.
+- `check_completion_integrity()`: deterministic diagnostic for completed tasks
+  whose stored evidence no longer satisfies current completion policy.
 - `pull_spool(dry_run=False)`: pull-spool counts and per-file actions.
 - `ingest_spool(actor="system")`: processed, inserted, and error counts.
 - `launch_worker_prompt(task_id, agent_id="", markdown=True)`: prompt-only
@@ -588,12 +592,20 @@ For tasks with `completion_policy.default` set to
 `pr_or_review_required`, any transition to `done` requires cumulative evidence
 with at least one `git:` URI and at least one `pr:`, `review:`, or
 `integration:` URI. Evidence recorded before the final command, such as during
-`submit-review`, counts alongside evidence supplied to `complete`,
-`resolve-review`, or `resolve-integration`.
+`record-evidence` or `submit-review`, counts alongside evidence supplied to
+`complete`, `resolve-review`, or `resolve-integration`.
 
 SQLite remains the canonical live queue state. Git commits and GitHub PRs are
 evidence and review surfaces for closeout; do not use them as live coordination
 state in place of leases, task status, evidence rows, or audit events.
+
+Append evidence without changing task state:
+
+```bash
+agent-tracker record-evidence --config project.json write-readme \
+  "git:<branch-or-main-commit>" \
+  --actor agent-1
+```
 
 Mark the task done and attach evidence:
 
@@ -611,6 +623,18 @@ or bounded summaries over large raw outputs.
 
 Completing a task clears its lease. Downstream pending tasks become ready after
 their dependencies are done.
+
+Check completed tasks for evidence that no longer satisfies the current policy:
+
+```bash
+agent-tracker check-completion-integrity --config project.json
+agent-tracker check-completion-integrity --config project.json --json
+```
+
+The check is read-only and uses the same completion-policy validator as the
+state transitions. It exits non-zero when it finds issues. Missing, malformed,
+or unknown `completion_policy` metadata remains legacy behavior and is not
+reported as a policy issue.
 
 ## Await Review Or Integration
 
@@ -691,7 +715,10 @@ completion.
 `--direct-merge` is explicit and metadata-gated. It is accepted only when the
 task allows `"direct_merge_override": true`, and it still requires `git:`
 evidence. Without this flag, `git:` evidence alone is not enough for
-`pr_or_review_required` tasks.
+`pr_or_review_required` tasks. The integrity check also reports direct-merge
+completions whose cumulative evidence is only `git:` evidence and lacks
+`pr:`, `review:`, or `integration:` evidence, so managers can find work that
+still needs an integrated review or merge trail.
 
 When the committed task plan is the authoritative source, include the terminal
 task-plan status update in the integrated branch and use

@@ -1457,46 +1457,63 @@ class Store:
                 self._audit(conn, project_id, task_id, "evidence.record", actor, {"uri": uri})
             return inserted
 
-    def recent_completion_records(self, project_id: str) -> list[dict[str, str]]:
-        """Return audit-backed completion records newest first."""
+    def completion_integrity_issues(self, project_id: str) -> list[dict[str, Any]]:
+        """Return done tasks whose evidence no longer satisfies current policy."""
         with self.transaction(read_only=True) as conn:
             rows = list(
                 conn.execute(
                     """
-                    SELECT task_id, action, actor, payload_json, created_at
-                    FROM audit_log
-                    WHERE project_id = ?
-                      AND task_id != ''
-                      AND action IN (
-                        'task.complete',
-                        'task.resolve_review',
-                        'task.resolve_integration'
-                      )
-                    ORDER BY id DESC
+                    SELECT *
+                    FROM tasks
+                    WHERE project_id = ? AND status = 'done'
+                    ORDER BY priority, task_id
                     """,
                     (project_id,),
                 )
             )
-        seen: set[str] = set()
-        records: list[dict[str, str]] = []
-        for row in rows:
-            task_id = str(row["task_id"])
-            if task_id in seen:
-                continue
-            action = str(row["action"])
-            payload = loads(str(row["payload_json"]), {})
-            if action != "task.complete" and payload.get("status") != "done":
-                continue
-            seen.add(task_id)
-            records.append(
+            completion_records = _done_completion_records_by_task(conn, project_id)
+            issues: list[dict[str, Any]] = []
+            for row in rows:
+                task_id = str(row["task_id"])
+                try:
+                    _validate_completion_policy(
+                        conn,
+                        row,
+                        project_id=project_id,
+                        task_id=task_id,
+                        evidence=[],
+                        direct_merge=False,
+                    )
+                except ValueError as exc:
+                    completion_record = completion_records.get(task_id, {})
+                    issues.append(
+                        {
+                            "task_id": task_id,
+                            "title": str(row["title"]),
+                            "status": str(row["status"]),
+                            "kind": "completion_policy_unsatisfied",
+                            "reason": str(exc),
+                            "evidence": _completion_evidence(conn, project_id, task_id, []),
+                            "completion_action": completion_record.get("action", ""),
+                            "completed_by": completion_record.get("actor", ""),
+                            "completed_at": completion_record.get("completed_at", ""),
+                            "direct_merge": completion_record.get("direct_merge", False),
+                        }
+                    )
+            return issues
+
+    def recent_completion_records(self, project_id: str) -> list[dict[str, str]]:
+        """Return audit-backed completion records newest first."""
+        with self.transaction(read_only=True) as conn:
+            return [
                 {
-                    "task_id": task_id,
-                    "action": action,
-                    "actor": str(row["actor"]),
-                    "completed_at": str(row["created_at"]),
+                    "task_id": str(record["task_id"]),
+                    "action": str(record["action"]),
+                    "actor": str(record["actor"]),
+                    "completed_at": str(record["completed_at"]),
                 }
-            )
-        return records
+                for record in _done_completion_records_by_task(conn, project_id).values()
+            ]
 
     def snapshot(self, project_id: str) -> dict[str, Any]:
         """Return a JSON-friendly project snapshot."""
@@ -1936,6 +1953,47 @@ def _proposal_contract_changes(
         for name, before, after in candidates
         if before != after
     }
+
+
+def _done_completion_records_by_task(
+    conn: sqlite3.Connection,
+    project_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Return latest done-completion audit records by task in newest-first order."""
+    rows = list(
+        conn.execute(
+            """
+            SELECT task_id, action, actor, payload_json, created_at
+            FROM audit_log
+            WHERE project_id = ?
+              AND task_id != ''
+              AND action IN (
+                'task.complete',
+                'task.resolve_review',
+                'task.resolve_integration'
+              )
+            ORDER BY id DESC
+            """,
+            (project_id,),
+        )
+    )
+    records: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        task_id = str(row["task_id"])
+        if task_id in records:
+            continue
+        action = str(row["action"])
+        payload = loads(str(row["payload_json"]), {})
+        if action != "task.complete" and payload.get("status") != "done":
+            continue
+        records[task_id] = {
+            "task_id": task_id,
+            "action": action,
+            "actor": str(row["actor"]),
+            "completed_at": str(row["created_at"]),
+            "direct_merge": payload.get("direct_merge") is True,
+        }
+    return records
 
 
 def _row_has_stale_lease(row: sqlite3.Row, *, now: datetime) -> bool:

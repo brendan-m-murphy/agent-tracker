@@ -74,6 +74,30 @@ class OverviewPayload(PathSummaryPayload):
     groups: OverviewGroupsPayload
 
 
+class CompletionIntegrityIssuePayload(TypedDict):
+    """One completed-task evidence integrity issue."""
+
+    task_id: str
+    title: str
+    status: str
+    kind: str
+    reason: str
+    evidence: list[str]
+    completion_action: str
+    completed_by: str
+    completed_at: str
+    direct_merge: bool
+
+
+class CompletionIntegrityPayload(TypedDict):
+    """Completion integrity diagnostic response."""
+
+    project_id: str
+    ok: bool
+    issue_count: int
+    issues: list[CompletionIntegrityIssuePayload]
+
+
 class OkPayload(TypedDict):
     """JSON-friendly success response."""
 
@@ -175,6 +199,10 @@ class AgentTrackerTools:
                 recover_stale_leases=recover_stale_leases,
             ),
         )
+
+    def check_completion_integrity(self) -> CompletionIntegrityPayload:
+        """Return completed tasks whose evidence does not satisfy current policy."""
+        return cast(CompletionIntegrityPayload, self.coordinator.completion_integrity_payload())
 
     def list_ready_tasks(self, repo: str = "", role: str = "", limit: int = 0) -> dict[str, Any]:
         """Return ready tasks."""

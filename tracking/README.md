@@ -26,6 +26,7 @@ uv run agent-tracker <command> --config tracking/project.json
 ```
 
 Mutating commands include `init`, `import`, `claim`, `heartbeat`, `complete`,
+`record-evidence`, `submit-review`, `await-integration`, resolver commands,
 `fail`, `ingest-event`, `ingest-spool`, and `export`. Do not run those commands
 from Codex worktrees such as `/Users/bm13805/.codex/worktrees/...` because
 copied configs are refused by `canonical_config_path`; older configs without
@@ -38,9 +39,9 @@ canonical worktree. If an agent cannot access that worktree, it should stop and
 report the exact tracker command it would have run.
 
 For investigation, prefer read-only Git inspection or read-only SQLite queries.
-`agent-tracker status`, `next`, and `task` are read-only by default. Do not pass
-`--recover-stale-leases` from a non-canonical worktree. `export` is mutating and
-must be run from the canonical worktree.
+`agent-tracker status`, `next`, `task`, and `check-completion-integrity` are
+read-only by default. Do not pass `--recover-stale-leases` from a non-canonical
+worktree. `export` is mutating and must be run from the canonical worktree.
 
 ## Pull The Next Available Task
 
@@ -158,7 +159,9 @@ for agents is:
 Trusted managers may use a direct-merge override for local workflows: commit on
 a task branch, merge that branch into `main`, push `main` when a remote is
 configured, and use `git:<main-commit>` evidence. Use this only when the manager
-workflow itself is the intended review/integration authority.
+workflow itself is the intended review/integration authority. The completion
+integrity check reports direct-merge completions that only have `git:` evidence
+and lack a `pr:`, `review:`, or `integration:` trail.
 
 If integration is blocked, keep the task active with heartbeats or fail it with
 an actionable reason. Local validation evidence is necessary, but it is not
@@ -171,6 +174,14 @@ events in the tracker.
 Do not re-import after completing a live task unless the committed task plan
 also records that terminal status and you intentionally pass
 `--reconcile-runtime-state`. Normal import preserves live SQLite runtime status.
+
+Append evidence as it becomes available without changing task state:
+
+```bash
+uv run agent-tracker record-evidence --config tracking/project.json <task-id> \
+  "git:<branch-or-main-commit>" \
+  --actor <agent-id>
+```
 
 Complete the task with concise evidence:
 
@@ -189,6 +200,12 @@ Use evidence that future reviewers can inspect. Good examples:
 - `file:README.md`
 - `file:docs/operations.md`
 - `pr:https://github.com/<owner>/<repo>/pull/<number>`
+
+Check completed tasks for policy drift or missing integrated evidence:
+
+```bash
+uv run agent-tracker check-completion-integrity --config tracking/project.json
+```
 
 ## Fail A Task
 

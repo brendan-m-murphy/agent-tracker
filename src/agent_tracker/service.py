@@ -328,6 +328,16 @@ class Coordinator:
         self._ensure_mutation_allowed()
         return self.store.record_evidence(self.config.project_id, task_id, uri, actor=actor)
 
+    def completion_integrity_payload(self) -> dict[str, Any]:
+        """Return a deterministic diagnostic for completed task evidence."""
+        issues = self.store.completion_integrity_issues(self.config.project_id)
+        return {
+            "project_id": self.config.project_id,
+            "ok": not issues,
+            "issue_count": len(issues),
+            "issues": issues,
+        }
+
     def record_event(self, payload: dict[str, Any], *, actor: str = "system") -> bool:
         """Normalize and record an event."""
         self._ensure_mutation_allowed()
