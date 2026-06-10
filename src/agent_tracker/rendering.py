@@ -69,10 +69,22 @@ class HumanOutputRenderer:
         prefix = f"{' ' * indent}{label}: "
         self.line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
 
-    def kv_row(self, label: str, value: object, *, label_width: int = 12) -> None:
+    def kv_row(
+        self,
+        label: str,
+        value: object,
+        *,
+        label_width: int = 12,
+        break_long_words: bool = False,
+    ) -> None:
         """Print one compact aligned key/value row."""
         prefix = f"  {label:<{label_width}} "
-        self.line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
+        self.line(
+            str(value),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=break_long_words,
+        )
 
     def kv_table(self, rows: list[tuple[str, object]], *, label_width: int = 12) -> None:
         """Print aligned key/value rows using Rich text without borders."""
@@ -646,16 +658,26 @@ class HumanOutputRenderer:
     def proposals(self, payload: dict[str, Any]) -> None:
         """Render proposed task records."""
         if not payload["proposals"]:
-            self.raw_line("No proposed tasks.")
+            self._console.print(Text("No proposed tasks."))
             return
         for proposal in payload["proposals"]:
             task = proposal["task"]
-            self.raw_line(f"{proposal['id']}: {task['id']} - {task['title']}")
-            self.raw_line(f"  intake: {proposal['intake_id']}; status: {proposal['status']}")
+            self.line(
+                f"{proposal['id']}: {task['id']} - {task['title']}",
+                subsequent_indent="  ",
+                break_long_words=True,
+            )
+            self.kv_row("intake", proposal["intake_id"], label_width=8)
+            self.kv_row("status", proposal["status"], label_width=8)
             if task.get("repo"):
-                self.raw_line(f"  repo: {task['repo']}")
+                self.kv_row("repo", task["repo"], label_width=8)
             if task.get("next_action"):
-                self.raw_line(f"  next: {task['next_action']}")
+                self.kv_row(
+                    "next",
+                    task["next_action"],
+                    label_width=8,
+                    break_long_words=True,
+                )
 
 
 class DefaultPromptRenderer:
