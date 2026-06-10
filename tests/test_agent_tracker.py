@@ -651,6 +651,144 @@ def test_cli_grouped_intake_leaf_config_and_db_override_env_defaults(
     assert str(explicit_db_path) in stderr
 
 
+def test_cli_grouped_intake_group_config_and_db_apply_to_all_leaves(
+    tmp_path: Path,
+) -> None:
+    """Grouped intake common options are shared by every leaf command."""
+    config_path = write_project(tmp_path)
+    db_path = tmp_path / "grouped-intake.sqlite"
+    Coordinator(load_config(config_path), db_path=db_path).import_tasks()
+
+    record_code, record_stdout, record_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "record",
+            "--id",
+            "group-record",
+            "--kind",
+            "check",
+            "--repo",
+            "agent-tracker",
+            "Record with group options.",
+        ]
+    )
+    capture_code, capture_stdout, capture_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "capture",
+            "--id",
+            "group-capture",
+            "--kind",
+            "feature",
+            "--source",
+            "project-manager",
+            "--repo",
+            "agent-tracker",
+            "Capture with group options.",
+        ]
+    )
+    list_code, list_stdout, list_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "list",
+            "--json",
+            "--repo",
+            "agent-tracker",
+        ]
+    )
+    update_code, update_stdout, update_stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(config_path),
+            "--db",
+            str(db_path),
+            "update",
+            "group-record",
+            "--status",
+            "closed",
+            "--actor",
+            "pm",
+        ]
+    )
+
+    listed = json.loads(list_stdout)
+    updated = json.loads(update_stdout)
+    assert record_code == 0
+    assert capture_code == 0
+    assert list_code == 0
+    assert update_code == 0
+    assert json.loads(record_stdout)["id"] == "group-record"
+    assert json.loads(capture_stdout)["id"] == "group-capture"
+    assert {item["id"] for item in listed["intake"]} == {"group-record", "group-capture"}
+    assert updated["id"] == "group-record"
+    assert updated["status"] == "closed"
+    assert "agent-tracker paths:" in record_stderr
+    assert "agent-tracker paths:" in capture_stderr
+    assert list_stderr == ""
+    assert "agent-tracker paths:" in update_stderr
+    stored_records = Coordinator(load_config(config_path), db_path=db_path).intake_records()
+    stored_by_id = {record.intake_id: record for record in stored_records}
+    assert stored_by_id["group-record"].status == "closed"
+
+
+def test_cli_grouped_intake_leaf_options_override_group_options(
+    tmp_path: Path,
+) -> None:
+    """Grouped intake leaf --config and --db options override group options."""
+    group_root = tmp_path / "group"
+    leaf_root = tmp_path / "leaf"
+    group_root.mkdir()
+    leaf_root.mkdir()
+    group_config = write_project(group_root)
+    leaf_config = write_project(leaf_root)
+    group_db = tmp_path / "group.sqlite"
+    leaf_db = tmp_path / "leaf.sqlite"
+    Coordinator(load_config(group_config), db_path=group_db).import_tasks()
+    Coordinator(load_config(leaf_config), db_path=leaf_db).import_tasks()
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "intake",
+            "--config",
+            str(group_config),
+            "--db",
+            str(group_db),
+            "record",
+            "--config",
+            str(leaf_config),
+            "--db",
+            str(leaf_db),
+            "--id",
+            "leaf-precedence",
+            "--kind",
+            "check",
+            "Leaf options win.",
+        ]
+    )
+
+    assert code == 0
+    assert json.loads(stdout)["id"] == "leaf-precedence"
+    assert str(leaf_config) in stderr
+    assert str(leaf_db) in stderr
+    leaf_records = Coordinator(load_config(leaf_config), db_path=leaf_db).intake_records()
+    group_records = Coordinator(load_config(group_config), db_path=group_db).intake_records()
+    assert [record.text for record in leaf_records] == ["Leaf options win."]
+    assert group_records == []
+
+
 def test_cli_init_project_bootstraps_plugin_free_layout(tmp_path: Path) -> None:
     """A new tracker can be created and operated with built-in defaults."""
     project_root = tmp_path / "tracking"
@@ -4237,6 +4375,12 @@ def test_cli_grouped_and_flat_intake_json_contracts_stay_in_parity(
             key: value for key, value in payload.items() if key not in {"created_at", "updated_at"}
         }
 
+    def normalize_intake_list(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Normalize intake payloads and compare them by stable identifier."""
+        return sorted(
+            (normalize_intake(payload) for payload in payloads), key=lambda item: item["id"]
+        )
+
     flat_root = tmp_path / "flat"
     grouped_root = tmp_path / "grouped"
     flat_root.mkdir()
@@ -4364,9 +4508,9 @@ def test_cli_grouped_and_flat_intake_json_contracts_stay_in_parity(
     assert grouped_list_stderr == ""
     assert set(flat_listed) == {"project_id", "intake"}
     assert set(grouped_listed) == {"project_id", "intake"}
-    assert [normalize_intake(item) for item in flat_listed["intake"]] == [
-        normalize_intake(item) for item in grouped_listed["intake"]
-    ]
+    assert normalize_intake_list(flat_listed["intake"]) == normalize_intake_list(
+        grouped_listed["intake"]
+    )
 
     flat_update_code, flat_update_stdout, flat_update_stderr = run_cli_captured(
         [
@@ -5696,6 +5840,31 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert_no_box_drawing(intake_help)
     assert_no_box_drawing(record_help)
     assert_no_box_drawing(list_help)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_error"),
+    [
+        (["intake", "record"], "Missing argument"),
+        (["intake", "--bad-option"], "No such option"),
+        (["intake", "missing"], "No such command"),
+    ],
+)
+def test_cli_grouped_intake_usage_errors_are_concise(
+    argv: list[str],
+    expected_error: str,
+) -> None:
+    """Grouped Typer intake usage errors stay concise and traceback-free."""
+    code, stdout, stderr = run_cli_captured(argv)
+
+    assert code == 2
+    assert stdout == ""
+    assert "Usage: agent-tracker intake" in stderr
+    assert expected_error in stderr
+    assert "Traceback" not in stderr
+    assert "install-completion" not in stderr
+    assert "show-completion" not in stderr
+    assert_no_box_drawing(stderr)
 
 
 def test_cli_root_contract_hides_completion_helpers_and_preserves_aliases() -> None:

@@ -1252,12 +1252,29 @@ def run_intake_typer(argv: list[str]) -> int:
             prog_name="agent-tracker intake",
             standalone_mode=False,
         )
-    except click.exceptions.Exit as exc:
+    except (click.exceptions.Exit, typer.Exit) as exc:
         return int(exc.exit_code or 0)
     except click.ClickException as exc:
         exc.show()
         return int(exc.exit_code)
+    except Exception as exc:
+        exit_code = _show_typer_click_exception(exc)
+        if exit_code is not None:
+            return exit_code
+        raise
     return int(result or 0)
+
+
+def _show_typer_click_exception(exc: Exception) -> int | None:
+    """Show a Typer-vendored Click usage exception and return its exit code."""
+    if not type(exc).__module__.startswith("typer._click."):
+        return None
+    show = getattr(exc, "show", None)
+    exit_code = getattr(exc, "exit_code", None)
+    if not callable(show) or not isinstance(exit_code, int):
+        return None
+    show()
+    return int(exit_code)
 
 
 def build_parser() -> argparse.ArgumentParser:
