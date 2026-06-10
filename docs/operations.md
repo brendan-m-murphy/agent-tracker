@@ -589,9 +589,12 @@ The default command is:
 codex exec --cd {worktree_path} --output-last-message {report_path} -
 ```
 
-The rendered prompt is passed on stdin. The command runs from the assigned
-worktree path, stdout and stderr are captured as launch artifacts, and the final
-report path is exposed through `AGENT_TRACKER_WORKER_REPORT`.
+The rendered prompt is passed on stdin. For local workspaces, the command runs
+from the assigned worktree path. For SSH workspaces, the prompt is uploaded to
+the remote artifacts directory, the command runs over SSH in the assigned remote
+worktree path, and the remote report is collected back into local launch
+artifacts. In both modes stdout and stderr are captured, and the final report
+path is exposed through `AGENT_TRACKER_WORKER_REPORT`.
 
 For smoke tests or non-Codex workers, pass an explicit command:
 
@@ -607,14 +610,14 @@ agent-tracker launch-worker --config project.json \
 Put `launch-worker` options such as `--json` before `--command`. Every token
 after `--command` is treated as part of the worker command argv.
 
-`launch-worker` execution is currently local-only. SSH workspaces can be
-validated and listed, and SSH/SFTP `pull-spool` can collect remote event files,
-but remote queue mutation must use task-ingest command files instead of letting
-remote agents write canonical SQLite directly. The worker launch contract is the
-same for local and future SSH launches: the canonical tracker owns leases,
-workers receive a concrete prompt/assignment, launchers capture stdout, stderr,
-reports, timeout/cancellation status, and launch events as artifacts, and queue
-state changes return through task-ingest responses.
+SSH workspace launches use the same contract as local launches: the canonical
+tracker owns leases, workers receive a concrete prompt/assignment, launchers
+capture stdout, stderr, reports, timeout/cancellation status, and launch events
+as artifacts, and queue state changes return through task-ingest responses.
+When `--claim-task` is used with an SSH workspace, `launch-worker` writes a
+task-ingest `claim` request file instead of claiming the task directly; run
+`process-task-ingest` from the canonical project to apply it and produce the
+durable response.
 See [](worker-launch-contract.md) for the full contract.
 
 ## Heartbeat A Lease

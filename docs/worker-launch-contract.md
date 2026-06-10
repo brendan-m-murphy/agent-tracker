@@ -1,19 +1,18 @@
 # Worker Launch Contract
 
 This page defines the shared worker launch contract for local workspaces and
-future SSH-backed workspaces. It is an operational contract for coordinators,
-launch adapters, and workers; it does not change the queue state machine by
-itself.
+SSH-backed workspaces. It is an operational contract for coordinators, launch
+adapters, and workers; it does not change the queue state machine by itself.
 
 Current implementation status:
 
 - local workspace launches can prepare prompts and execute local commands;
-- SSH workspaces can be validated and listed;
-- `launch-worker` still rejects SSH launch requests before preparing artifacts
-  until the SSH launch adapter is implemented;
+- SSH workspace launches can upload prompts, execute configured remote
+  commands, collect remote reports/stdout/stderr into local launch artifacts,
+  and publish worker-launch events through the remote `spool_outbox`;
 - SSH/SFTP event collection is available through `pull-spool`;
-- remote queue mutations must use task-ingest command files processed by the
-  canonical project config.
+- SSH launch-time claims write task-ingest command files which must be
+  processed by the canonical project config.
 
 Remote workers must not open the canonical SQLite database directly.
 
@@ -254,29 +253,21 @@ separate inboxes.
 
 ## SSH Launch Boundary
 
-SSH workspaces are part of the workspace registry, so operators can validate and
-list them before the execution adapter exists. Today, `launch-worker` rejects an
-SSH workspace with a concise error before creating prompt, report, or launch
-artifacts.
+SSH workspaces are part of the workspace registry. `launch-worker` connects to
+the configured host, uploads the rendered prompt to the remote artifacts path,
+runs the configured command in the assigned remote worktree, collects the
+remote report/stdout/stderr into local launch artifacts, and writes a remote
+worker-launch event when `spool_outbox` is configured.
 
-Until the SSH launch adapter is implemented:
-
-- do not work around the rejection by running mutating `agent-tracker` commands
-  against copied config on the remote host;
-- do not mount or copy the canonical SQLite database for remote workers to
-  mutate directly;
-- use remote event spool files for progress and artifact reporting;
-- use task-ingest command files for queue mutations.
-
-A future SSH adapter must preserve this contract:
+The SSH adapter preserves this boundary:
 
 - the canonical side renders or approves the exact prompt handoff;
-- the canonical side owns any launch-time claim;
 - the remote side receives the assigned branch, base ref, worktree, prompt, and
   report/log paths;
 - stdout, stderr, report, launch metadata, and cancellation or timeout outcomes
   are durable artifacts;
-- remote queue mutations return through task-ingest responses;
+- launch-time claims and remote queue mutations return through task-ingest
+  responses;
 - remote workers never open canonical SQLite directly.
 
 ## Remote Queue Mutations
@@ -341,11 +332,13 @@ Remote queue claim through task-ingest:
 4. Remote worker uses the returned lease token for heartbeat and closeout
    command files.
 
-SSH launch today:
+SSH executed launch:
 
 1. Configure and validate the SSH workspace.
 2. Use `list-workspaces` to inspect it.
-3. Expect `launch-worker` execution to be rejected until the SSH adapter task is
-   complete.
-4. Use event spool and task-ingest command files for any remote reporting or
-   queue mutation.
+3. Run `launch-worker --workspace <ssh-workspace> --execute`.
+4. Inspect local launch artifacts for prompt, report, stdout, stderr, and
+   `launch.json`.
+5. Pull and ingest remote spool events when the workspace publishes an outbox.
+6. Run `process-task-ingest` when the launch or worker writes queue mutation
+   command files.

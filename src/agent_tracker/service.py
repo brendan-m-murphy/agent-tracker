@@ -1610,6 +1610,7 @@ class Coordinator:
         """Apply one validated task-ingest command through service methods."""
         command = _first_text(request.get("command"))
         actor_id = _task_command_actor_id(request)
+        actor_role = _task_command_actor_role(request)
         task_id = _first_text(request.get("task_id"))
         lease_token = _first_text(request.get("lease_token"))
         payload = _task_command_payload(request)
@@ -1617,6 +1618,7 @@ class Coordinator:
             claim = self.claim(
                 agent_id=actor_id,
                 task_id=_required_task_command_field(task_id, "task_id"),
+                role=actor_role,
                 lease_seconds=_task_command_int(payload, "lease_seconds", default=3600),
             )
             return {
@@ -1782,22 +1784,27 @@ class Coordinator:
         """Prepare or run a one-shot local worker in a configured workspace."""
         self._ensure_mutation_allowed()
         workspace = _workspace_by_name(self.config, workspace_name)
-        if workspace.kind != "local":
-            raise ValueError(
-                "launch-worker currently supports only local workspaces; "
-                "use pull-spool for SSH/SFTP event collection until the "
-                "task-ingest command processor exists"
-            )
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be greater than zero")
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be greater than or equal to zero")
-        if not workspace.path.is_dir():
+        if workspace.kind == "local" and not workspace.path.is_dir():
             raise ValueError(f"workspace path is not a directory: {workspace.path}")
+        if workspace.kind not in {"local", "ssh"}:
+            raise ValueError(f"unsupported workspace kind: {workspace.kind}")
         if dry_run and claim_task:
             raise ValueError("claim_task cannot be used with dry_run")
+        if workspace.kind == "ssh" and claim_task and execute:
+            raise ValueError(
+                "SSH launch-worker cannot combine claim_task with execute until "
+                "the task-ingest claim response is processed"
+            )
         cleaned_task_id = _first_text(task_id)
-        if cleaned_task_id and _workspace_contains_config(workspace.path, self.config):
+        if (
+            workspace.kind == "local"
+            and cleaned_task_id
+            and _workspace_contains_config(workspace.path, self.config)
+        ):
             raise ValueError(
                 "launch-worker task workspaces must not contain the canonical tracker "
                 "config; use an isolated task worktree or explicit non-canonical workspace"
@@ -1821,12 +1828,13 @@ class Coordinator:
         if claim_task:
             if not cleaned_task_id:
                 raise ValueError("task_id is required when claim_task is true")
-            claim = self.claim(
-                agent_id=actor,
-                task_id=cleaned_task_id,
-                role=role,
-                lease_seconds=lease_seconds,
-            )
+            if workspace.kind == "local":
+                claim = self.claim(
+                    agent_id=actor,
+                    task_id=cleaned_task_id,
+                    role=role,
+                    lease_seconds=lease_seconds,
+                )
         if cleaned_task_id:
             prompt = self.render_prompt(cleaned_task_id, markdown=markdown)
         else:
@@ -1835,7 +1843,7 @@ class Coordinator:
             raise ValueError("prompt text or task_id is required")
         prompt = _append_worker_coordination_prompt(prompt, coordination)
 
-        launch_dir = workspace.artifacts_path / launch_id
+        launch_dir = _worker_launch_dir(self.config, workspace, launch_id)
         prompt_path = launch_dir / "prompt.md"
         report_path = launch_dir / "report.md"
         stdout_path = launch_dir / "stdout.txt"
@@ -1855,7 +1863,19 @@ class Coordinator:
             "workspace_path": str(workspace.path),
             "worktree_path": assignment["worktree_path"],
         }
-        command_argv = _worker_command_argv(workspace, command, placeholders) if execute else []
+        remote_artifacts = _ssh_worker_remote_artifacts(workspace, launch_id)
+        command_placeholders = (
+            {
+                **placeholders,
+                "prompt_path": remote_artifacts["prompt"],
+                "report_path": remote_artifacts["report"],
+            }
+            if workspace.kind == "ssh"
+            else placeholders
+        )
+        command_argv = (
+            _worker_command_argv(workspace, command, command_placeholders) if execute else []
+        )
         result: dict[str, Any] = {
             "project_id": self.config.project_id,
             "workspace": _workspace_to_dict(workspace),
@@ -1878,22 +1898,50 @@ class Coordinator:
             },
             "command": command_argv,
         }
+        if workspace.kind == "ssh":
+            result["remote_artifacts"] = remote_artifacts
         if dry_run:
             return result
 
         launch_dir.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(prompt, encoding="utf-8")
-        if execute:
-            completed = _run_worker_command(
-                command_argv,
-                workspace=workspace,
-                prompt=prompt,
-                report_path=report_path,
-                stdout_path=stdout_path,
-                stderr_path=stderr_path,
-                env=placeholders,
-                timeout_seconds=timeout_seconds,
+        if claim_task and workspace.kind == "ssh":
+            result["task_ingest"] = _write_task_ingest_claim_request(
+                self.config,
+                launch_id=launch_id,
+                actor=actor,
+                role=_first_text(role),
+                task_id=cleaned_task_id,
+                lease_seconds=lease_seconds,
             )
+        if execute:
+            if workspace.kind == "ssh":
+                completed = _run_ssh_worker_command(
+                    self.config,
+                    workspace,
+                    command_argv,
+                    prompt=prompt,
+                    report_path=report_path,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    env={
+                        **placeholders,
+                        "prompt_path": remote_artifacts["prompt"],
+                        "report_path": remote_artifacts["report"],
+                    },
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                completed = _run_worker_command(
+                    command_argv,
+                    workspace=workspace,
+                    prompt=prompt,
+                    report_path=report_path,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    env=placeholders,
+                    timeout_seconds=timeout_seconds,
+                )
             result["status"] = "succeeded" if completed.returncode == 0 else "failed"
             result["returncode"] = completed.returncode
         else:
@@ -1903,8 +1951,11 @@ class Coordinator:
             )
         launch_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         if workspace.spool_outbox is not None:
-            _write_worker_launch_event(workspace, result)
-        if cleaned_task_id:
+            if workspace.kind == "ssh":
+                _write_ssh_worker_launch_event(self.config, workspace, result)
+            else:
+                _write_worker_launch_event(workspace, result)
+        if cleaned_task_id and workspace.kind == "local":
             self.record_evidence(
                 cleaned_task_id,
                 f"worker-launch:{launch_id}",
@@ -2584,6 +2635,14 @@ def _task_command_actor_id(request: dict[str, Any], *, required: bool = True) ->
     return actor_id
 
 
+def _task_command_actor_role(request: dict[str, Any]) -> str:
+    """Return an optional task-ingest actor role."""
+    actor = request.get("actor", {})
+    if isinstance(actor, dict):
+        return _first_text(actor.get("role"))
+    return ""
+
+
 def _task_command_payload(request: dict[str, Any]) -> dict[str, Any]:
     """Return the command-specific payload object."""
     payload = request.get("payload", {})
@@ -2764,6 +2823,11 @@ class _WorkerWorkspace:
     capabilities: list[str]
     worker_command: list[str]
     host: str
+    port: int
+    username: str
+    password: str | None
+    known_hosts: str | None
+    client_keys: list[str] | None
     remote_path: str
 
 
@@ -2776,6 +2840,15 @@ class _NotificationWorkspace:
     path: Path
     host: str = ""
     remote_path: str = ""
+
+
+@dataclass(frozen=True)
+class _ParsedSshHost:
+    """Normalized SSH host target."""
+
+    host: str
+    port: int
+    username: str
 
 
 def _workspace_records(config: ProjectConfig) -> list[_WorkerWorkspace]:
@@ -2801,14 +2874,53 @@ def _workspace_by_name(config: ProjectConfig, name: str) -> _WorkerWorkspace:
     raise KeyError(f"unknown workspace: {cleaned}")
 
 
+def _parse_workspace_ssh_host(value: str, *, port: Any = None) -> _ParsedSshHost:
+    """Parse a workspace SSH host string into host, port, and username."""
+    text = _first_text(value)
+    if not text:
+        raise ValueError("SSH workspace host is required")
+    parsed = urlsplit(text if "://" in text else f"ssh://{text}")
+    if parsed.scheme and parsed.scheme != "ssh":
+        raise ValueError("SSH workspace host must use the ssh scheme")
+    if parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError("SSH workspace host must not include password, path, query, or fragment")
+    if not parsed.hostname:
+        raise ValueError("SSH workspace host must include a hostname")
+    try:
+        parsed_port = parsed.port or 22
+    except ValueError as exc:
+        raise ValueError("SSH workspace host has an invalid port") from exc
+    port_text = _first_text(port)
+    if port_text:
+        try:
+            parsed_port = int(port_text)
+        except ValueError as exc:
+            raise ValueError("SSH workspace port must be an integer") from exc
+    if parsed_port <= 0:
+        raise ValueError("SSH workspace port must be greater than zero")
+    return _ParsedSshHost(
+        host=parsed.hostname,
+        port=parsed_port,
+        username=unquote(parsed.username or ""),
+    )
+
+
 def _parse_workspace(config: ProjectConfig, name: str, raw: dict[str, Any]) -> _WorkerWorkspace:
     """Resolve one workspace registry entry."""
     cleaned_name = _first_text(name)
     kind = _first_text(raw.get("kind")) or "local"
     if kind == "local":
         path = _resolve_config_path(config, _first_text(raw.get("path")))
+        ssh_host = _ParsedSshHost(host="", port=22, username="")
     else:
-        path = Path(_first_text(raw.get("remote_path")) or ".")
+        remote_path = _first_text(raw.get("remote_path")) or "."
+        if not remote_path.startswith("/"):
+            raise ValueError(f"workspaces.{cleaned_name}.remote_path must be absolute")
+        path = Path(remote_path)
+        ssh_host = _parse_workspace_ssh_host(
+            _first_text(raw.get("host")),
+            port=raw.get("port"),
+        )
     config_path = _workspace_relative_path(
         path,
         raw.get("config_path"),
@@ -2840,7 +2952,12 @@ def _parse_workspace(config: ProjectConfig, name: str, raw: dict[str, Any]) -> _
         roles=_string_list(raw.get("roles")),
         capabilities=_string_list(raw.get("capabilities")),
         worker_command=_string_list(raw.get("worker_command")),
-        host=_first_text(raw.get("host")),
+        host=ssh_host.host,
+        port=ssh_host.port,
+        username=_first_text(raw.get("username"), ssh_host.username),
+        password=_first_text(raw.get("password")) or None,
+        known_hosts=_known_hosts_option(config, raw.get("known_hosts")),
+        client_keys=_client_key_options(config, raw.get("client_keys")),
         remote_path=_first_text(raw.get("remote_path")),
     )
 
@@ -2899,7 +3016,7 @@ def _string_list(value: Any) -> list[str]:
 
 def _workspace_to_dict(workspace: _WorkerWorkspace) -> dict[str, Any]:
     """Return a JSON-friendly workspace payload."""
-    payload = {
+    payload: dict[str, Any] = {
         "name": workspace.name,
         "kind": workspace.kind,
         "path": str(workspace.path),
@@ -2911,6 +3028,8 @@ def _workspace_to_dict(workspace: _WorkerWorkspace) -> dict[str, Any]:
     }
     if workspace.kind == "ssh":
         payload["host"] = workspace.host
+        payload["port"] = workspace.port
+        payload["username"] = workspace.username
         payload["remote_path"] = workspace.remote_path
     if workspace.worker_command:
         payload["worker_command"] = workspace.worker_command
@@ -3671,6 +3790,83 @@ def _worker_command_argv(
     return rendered
 
 
+def _worker_launch_dir(
+    config: ProjectConfig,
+    workspace: _WorkerWorkspace,
+    launch_id: str,
+) -> Path:
+    """Return the local artifact directory for a worker launch."""
+    if workspace.kind == "ssh":
+        return (
+            config.effective_state_root
+            / "workers"
+            / _launch_id_component(workspace.name, fallback="workspace")
+            / launch_id
+        )
+    return workspace.artifacts_path / launch_id
+
+
+def _ssh_worker_remote_artifacts(
+    workspace: _WorkerWorkspace,
+    launch_id: str,
+) -> dict[str, str]:
+    """Return remote artifact paths for an SSH worker launch."""
+    if workspace.kind != "ssh":
+        return {}
+    launch_dir = _join_remote_path(workspace.artifacts_path.as_posix(), launch_id)
+    return {
+        "directory": launch_dir,
+        "prompt": _join_remote_path(launch_dir, "prompt.md"),
+        "report": _join_remote_path(launch_dir, "report.md"),
+        "stdout": _join_remote_path(launch_dir, "stdout.txt"),
+        "stderr": _join_remote_path(launch_dir, "stderr.txt"),
+    }
+
+
+def _join_remote_path(base: str, *parts: str) -> str:
+    """Join POSIX-style remote path components."""
+    return posixpath.normpath(posixpath.join(base, *parts))
+
+
+def _write_task_ingest_claim_request(
+    config: ProjectConfig,
+    *,
+    launch_id: str,
+    actor: str,
+    role: str,
+    task_id: str,
+    lease_seconds: int,
+) -> dict[str, str]:
+    """Write a task-ingest claim request for an SSH worker launch."""
+    paths = _task_command_paths(config)
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    paths.responses.mkdir(parents=True, exist_ok=True)
+    command_id = f"{_launch_id_component(launch_id, fallback='launch')}-claim"
+    request_path = paths.inbox / f"{command_id}.json"
+    response_path = _default_task_command_response_path(paths, command_id)
+    request = {
+        "schema_version": TASK_INGEST_SCHEMA_VERSION,
+        "command_id": command_id,
+        "idempotency_key": f"{actor}:claim:{task_id}:{launch_id}",
+        "project_id": config.project_id,
+        "command": "claim",
+        "actor": {"id": actor, "role": role or "worker"},
+        "task_id": task_id,
+        "lease_token": "",
+        "payload": {"lease_seconds": lease_seconds},
+        "reply_to": str(response_path),
+    }
+    _write_spool_file_atomic(
+        (json.dumps(request, indent=2, sort_keys=True) + "\n").encode(),
+        request_path,
+    )
+    return {
+        "claim_request": str(request_path),
+        "claim_response": str(response_path),
+        "command_id": command_id,
+    }
+
+
 def _default_worker_command() -> list[str]:
     """Return the default local Codex one-shot command."""
     return [
@@ -3704,17 +3900,7 @@ def _run_worker_command(
     timeout_seconds: int,
 ) -> subprocess.CompletedProcess[str]:
     """Run a worker command in a local workspace."""
-    process_env = {
-        "AGENT_TRACKER_WORKER_AGENT_ID": env["agent_id"],
-        "AGENT_TRACKER_WORKER_BASE_REF": env["base_ref"],
-        "AGENT_TRACKER_WORKER_BRANCH": env["branch"],
-        "AGENT_TRACKER_WORKER_LAUNCH_ID": env["launch_id"],
-        "AGENT_TRACKER_WORKER_PROMPT": env["prompt_path"],
-        "AGENT_TRACKER_WORKER_REPORT": env["report_path"],
-        "AGENT_TRACKER_WORKER_TASK_ID": env["task_id"],
-        "AGENT_TRACKER_WORKER_WORKSPACE": env["workspace"],
-        "AGENT_TRACKER_WORKER_WORKTREE": env["worktree_path"],
-    }
+    process_env = _worker_process_env(env)
     try:
         completed = subprocess.run(
             command,
@@ -3750,6 +3936,183 @@ def _run_worker_command(
         report_text = completed.stdout or "Worker command produced no report.\n"
         report_path.write_text(report_text, encoding="utf-8")
     return completed
+
+
+def _worker_process_env(env: dict[str, str]) -> dict[str, str]:
+    """Return environment variables exposed to worker commands."""
+    return {
+        "AGENT_TRACKER_WORKER_AGENT_ID": env["agent_id"],
+        "AGENT_TRACKER_WORKER_BASE_REF": env["base_ref"],
+        "AGENT_TRACKER_WORKER_BRANCH": env["branch"],
+        "AGENT_TRACKER_WORKER_LAUNCH_ID": env["launch_id"],
+        "AGENT_TRACKER_WORKER_PROMPT": env["prompt_path"],
+        "AGENT_TRACKER_WORKER_REPORT": env["report_path"],
+        "AGENT_TRACKER_WORKER_TASK_ID": env["task_id"],
+        "AGENT_TRACKER_WORKER_WORKSPACE": env["workspace"],
+        "AGENT_TRACKER_WORKER_WORKTREE": env["worktree_path"],
+    }
+
+
+def _run_ssh_worker_command(
+    config: ProjectConfig,
+    workspace: _WorkerWorkspace,
+    command: list[str],
+    *,
+    prompt: str,
+    report_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run a worker command in an SSH workspace and collect local artifacts."""
+    try:
+        return asyncio.run(
+            _run_ssh_worker_command_async(
+                config,
+                workspace,
+                command,
+                prompt=prompt,
+                report_path=report_path,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                env=env,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+    except asyncio.TimeoutError as exc:
+        stdout = _timeout_output_text(getattr(exc, "stdout", None))
+        stderr = _timeout_output_text(getattr(exc, "stderr", None))
+        if stderr:
+            stderr += "\n"
+        stderr += f"worker command timed out after {timeout_seconds} seconds\n"
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text(stderr, encoding="utf-8")
+        if not report_path.exists():
+            report_path.write_text(
+                stdout or "Worker command produced no report.\n",
+                encoding="utf-8",
+            )
+        return subprocess.CompletedProcess(command, returncode=124, stdout=stdout, stderr=stderr)
+
+
+async def _run_ssh_worker_command_async(
+    config: ProjectConfig,
+    workspace: _WorkerWorkspace,
+    command: list[str],
+    *,
+    prompt: str,
+    report_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run one SSH worker command and collect its local report/log artifacts."""
+    asyncssh = _load_asyncssh()
+    remote_artifacts = _ssh_worker_remote_artifacts(workspace, env["launch_id"])
+    command_text = _ssh_worker_command_text(command, env)
+    connect_kwargs = _ssh_workspace_connect_kwargs(workspace)
+    async with asyncssh.connect(
+        workspace.host,
+        port=workspace.port,
+        **connect_kwargs,
+    ) as conn:
+        async with conn.start_sftp_client() as sftp:
+            await sftp.makedirs(remote_artifacts["directory"], exist_ok=True)
+            await _write_sftp_text(sftp, remote_artifacts["prompt"], prompt)
+    async with asyncssh.connect(
+        workspace.host,
+        port=workspace.port,
+        **connect_kwargs,
+    ) as conn:
+        completed = await conn.run(
+            command_text,
+            input=prompt,
+            check=False,
+            timeout=timeout_seconds or None,
+        )
+    stdout = _ssh_output_text(completed.stdout)
+    stderr = _ssh_output_text(completed.stderr)
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    async with asyncssh.connect(
+        workspace.host,
+        port=workspace.port,
+        **connect_kwargs,
+    ) as conn:
+        async with conn.start_sftp_client() as sftp:
+            report_text = await _read_sftp_text_or_none(
+                asyncssh,
+                sftp,
+                remote_artifacts["report"],
+            )
+    report_path.write_text(
+        (
+            report_text
+            if report_text is not None
+            else stdout or "Worker command produced no report.\n"
+        ),
+        encoding="utf-8",
+    )
+    return subprocess.CompletedProcess(
+        command,
+        returncode=int(completed.returncode if completed.returncode is not None else 1),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _ssh_worker_command_text(command: list[str], env: dict[str, str]) -> str:
+    """Return an SSH shell command with explicit cwd and worker environment."""
+    exports = " ".join(
+        f"{key}={shlex.quote(value)}" for key, value in _worker_process_env(env).items()
+    )
+    argv = " ".join(shlex.quote(item) for item in command)
+    worktree = shlex.quote(env["worktree_path"])
+    return f"cd {worktree} && env {exports} {argv}"
+
+
+def _ssh_workspace_connect_kwargs(workspace: _WorkerWorkspace) -> dict[str, Any]:
+    """Return AsyncSSH connection kwargs for a worker workspace."""
+    kwargs: dict[str, Any] = {}
+    if workspace.username:
+        kwargs["username"] = workspace.username
+    if workspace.password is not None:
+        kwargs["password"] = workspace.password
+    if workspace.known_hosts is None or workspace.known_hosts:
+        kwargs["known_hosts"] = workspace.known_hosts
+    if workspace.client_keys is not None:
+        kwargs["client_keys"] = workspace.client_keys
+    return kwargs
+
+
+async def _write_sftp_text(sftp: Any, remote_path: str, text: str) -> None:
+    """Write one text file through an AsyncSSH SFTP client."""
+    async with sftp.open(remote_path, "w") as remote_file:
+        await remote_file.write(text)
+
+
+async def _read_sftp_text_or_none(
+    asyncssh: Any,
+    sftp: Any,
+    remote_path: str,
+) -> str | None:
+    """Read one SFTP text file, returning ``None`` when absent."""
+    try:
+        async with sftp.open(remote_path, "r") as remote_file:
+            return await remote_file.read()
+    except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPNoSuchPath):
+        return None
+
+
+def _ssh_output_text(value: str | bytes | None) -> str:
+    """Return AsyncSSH command output as text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def _worker_start_failed(
@@ -3802,6 +4165,52 @@ def _write_worker_launch_event(workspace: _WorkerWorkspace, result: dict[str, An
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_spool_file_atomic(json.dumps(payload, indent=2).encode(), event_path)
+
+
+def _write_ssh_worker_launch_event(
+    config: ProjectConfig,
+    workspace: _WorkerWorkspace,
+    result: dict[str, Any],
+) -> None:
+    """Publish a worker launch event into an SSH workspace outbox."""
+    try:
+        asyncio.run(_write_ssh_worker_launch_event_async(config, workspace, result))
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError("timed out writing SSH worker launch event") from exc
+
+
+async def _write_ssh_worker_launch_event_async(
+    config: ProjectConfig,
+    workspace: _WorkerWorkspace,
+    result: dict[str, Any],
+) -> None:
+    """Write one SSH worker launch event through SFTP."""
+    if workspace.spool_outbox is None:
+        return
+    asyncssh = _load_asyncssh()
+    launch_id = _launch_id_component(str(result["launch_id"]), fallback="launch")
+    event_path = _join_remote_path(workspace.spool_outbox.as_posix(), f"{launch_id}.json")
+    payload = {
+        "event_id": f"worker-launch-{launch_id}",
+        "kind": "agent_tracker.worker_launch",
+        "task_id": result.get("task_id", ""),
+        "workspace": workspace.name,
+        "status": result.get("status", ""),
+        "artifact": f"file:{result['artifacts']['launch']}",
+        "report": f"file:{result['artifacts']['report']}",
+        "remote_report": f"file:{result.get('remote_artifacts', {}).get('report', '')}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with asyncssh.connect(
+        workspace.host,
+        port=workspace.port,
+        **_ssh_workspace_connect_kwargs(workspace),
+    ) as conn:
+        async with conn.start_sftp_client() as sftp:
+            await sftp.makedirs(workspace.spool_outbox.as_posix(), exist_ok=True)
+            temp_path = f"{event_path}.tmp"
+            await _write_sftp_text(sftp, temp_path, json.dumps(payload, indent=2) + "\n")
+            await sftp.rename(temp_path, event_path)
 
 
 def _is_spool_event_file(path: Path) -> bool:

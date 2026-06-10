@@ -51,9 +51,12 @@ _WORKSPACE_TEXT_FIELDS = {
     "spool_outbox",
     "artifacts_path",
     "host",
+    "username",
+    "password",
+    "known_hosts",
     "remote_path",
 }
-_WORKSPACE_LIST_FIELDS = {"roles", "capabilities", "worker_command"}
+_WORKSPACE_LIST_FIELDS = {"roles", "capabilities", "worker_command", "client_keys"}
 
 
 @dataclass(frozen=True)
@@ -308,6 +311,14 @@ def _validate_workspaces(data: dict[str, Any]) -> None:
                 raise ValueError(f"config field 'workspaces.{name}.host' is required")
             if not _optional_text(value, "remote_path"):
                 raise ValueError(f"config field 'workspaces.{name}.remote_path' is required")
+            if (
+                "port" in value
+                and value["port"] is not None
+                and (isinstance(value["port"], bool) or not isinstance(value["port"], (int, str)))
+            ):
+                raise ValueError(
+                    f"config field 'workspaces.{name}.port' must be an integer or string"
+                )
         for key in _WORKSPACE_TEXT_FIELDS:
             if key in value and value[key] is not None and not isinstance(value[key], str):
                 raise ValueError(f"config field 'workspaces.{name}.{key}' must be a string")

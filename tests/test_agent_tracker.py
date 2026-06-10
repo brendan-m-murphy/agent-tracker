@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -282,6 +284,89 @@ class LoopbackSFTPServer:
             loop.close()
 
 
+class LoopbackSSHWorkerServer:
+    """Run a no-auth AsyncSSH exec server in a background thread."""
+
+    def __init__(self, root: Path, asyncssh_module: Any):
+        self.root = root
+        self.asyncssh = asyncssh_module
+        self.host_key = asyncssh_module.generate_private_key("ssh-rsa")
+        self.port = 0
+        self.commands: list[str] = []
+        self.stdin: list[str] = []
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> LoopbackSSHWorkerServer:
+        self._thread.start()
+        if not self._ready.wait(timeout=10):
+            raise TimeoutError("timed out starting loopback SSH server")
+        if self._error is not None:
+            raise self._error
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10)
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def serve() -> None:
+            asyncssh = self.asyncssh
+
+            class NoAuthServer(asyncssh.SSHServer):  # type: ignore[name-defined]
+                def begin_auth(self, username: str) -> bool:
+                    return False
+
+            async def run_process(process: Any) -> None:
+                command = process.command or ""
+                self.commands.append(command)
+                prompt = await process.stdin.read()
+                self.stdin.append(prompt)
+                completed = subprocess.run(
+                    command,
+                    shell=True,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    cwd=Path("/"),
+                    env={**os.environ, **dict(process.env)},
+                    check=False,
+                )
+                process.stdout.write(completed.stdout)
+                process.stderr.write(completed.stderr)
+                process.exit(completed.returncode)
+
+            server = await asyncssh.listen(
+                "127.0.0.1",
+                0,
+                server_factory=NoAuthServer,
+                server_host_keys=[self.host_key],
+                process_factory=run_process,
+                sftp_factory=lambda chan: asyncssh.SFTPServer(chan),
+            )
+            self.port = server.get_port()
+            self._ready.set()
+            try:
+                while not self._stop.is_set():
+                    await asyncio.sleep(0.05)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        try:
+            loop.run_until_complete(serve())
+        except BaseException as exc:  # pragma: no cover - surfaced through __enter__
+            self._error = exc
+            self._ready.set()
+        finally:
+            loop.close()
+
+
 def configure_sftp_spool(config_path: Path, port: int, remote_path: str = "/outbox") -> None:
     """Point a test project at a loopback SFTP remote inbox."""
     config_payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -289,6 +374,31 @@ def configure_sftp_spool(config_path: Path, port: int, remote_path: str = "/outb
     config_payload["spool"]["ssh"] = {
         "username": "agent",
         "known_hosts": "none",
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+
+def configure_ssh_worker_workspace(
+    config_path: Path,
+    *,
+    port: int,
+    remote_path: Path,
+    artifacts_path: Path,
+    worker_command: list[str],
+) -> None:
+    """Point a test project at a loopback SSH worker workspace."""
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "remote": {
+            "kind": "ssh",
+            "host": f"127.0.0.1:{port}",
+            "username": "agent",
+            "known_hosts": "none",
+            "remote_path": str(remote_path),
+            "artifacts_path": str(artifacts_path),
+            "spool_outbox": str(remote_path / ".agent-tracker" / "spool" / "outbox"),
+            "worker_command": worker_command,
+        }
     }
     config_path.write_text(json.dumps(config_payload), encoding="utf-8")
 
@@ -3561,6 +3671,222 @@ def test_cli_launch_worker_executes_local_command_and_writes_report(
     assert Path(result["artifacts"]["stderr"]).read_text(encoding="utf-8") == ""
 
 
+def test_launch_worker_ssh_workspace_executes_loopback_command_and_collects_local_artifacts(
+    tmp_path: Path,
+) -> None:
+    """SSH worker launches execute remotely and collect local launch artifacts."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    remote_root = tmp_path / "remote-workspace"
+    remote_root.mkdir()
+    local_artifacts = canonical / "results" / "ssh-worker-launches"
+    config_path = write_project(canonical)
+    script = (
+        "import os; "
+        "from pathlib import Path; "
+        "import sys; "
+        "prompt = sys.stdin.read(); "
+        f"assert Path.cwd() == Path({str(remote_root)!r}); "
+        "assert Path(os.environ['AGENT_TRACKER_WORKER_WORKTREE']) == Path.cwd(); "
+        "assert os.environ['AGENT_TRACKER_WORKER_REPORT'] == '{report_path}'; "
+        "Path('{report_path}').write_text("
+        "'remote report\\n' + prompt, encoding='utf-8'); "
+        "print('remote stdout'); "
+        "print('remote stderr', file=sys.stderr)"
+    )
+
+    with LoopbackSSHWorkerServer(remote_root, asyncssh) as server:
+        configure_ssh_worker_workspace(
+            config_path,
+            port=server.port,
+            remote_path=remote_root,
+            artifacts_path=local_artifacts,
+            worker_command=[sys.executable, "-c", script],
+        )
+        result = Coordinator(load_config(config_path)).launch_worker(
+            "remote",
+            prompt_text="Report capabilities.",
+            agent_id="agent-ssh",
+            execute=True,
+        )
+
+    artifacts = result["artifacts"]
+    launch = json.loads(Path(artifacts["launch"]).read_text(encoding="utf-8"))
+    outbox = remote_root / ".agent-tracker" / "spool" / "outbox"
+    event_files = sorted(outbox.glob("*.json"))
+    event = json.loads(event_files[0].read_text(encoding="utf-8"))
+    prompt_text = Path(artifacts["prompt"]).read_text(encoding="utf-8")
+    state_root = load_config(config_path).effective_state_root
+
+    assert result["status"] == "succeeded"
+    assert result["returncode"] == 0
+    assert result["workspace"]["kind"] == "ssh"
+    assert Path(artifacts["directory"]).is_relative_to(state_root / "workers")
+    assert result["remote_artifacts"]["directory"].startswith(str(local_artifacts))
+    assert prompt_text.startswith("Report capabilities.")
+    assert "## Coordination Context" in prompt_text
+    assert server.stdin == [prompt_text]
+    assert len(server.commands) == 1
+    assert server.commands[0].startswith(f"cd {shlex.quote(str(remote_root))} && env ")
+    assert "AGENT_TRACKER_WORKER_REPORT=" in server.commands[0]
+    assert shlex.join(result["command"]) in server.commands[0]
+    assert (
+        Path(artifacts["report"])
+        .read_text(encoding="utf-8")
+        .startswith("remote report\nReport capabilities.")
+    )
+    assert Path(artifacts["stdout"]).read_text(encoding="utf-8") == "remote stdout\n"
+    assert Path(artifacts["stderr"]).read_text(encoding="utf-8") == "remote stderr\n"
+    assert launch["status"] == "succeeded"
+    assert launch["workspace"]["kind"] == "ssh"
+    assert event["kind"] == "agent_tracker.worker_launch"
+    assert event["status"] == "succeeded"
+    assert event["artifact"] == f"file:{artifacts['launch']}"
+    assert event["report"] == f"file:{artifacts['report']}"
+    assert event["remote_report"] == f"file:{result['remote_artifacts']['report']}"
+    assert sorted(outbox.glob("*.tmp")) == []
+
+
+def test_launch_worker_ssh_claim_uses_task_ingest_without_direct_queue_mutation(
+    tmp_path: Path,
+) -> None:
+    """SSH claim launches enqueue task-ingest commands instead of mutating SQLite."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    remote_root = tmp_path / "remote-workspace"
+    remote_root.mkdir()
+    config_path = write_project(canonical)
+
+    with LoopbackSSHWorkerServer(remote_root, asyncssh) as server:
+        configure_ssh_worker_workspace(
+            config_path,
+            port=server.port,
+            remote_path=remote_root,
+            artifacts_path=canonical / "results" / "ssh-worker-launches",
+            worker_command=[sys.executable, "-c", "print('prepared')"],
+        )
+        coord = Coordinator(load_config(config_path))
+        coord.import_tasks()
+
+        result = coord.launch_worker(
+            "remote",
+            task_id="ready",
+            agent_id="agent-ssh",
+            claim_task=True,
+        )
+
+    state = coord.get_task("ready")
+    command_files = sorted((canonical / "commands" / "inbox").glob("*.json"))
+    claim_request = json.loads(command_files[0].read_text(encoding="utf-8"))
+
+    assert result["status"] == "prepared"
+    assert result["lease"] is None
+    assert state.task.status == "pending"
+    assert state.lease_token == ""
+    assert state.lease_agent_id == ""
+    assert state.evidence == []
+    assert len(command_files) == 1
+    assert claim_request["command"] == "claim"
+    assert claim_request["task_id"] == "ready"
+    assert claim_request["actor"]["id"] == "agent-ssh"
+    assert claim_request["actor"]["role"] == "worker"
+
+    ingest_result = coord.process_task_ingest_commands(actor="processor")
+    response = json.loads(Path(result["task_ingest"]["claim_response"]).read_text(encoding="utf-8"))
+    state = coord.get_task("ready")
+
+    assert ingest_result["succeeded"] == 1
+    assert response["status"] == "succeeded"
+    assert response["result"]["state"] == "claimed"
+    assert response["result"]["lease_token"]
+    assert state.state == "claimed"
+    assert state.lease_agent_id == "agent-ssh"
+
+
+def test_launch_worker_ssh_claim_preserves_rejected_role_through_task_ingest(
+    tmp_path: Path,
+) -> None:
+    """SSH claim requests preserve disallowed roles for canonical processing."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    remote_root = tmp_path / "remote-workspace"
+    remote_root.mkdir()
+    config_path = write_project(canonical)
+
+    with LoopbackSSHWorkerServer(remote_root, asyncssh) as server:
+        configure_ssh_worker_workspace(
+            config_path,
+            port=server.port,
+            remote_path=remote_root,
+            artifacts_path=canonical / "results" / "ssh-worker-launches",
+            worker_command=[sys.executable, "-c", "print('prepared')"],
+        )
+        coord = Coordinator(load_config(config_path))
+        coord.import_tasks()
+
+        result = coord.launch_worker(
+            "remote",
+            task_id="ready",
+            agent_id="agent-ssh",
+            role="wrong-role",
+            claim_task=True,
+        )
+
+    command_files = sorted((canonical / "commands" / "inbox").glob("*.json"))
+    claim_request = json.loads(command_files[0].read_text(encoding="utf-8"))
+
+    assert claim_request["actor"]["role"] == "wrong-role"
+
+    ingest_result = coord.process_task_ingest_commands(actor="processor")
+    response = json.loads(Path(result["task_ingest"]["claim_response"]).read_text(encoding="utf-8"))
+    state = coord.get_task("ready")
+
+    assert ingest_result["rejected"] == 1
+    assert response["status"] == "rejected"
+    assert response["error"]["code"] == "dependency_blocked"
+    assert "no matching ready task" in response["error"]["message"]
+    assert state.state == "ready"
+    assert state.lease_token == ""
+
+
+def test_launch_worker_ssh_claim_execute_is_rejected_before_remote_command(
+    tmp_path: Path,
+) -> None:
+    """SSH launch-time claims cannot execute before a task-ingest response exists."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    remote_root = tmp_path / "remote-workspace"
+    remote_root.mkdir()
+    config_path = write_project(canonical)
+
+    with LoopbackSSHWorkerServer(remote_root, asyncssh) as server:
+        configure_ssh_worker_workspace(
+            config_path,
+            port=server.port,
+            remote_path=remote_root,
+            artifacts_path=canonical / "results" / "ssh-worker-launches",
+            worker_command=[sys.executable, "-c", "print('must not run')"],
+        )
+        coord = Coordinator(load_config(config_path))
+        coord.import_tasks()
+
+        with pytest.raises(ValueError, match="cannot combine claim_task with execute"):
+            coord.launch_worker(
+                "remote",
+                task_id="ready",
+                agent_id="agent-ssh",
+                claim_task=True,
+                execute=True,
+            )
+
+    assert server.commands == []
+    assert not (canonical / "commands" / "inbox").exists()
+
+
 def test_cli_launch_worker_records_explicit_coordination_assignment(
     tmp_path: Path,
 ) -> None:
@@ -3640,10 +3966,10 @@ def test_cli_launch_worker_human_output_includes_coordination_assignment(
     assert_no_box_drawing(output)
 
 
-def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
+def test_cli_launch_worker_invalid_ssh_workspace_reports_error_without_traceback(
     tmp_path: Path,
 ) -> None:
-    """The CLI reports unsupported SSH worker launches without a traceback."""
+    """The CLI reports invalid SSH worker launch configuration without a traceback."""
     root = tmp_path / "tracker"
     root.mkdir()
     config_path = write_project(root)
@@ -3651,7 +3977,6 @@ def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
     config_payload["workspaces"] = {
         "remote": {
             "kind": "ssh",
-            "host": "example.internal",
             "remote_path": "/srv/project",
         }
     }
@@ -3672,7 +3997,45 @@ def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
         )
 
     assert code == 1
-    assert "error: launch-worker currently supports only local workspaces" in stderr.getvalue()
+    assert "error: config field 'workspaces.remote.host' is required" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_cli_launch_worker_ssh_unsafe_host_reports_error_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """The CLI reports unsafe SSH host configuration without a traceback."""
+    root = tmp_path / "tracker"
+    root.mkdir()
+    config_path = write_project(root)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "remote": {
+            "kind": "ssh",
+            "host": "ssh://agent:secret@example.internal/srv?x=1",
+            "remote_path": "/srv/project",
+            "worker_command": [sys.executable, "-c", "print('unreachable')"],
+        }
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "remote",
+                "--prompt",
+                "Report capabilities.",
+                "--execute",
+            ]
+        )
+
+    assert code == 1
+    assert "error: SSH workspace host must not include password" in stderr.getvalue()
     assert "Traceback" not in stderr.getvalue()
 
 

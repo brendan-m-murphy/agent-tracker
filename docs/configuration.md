@@ -434,10 +434,11 @@ request is moved to `done` or `error`.
 
 The optional `workspaces` object gives coordinators stable names for local or
 remote project checkouts. `list-workspaces` reports the resolved registry.
-`launch-worker` currently executes only `kind: "local"` entries, but local and
-future SSH launchers share the same worker launch contract: the canonical
-tracker owns leases and SQLite writes, the worker receives an explicit prompt
-and assignment, and reports/logs are returned as launch artifacts.
+`launch-worker` executes `kind: "local"` entries directly and `kind: "ssh"`
+entries over SSH. Both kinds share the same worker launch contract: the
+canonical tracker owns leases and SQLite writes, the worker receives an
+explicit prompt and assignment, and reports/logs are returned as launch
+artifacts.
 See [](worker-launch-contract.md) for the full local/SSH launch contract.
 
 ```json
@@ -484,26 +485,45 @@ inside argv items:
 - `{report_path}`
 - `{task_id}`
 - `{workspace}`
+- `{workspace_path}`
 - `{worktree_path}`
 
-SSH workspace entries are validated and listed, but not launched yet:
+SSH workspace entries use `host` and an absolute `remote_path`. `host` may
+include `user@` and `:port`; `username` and `port` can also be supplied as
+separate fields. Set `known_hosts` and `client_keys` when the default SSH
+client configuration is not enough. Use `known_hosts: "none"` only for isolated
+loopback tests.
 
 ```json
 {
   "workspaces": {
     "remote-hpc": {
       "kind": "ssh",
-      "host": "hpc-login",
+      "host": "hpc-login.example.internal",
+      "username": "agent",
       "remote_path": "/work/project",
-      "spool_outbox": ".agent-tracker/spool/outbox"
+      "artifacts_path": ".agent-tracker/workers",
+      "spool_outbox": ".agent-tracker/spool/outbox",
+      "worker_command": [
+        "codex",
+        "exec",
+        "--cd",
+        "{worktree_path}",
+        "--output-last-message",
+        "{report_path}",
+        "-"
+      ]
     }
   }
 }
 ```
 
-Use SSH/SFTP `pull-spool` for remote event collection today. Remote queue
-mutation must use task-ingest command files rather than letting remote workers
-open canonical SQLite directly.
+SSH launches upload the rendered prompt, run the configured command in
+`remote_path` or the assigned `worktree_path`, collect stdout, stderr, and the
+remote report back into local launch artifacts, and publish a worker-launch
+event to `spool_outbox` when configured. Remote queue mutation must use
+task-ingest command files rather than letting remote workers open canonical
+SQLite directly.
 
 ## Current Validation Behavior
 

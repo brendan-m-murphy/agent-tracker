@@ -458,12 +458,11 @@ agent-tracker launch-worker --config tracking/project.json \
   --execute
 ```
 
-The default command is a local `codex exec` one-shot. Current `launch-worker`
-execution is local-only. SSH workspace entries are validated and listed so the
-SSH adapter can use the same worker launch contract later: the canonical
-tracker owns leases and SQLite writes, worker prompts receive explicit branch
-and worktree assignments, reports/logs are saved as launch artifacts, and
-remote queue mutation remains mediated by task-ingest command files.
+The default command is a `codex exec` one-shot. `launch-worker` can execute
+local workspaces directly and SSH workspaces over the configured SSH connection.
+The canonical tracker owns leases and SQLite writes, worker prompts receive
+explicit branch and worktree assignments, reports/logs are saved as launch
+artifacts, and SSH queue mutation remains mediated by task-ingest command files.
 See `docs/worker-launch-contract.md` for the full local/SSH launch contract.
 
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,

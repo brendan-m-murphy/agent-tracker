@@ -122,8 +122,7 @@ mutation from remote agents uses the task-ingest command contract in
   agent can read lease tokens, completion results, or error details;
 - command requests and event files must not share a schema or inbox.
 
-Until a task-ingest processor is implemented, SSH/Codex end-to-end testing
-should cover event-spool pull/ingest behavior and manually inspect command
-request/response examples against the contract. That keeps remote evidence
-collection usable without pretending remote queue mutation is already
-implemented.
+End-to-end SSH/Codex testing should cover both event-spool pull/ingest behavior
+and task-ingest request/response processing. `launch-worker` can execute SSH
+workspace commands, but remote workers still mutate queue state by writing
+task-ingest command files for the canonical processor to apply.
