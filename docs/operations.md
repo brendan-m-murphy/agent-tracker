@@ -573,13 +573,26 @@ Use intake for ideas, feature requests, checks, and planning notes that should
 not become claimable tasks yet:
 
 ```bash
-agent-tracker intake --config project.json record \
+agent-tracker intake --config project.json capture \
   --kind feature \
   --source user \
   --repo agent-tracker \
   --tag triage \
+  --metadata source_date=2026-06-10 \
+  --metadata thread=codex-friction \
   "Add an inbox for untriaged requests"
 ```
+
+The guided `intake capture` form requires `--kind`, `--source`, and `--repo`,
+preserves the raw text argument exactly, and still does not create a claimable
+task. Supported guided kinds are `idea`, `feature`, `check`, `concern`, and
+`note`. Use repeatable `--metadata KEY=VALUE` entries for small structured
+fields such as `source_date`, `thread`, `project`, `owner`, or `priority`. Use
+`--metadata-json '{"key": "value"}'` when the metadata is already assembled as a
+JSON object; explicit `--metadata` pairs are merged into that object. Keep the
+raw request or note as the positional text argument rather than splitting it
+across metadata fields. Use `intake record` or the flat `record-intake` alias
+for looser backward-compatible intake capture.
 
 List intake for project-manager triage:
 
@@ -592,8 +605,8 @@ The grouped `intake` command is implemented with Typer and accepts common
 Without `--json`, `intake list` uses Rich rendering and prints each record with
 its current status, such as `status open`, `status triaged`, `status closed`, or
 `status deferred`, plus its creation timestamp when available. The flat aliases
-`record-intake`, `list-intake`, and `update-intake` remain supported for
-existing scripts and produce the same JSON payloads.
+`capture-intake`, `record-intake`, `list-intake`, and `update-intake` remain
+supported for existing scripts and produce the same JSON payloads.
 
 Intake records are stored in SQLite, audited as `intake.record`, and included
 in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`

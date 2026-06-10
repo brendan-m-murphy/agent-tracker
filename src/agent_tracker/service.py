@@ -47,6 +47,7 @@ from agent_tracker.rendering import DefaultPromptRenderer
 
 _SSH_SPOOL_SCHEMES = {"ssh", "sftp"}
 _DISABLED_KNOWN_HOSTS = {"none", "off", "false", "disabled"}
+STRUCTURED_INTAKE_KINDS = ("idea", "feature", "check", "concern", "note")
 
 
 class _GitBranchCheck(TypedDict):
@@ -435,6 +436,48 @@ class Coordinator:
             kind=_first_text(kind) or "idea",
             source=_first_text(source),
             repo=_first_text(repo),
+            tags=_clean_tags(tags or []),
+            metadata=metadata or {},
+        )
+        return self.store.record_intake(self.config.project_id, record, actor=actor)
+
+    def record_structured_intake(
+        self,
+        text: str,
+        *,
+        kind: str,
+        source: str,
+        repo: str,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        intake_id: str = "",
+        actor: str = "system",
+    ) -> IntakeRecord:
+        """Record raw intake through the guided helper path."""
+        self._ensure_mutation_allowed()
+        raw_text = str(text)
+        if not raw_text.strip():
+            raise ValueError("intake text is required")
+        cleaned_kind = _first_text(kind)
+        cleaned_source = _first_text(source)
+        cleaned_repo = _first_text(repo)
+        if not cleaned_kind:
+            raise ValueError("intake kind is required")
+        if cleaned_kind not in STRUCTURED_INTAKE_KINDS:
+            allowed = ", ".join(STRUCTURED_INTAKE_KINDS)
+            raise ValueError(f"intake kind must be one of: {allowed}")
+        if not cleaned_source:
+            raise ValueError("intake source is required")
+        if not cleaned_repo:
+            raise ValueError("intake repo is required")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("intake metadata must be a JSON object")
+        record = IntakeRecord(
+            intake_id=_first_text(intake_id) or uuid.uuid4().hex,
+            text=raw_text,
+            kind=cleaned_kind,
+            source=cleaned_source,
+            repo=cleaned_repo,
             tags=_clean_tags(tags or []),
             metadata=metadata or {},
         )

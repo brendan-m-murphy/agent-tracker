@@ -33,7 +33,7 @@ from agent_tracker.models import (
     INTERVENTION_STATES,
 )
 from agent_tracker.rendering import HumanOutputRenderer
-from agent_tracker.service import Coordinator
+from agent_tracker.service import STRUCTURED_INTAKE_KINDS, Coordinator
 
 BOOTSTRAP_GITIGNORE_LINES = (
     ".agent-tracker/",
@@ -662,8 +662,26 @@ def command_check_pr_notification_setup(args: argparse.Namespace) -> int:
 def command_record_intake(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
-    metadata = parse_json_object(args.metadata_json, "metadata-json")
+    metadata = parse_intake_metadata(args.metadata_json, getattr(args, "metadata", []))
     intake = coord.record_intake(
+        args.text,
+        kind=args.kind,
+        source=args.source,
+        repo=args.repo,
+        tags=args.tag,
+        metadata=metadata,
+        intake_id=args.id,
+        actor=args.actor,
+    )
+    print_json(intake_to_dict(intake))
+    return 0
+
+
+def command_capture_intake(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    metadata = parse_intake_metadata(args.metadata_json, args.metadata)
+    intake = coord.record_structured_intake(
         args.text,
         kind=args.kind,
         source=args.source,
@@ -817,6 +835,25 @@ def parse_json_object(value: str, label: str) -> dict[str, Any]:
     return parsed
 
 
+def parse_key_value_metadata(values: list[str]) -> dict[str, str]:
+    """Parse repeatable metadata KEY=VALUE CLI arguments."""
+    metadata: dict[str, str] = {}
+    for value in values:
+        key, separator, raw = value.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError("metadata entries must use KEY=VALUE")
+        metadata[key] = raw.strip()
+    return metadata
+
+
+def parse_intake_metadata(metadata_json: str, metadata_entries: list[str]) -> dict[str, Any]:
+    """Parse intake metadata from JSON plus repeatable KEY=VALUE entries."""
+    metadata = parse_json_object(metadata_json, "metadata-json")
+    metadata.update(parse_key_value_metadata(metadata_entries))
+    return metadata
+
+
 def parse_dependency(value: str) -> dict[str, str]:
     """Parse a proposed task dependency argument."""
     task_id, separator, description = value.partition(":")
@@ -842,15 +879,63 @@ def parse_dependencies(values: list[str] | None) -> list[dict[str, str]] | None:
 def add_record_intake_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments for commands that record raw intake."""
     add_common(parser)
-    parser.add_argument("text")
-    parser.add_argument("--id", default="")
-    parser.add_argument("--kind", default="idea")
-    parser.add_argument("--source", default="")
-    parser.add_argument("--repo", default="")
-    parser.add_argument("--tag", action="append", default=[])
-    parser.add_argument("--metadata-json", default="{}")
-    parser.add_argument("--actor", default="system")
+    parser.add_argument("text", help="Raw intake text to preserve for triage.")
+    parser.add_argument("--id", default="", help="Optional stable intake id.")
+    parser.add_argument(
+        "--kind", default="idea", help="Intake kind, such as idea, feature, check, or note."
+    )
+    parser.add_argument(
+        "--source", default="", help="Where the intake came from, such as user, thread, or review."
+    )
+    parser.add_argument("--repo", default="", help="Repository or component this intake concerns.")
+    parser.add_argument("--tag", action="append", default=[], help="Repeatable triage tag.")
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable structured metadata entry merged into metadata-json.",
+    )
+    parser.add_argument(
+        "--metadata-json", default="{}", help="JSON object for structured metadata."
+    )
+    parser.add_argument("--actor", default="system", help="Actor recorded in audit history.")
     parser.set_defaults(func=command_record_intake)
+
+
+def add_capture_intake_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for the guided structured intake helper."""
+    add_common(parser)
+    parser.add_argument("text", help="Raw intake text to preserve exactly for triage.")
+    parser.add_argument("--id", default="", help="Optional stable intake id.")
+    parser.add_argument(
+        "--kind",
+        required=True,
+        help=f"Required intake kind: {', '.join(STRUCTURED_INTAKE_KINDS)}.",
+    )
+    parser.add_argument(
+        "--source",
+        required=True,
+        help="Required source, such as user, thread URL, review, or agent id.",
+    )
+    parser.add_argument(
+        "--repo",
+        required=True,
+        help="Required repository or component this intake concerns.",
+    )
+    parser.add_argument("--tag", action="append", default=[], help="Repeatable triage tag.")
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable structured metadata entry merged into metadata-json.",
+    )
+    parser.add_argument(
+        "--metadata-json", default="{}", help="JSON object for structured metadata."
+    )
+    parser.add_argument("--actor", default="system", help="Actor recorded in audit history.")
+    parser.set_defaults(func=command_capture_intake)
 
 
 def add_list_intake_arguments(parser: argparse.ArgumentParser) -> None:
@@ -916,11 +1001,22 @@ def _typer_record_intake(
     config: str = typer.Option("", "--config"),
     db: str = typer.Option("", "--db"),
     id_: str = typer.Option("", "--id"),
-    kind: str = typer.Option("idea", "--kind"),
-    source: str = typer.Option("", "--source"),
-    repo: str = typer.Option("", "--repo"),
-    tag: list[str] | None = typer.Option(None, "--tag"),
-    metadata_json: str = typer.Option("{}", "--metadata-json"),
+    kind: str = typer.Option(
+        "idea", "--kind", help="Intake kind, such as idea, feature, check, or note."
+    ),
+    source: str = typer.Option(
+        "", "--source", help="Where the intake came from, such as user, thread, or review."
+    ),
+    repo: str = typer.Option("", "--repo", help="Repository or component this intake concerns."),
+    tag: list[str] | None = typer.Option(None, "--tag", help="Repeatable triage tag."),
+    metadata: list[str] | None = typer.Option(
+        None,
+        "--metadata",
+        help="Repeatable structured metadata entry as KEY=VALUE.",
+    ),
+    metadata_json: str = typer.Option(
+        "{}", "--metadata-json", help="JSON object for structured metadata."
+    ),
     actor: str = typer.Option("system", "--actor"),
 ) -> None:
     """Record raw project intake without creating a task."""
@@ -933,10 +1029,63 @@ def _typer_record_intake(
         source=source,
         repo=repo,
         tag=tag or [],
+        metadata=metadata or [],
         metadata_json=metadata_json,
         actor=actor,
     )
     code = command_record_intake(args)
+    if code:
+        raise typer.Exit(code)
+
+
+@intake_typer_app.command("capture")
+def _typer_capture_intake(
+    ctx: typer.Context,
+    text: str = typer.Argument(..., help="Raw intake text to preserve exactly."),
+    config: str = typer.Option("", "--config"),
+    db: str = typer.Option("", "--db"),
+    id_: str = typer.Option("", "--id"),
+    kind: str = typer.Option(
+        ...,
+        "--kind",
+        help=f"Required intake kind: {', '.join(STRUCTURED_INTAKE_KINDS)}.",
+    ),
+    source: str = typer.Option(
+        ...,
+        "--source",
+        help="Required source, such as user, thread URL, review, or agent id.",
+    ),
+    repo: str = typer.Option(
+        ...,
+        "--repo",
+        help="Required repository or component this intake concerns.",
+    ),
+    tag: list[str] | None = typer.Option(None, "--tag", help="Repeatable triage tag."),
+    metadata: list[str] | None = typer.Option(
+        None,
+        "--metadata",
+        help="Repeatable structured metadata entry as KEY=VALUE.",
+    ),
+    metadata_json: str = typer.Option(
+        "{}", "--metadata-json", help="JSON object for structured metadata."
+    ),
+    actor: str = typer.Option("system", "--actor"),
+) -> None:
+    """Capture structured raw intake without creating a task."""
+    args = argparse.Namespace(
+        config=_typer_common_value(ctx, config, "config"),
+        db=_typer_common_value(ctx, db, "db"),
+        text=text,
+        id=id_,
+        kind=kind,
+        source=source,
+        repo=repo,
+        tag=tag or [],
+        metadata=metadata or [],
+        metadata_json=metadata_json,
+        actor=actor,
+    )
+    code = command_capture_intake(args)
     if code:
         raise typer.Exit(code)
 
@@ -1370,6 +1519,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_record_intake_arguments(record_intake)
 
+    capture_intake = sub.add_parser(
+        "capture-intake",
+        help="Guided raw intake capture with explicit kind, source, and repo.",
+    )
+    add_capture_intake_arguments(capture_intake)
+
     list_intake = sub.add_parser("list-intake", help="List raw project intake.")
     add_list_intake_arguments(list_intake)
 
@@ -1386,6 +1541,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record raw project intake without creating a task.",
     )
     add_record_intake_arguments(intake_record)
+    intake_capture = intake_sub.add_parser(
+        "capture",
+        help="Guided raw intake capture with explicit kind, source, and repo.",
+    )
+    add_capture_intake_arguments(intake_capture)
     intake_list = intake_sub.add_parser("list", help="List raw project intake.")
     add_list_intake_arguments(intake_list)
     intake_update = intake_sub.add_parser(

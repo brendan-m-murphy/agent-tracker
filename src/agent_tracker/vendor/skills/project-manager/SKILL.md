@@ -77,11 +77,21 @@ When the user gives an idea, feature request, check, concern, or planning note:
 For a plain `agent-tracker` project with intake support:
 
 ```bash
-uv run agent-tracker record-intake --config tracking/project.json \
-  --kind feature --source user --tag triage \
+uv run agent-tracker intake --config tracking/project.json capture \
+  --kind feature --source user --repo <repo-or-component> --tag triage \
+  --metadata source_date=<YYYY-MM-DD> \
+  --metadata thread=<thread-or-context> \
   "Raw request or idea text"
-uv run agent-tracker list-intake --config tracking/project.json --json
+uv run agent-tracker intake --config tracking/project.json list --json
 ```
+
+Use `--metadata KEY=VALUE` for small structured context such as source date,
+thread, project, owner, or priority. `intake capture` requires kind, source, and
+repo, accepts guided kinds `idea`, `feature`, `check`, `concern`, and `note`,
+and preserves the user's raw wording as the positional intake text, not as
+metadata. Use `--metadata-json` only when the metadata is already a JSON object.
+The flat `capture-intake` alias is available for scripts, while looser
+`record-intake` remains compatibility-only for intake that lacks full context.
 
 After reviewing an intake item, create a proposed task contract rather than a
 claimable task. Creating a proposal marks open intake as triaged:

@@ -2933,6 +2933,46 @@ def test_intake_requires_text_and_object_metadata(tmp_path: Path) -> None:
         coord.record_intake("Valid text", metadata=json.loads("[]"))
 
 
+def test_structured_intake_helper_requires_context_and_preserves_text(
+    tmp_path: Path,
+) -> None:
+    """The guided intake helper validates context and preserves raw text."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    raw_text = "  Preserve exact raw intake.\nSecond line.  "
+
+    intake = coord.record_structured_intake(
+        raw_text,
+        kind="feature",
+        source="user:thread-123",
+        repo="agent-tracker",
+        tags=["triage", "triage", "structured"],
+        metadata={"priority": "soon"},
+        actor="pm",
+    )
+    ready_ids = {state.task.task_id for state in coord.ready_tasks()}
+
+    assert intake.text == raw_text
+    assert intake.kind == "feature"
+    assert intake.source == "user:thread-123"
+    assert intake.repo == "agent-tracker"
+    assert intake.tags == ["triage", "structured"]
+    assert intake.metadata == {"priority": "soon"}
+    assert intake.status == "open"
+    assert intake.intake_id not in ready_ids
+    with pytest.raises(ValueError, match="no matching ready task"):
+        coord.claim(agent_id="agent-1", task_id=intake.intake_id)
+    with pytest.raises(ValueError, match="intake kind is required"):
+        coord.record_structured_intake("Raw text", kind="", source="user", repo="agent-tracker")
+    with pytest.raises(ValueError, match="intake kind must be one of"):
+        coord.record_structured_intake("Raw text", kind="task", source="user", repo="agent-tracker")
+    with pytest.raises(ValueError, match="intake source is required"):
+        coord.record_structured_intake("Raw text", kind="idea", source="", repo="agent-tracker")
+    with pytest.raises(ValueError, match="intake repo is required"):
+        coord.record_structured_intake("Raw text", kind="idea", source="user", repo="")
+
+
 def test_intake_status_can_be_updated_after_triage(tmp_path: Path) -> None:
     """Project managers can close or defer intake without editing SQLite."""
     config = load_config(write_project(tmp_path))
@@ -3002,6 +3042,10 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
                 "agent-tracker",
                 "--tag",
                 "triage",
+                "--metadata",
+                "source_date=2026-06-10",
+                "--metadata",
+                "thread=friction",
                 "--metadata-json",
                 '{"needs": "planning"}',
                 "Check whether intake is visible.",
@@ -3013,7 +3057,11 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     assert recorded["kind"] == "check"
     assert recorded["repo"] == "agent-tracker"
     assert recorded["tags"] == ["triage"]
-    assert recorded["metadata"] == {"needs": "planning"}
+    assert recorded["metadata"] == {
+        "needs": "planning",
+        "source_date": "2026-06-10",
+        "thread": "friction",
+    }
 
     stdout = StringIO()
     with redirect_stdout(stdout):
@@ -3035,6 +3083,50 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     assert listed["intake"][0]["text"] == "Check whether intake is visible."
 
 
+def test_cli_capture_intake_records_structured_metadata(tmp_path: Path) -> None:
+    """The guided capture command records explicit context and metadata."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    raw_text = "  Keep raw user wording.\nFollow-up detail.  "
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "capture-intake",
+                "--config",
+                str(config_path),
+                "--kind",
+                "concern",
+                "--source",
+                "user:thread-123",
+                "--repo",
+                "agent-tracker",
+                "--tag",
+                "triage",
+                "--metadata",
+                "requester=bm13805",
+                "--metadata-json",
+                '{"priority": "soon"}',
+                raw_text,
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    ready_ids = {
+        state.task.task_id for state in Coordinator(load_config(config_path)).ready_tasks()
+    }
+    assert code == 0
+    assert recorded["kind"] == "concern"
+    assert recorded["source"] == "user:thread-123"
+    assert recorded["repo"] == "agent-tracker"
+    assert recorded["tags"] == ["triage"]
+    assert recorded["metadata"] == {"priority": "soon", "requester": "bm13805"}
+    assert recorded["text"] == raw_text
+    assert recorded["status"] == "open"
+    assert recorded["id"] not in ready_ids
+
+
 def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) -> None:
     """Grouped intake commands preserve the flat command JSON contracts."""
     config_path = write_project(tmp_path)
@@ -3054,6 +3146,10 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
                 "agent-tracker",
                 "--tag",
                 "ux",
+                "--metadata",
+                "source_date=2026-06-10",
+                "--metadata",
+                "project=agent-tracker-self",
                 "Group intake commands.",
             ]
         )
@@ -3063,6 +3159,10 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
     assert recorded["kind"] == "feature"
     assert recorded["repo"] == "agent-tracker"
     assert recorded["tags"] == ["ux"]
+    assert recorded["metadata"] == {
+        "project": "agent-tracker-self",
+        "source_date": "2026-06-10",
+    }
     assert recorded["text"] == "Group intake commands."
 
     stdout = StringIO()
@@ -3103,6 +3203,66 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
     assert code == 0
     assert updated["id"] == recorded["id"]
     assert updated["status"] == "closed"
+
+
+def test_cli_grouped_intake_capture_matches_flat_json_behavior(tmp_path: Path) -> None:
+    """Grouped guided capture uses the same JSON contract as the flat alias."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "intake",
+                "--config",
+                str(config_path),
+                "capture",
+                "--kind",
+                "check",
+                "--source",
+                "project-manager",
+                "--repo",
+                "agent-tracker",
+                "--tag",
+                "validation",
+                "--metadata",
+                "lane=planning/intake",
+                "Verify grouped intake capture.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["kind"] == "check"
+    assert recorded["source"] == "project-manager"
+    assert recorded["repo"] == "agent-tracker"
+    assert recorded["tags"] == ["validation"]
+    assert recorded["metadata"] == {"lane": "planning/intake"}
+    assert recorded["text"] == "Verify grouped intake capture."
+
+
+def test_cli_record_intake_rejects_malformed_metadata_pair(tmp_path: Path) -> None:
+    """Structured intake metadata pairs fail concisely when malformed."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "record-intake",
+                "--config",
+                str(config_path),
+                "--metadata",
+                "missing-separator",
+                "Record raw intake.",
+            ]
+        )
+
+    assert code == 1
+    assert "metadata entries must use KEY=VALUE" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
 
 
 def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
@@ -3808,6 +3968,7 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     normalized_root_help = " ".join(root_help.split())
     assert code == 0
     assert "record-intake" in root_help
+    assert "capture-intake" in root_help
     assert "intake" in root_help
     assert "Return active owned work to pending; not for finished handoffs." in normalized_root_help
     assert "Mark finished leased work awaiting review; clears the lease." in normalized_root_help
@@ -3815,6 +3976,7 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "Terminally fail a leased task with an actionable reason." in normalized_root_help
     assert "Usage: agent-tracker intake" in intake_help
     assert "--config TEXT" in intake_help
+    assert "capture" in intake_help
     assert "record" in intake_help
     assert "list" in intake_help
     assert "update" in intake_help
