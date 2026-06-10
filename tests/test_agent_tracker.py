@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any, TextIO
@@ -2720,6 +2721,417 @@ def test_database_schema_metadata_is_created(tmp_path: Path) -> None:
     assert row["value"] == str(DB_SCHEMA_VERSION)
     assert row["created_at"]
     assert row["updated_at"]
+
+
+def test_task_ingest_idempotency_response_is_persisted_for_replay(tmp_path: Path) -> None:
+    """Task-ingest idempotency stores the original response for matching retries."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    response = {
+        "schema_version": 1,
+        "command_id": "cmd-1",
+        "idempotency_key": "agent-1:claim:ready:1",
+        "status": "succeeded",
+        "duplicate": False,
+        "result": {"task_id": "ready", "lease_token": "token-1"},
+    }
+
+    missing = coord.store.get_task_ingest_idempotency(
+        config.project_id,
+        "agent-1:claim:ready:1",
+    )
+    stored = coord.store.record_task_ingest_idempotency(
+        config.project_id,
+        "agent-1:claim:ready:1",
+        request_digest="sha256:request-1",
+        response=response,
+    )
+    replayed = coord.store.record_task_ingest_idempotency(
+        config.project_id,
+        "agent-1:claim:ready:1",
+        request_digest="sha256:request-1",
+        response={**response, "duplicate": True},
+    )
+    fetched = coord.store.get_task_ingest_idempotency(
+        config.project_id,
+        "agent-1:claim:ready:1",
+    )
+
+    assert missing is None
+    assert stored.project_id == config.project_id
+    assert stored.idempotency_key == "agent-1:claim:ready:1"
+    assert stored.request_digest == "sha256:request-1"
+    assert stored.response == response
+    assert stored.created_at
+    assert stored.updated_at
+    assert replayed == stored
+    assert fetched == stored
+
+
+def test_task_ingest_idempotency_conflict_rejects_digest_change(tmp_path: Path) -> None:
+    """Task-ingest idempotency keys cannot be reused for different requests."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    response = {"schema_version": 1, "command_id": "cmd-1", "status": "succeeded"}
+    coord.store.record_task_ingest_idempotency(
+        config.project_id,
+        "agent-1:claim:ready:1",
+        request_digest="sha256:request-1",
+        response=response,
+    )
+
+    with pytest.raises(ValueError, match="idempotency conflict"):
+        coord.store.record_task_ingest_idempotency(
+            config.project_id,
+            "agent-1:claim:ready:1",
+            request_digest="sha256:request-2",
+            response={"schema_version": 1, "command_id": "cmd-2", "status": "rejected"},
+        )
+
+    fetched = coord.store.get_task_ingest_idempotency(
+        config.project_id,
+        "agent-1:claim:ready:1",
+    )
+    assert fetched is not None
+    assert fetched.request_digest == "sha256:request-1"
+    assert fetched.response == response
+
+
+def test_task_ingest_idempotency_keys_are_scoped_by_project(tmp_path: Path) -> None:
+    """The same idempotency key can be used independently by each project."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    other_config = replace(
+        config,
+        project_id="other",
+        name="Other Project",
+        raw={**config.raw, "project_id": "other", "name": "Other Project"},
+    )
+    coord.store.upsert_project(other_config)
+
+    first = coord.store.record_task_ingest_idempotency(
+        config.project_id,
+        "shared-key",
+        request_digest="sha256:first",
+        response={"schema_version": 1, "project_id": config.project_id},
+    )
+    second = coord.store.record_task_ingest_idempotency(
+        other_config.project_id,
+        "shared-key",
+        request_digest="sha256:second",
+        response={"schema_version": 1, "project_id": other_config.project_id},
+    )
+
+    assert first.idempotency_key == second.idempotency_key
+    assert first.project_id == config.project_id
+    assert first.request_digest == "sha256:first"
+    assert second.project_id == other_config.project_id
+    assert second.request_digest == "sha256:second"
+
+
+def write_task_command(
+    config: Any,
+    command_id: str,
+    *,
+    command: str = "claim",
+    idempotency_key: str | None = None,
+    project_id: str | None = None,
+    actor_id: str = "remote-agent-1",
+    task_id: str = "ready",
+    lease_token: str = "",
+    payload: dict[str, Any] | None = None,
+    reply_to: str = "",
+) -> Path:
+    """Write one complete task-ingest command request file."""
+    inbox = config.effective_state_root / "commands" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    request = {
+        "schema_version": 1,
+        "command_id": command_id,
+        "idempotency_key": idempotency_key or f"{actor_id}:{command}:{task_id}:1",
+        "project_id": project_id or config.project_id,
+        "command": command,
+        "actor": {"id": actor_id, "role": "worker"},
+        "task_id": task_id,
+        "lease_token": lease_token,
+        "payload": payload or {},
+    }
+    if reply_to:
+        request["reply_to"] = reply_to
+    path = inbox / f"{command_id}.json"
+    path.write_text(json.dumps(request), encoding="utf-8")
+    return path
+
+
+def read_task_response(config: Any, command_id: str) -> dict[str, Any]:
+    """Read one task-ingest command response by command ID."""
+    path = config.effective_state_root / "commands" / "responses" / f"{command_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_task_ingest_claim_writes_response_and_archives_request(tmp_path: Path) -> None:
+    """Processing a claim command returns a lease response and archives the request."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    request_path = write_task_command(
+        config,
+        "cmd-claim-ready",
+        payload={"lease_seconds": 7200},
+    )
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    response = read_task_response(config, "cmd-claim-ready")
+    state = coord.get_task("ready")
+
+    assert result["processed"] == 1
+    assert result["succeeded"] == 1
+    assert result["rejected"] == 0
+    assert response["status"] == "succeeded"
+    assert response["duplicate"] is False
+    assert response["result"]["lease_token"]
+    assert response["result"]["state"] == "claimed"
+    assert state.state == "claimed"
+    assert state.lease_agent_id == "remote-agent-1"
+    assert not request_path.exists()
+    assert (config.effective_state_root / "commands" / "done" / request_path.name).exists()
+
+
+def test_task_ingest_complete_updates_done(tmp_path: Path) -> None:
+    """A remote agent can complete a claimed task through command ingest."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    write_task_command(config, "cmd-claim-ready", payload={"lease_seconds": 7200})
+    coord.process_task_ingest_commands(actor="processor")
+    lease_token = read_task_response(config, "cmd-claim-ready")["result"]["lease_token"]
+    write_task_command(
+        config,
+        "cmd-complete-ready",
+        command="complete",
+        idempotency_key="remote-agent-1:complete:ready:1",
+        lease_token=lease_token,
+        payload={"evidence": ["manual:remote-status-report"]},
+    )
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    response = read_task_response(config, "cmd-complete-ready")
+    state = coord.get_task("ready")
+
+    assert result["succeeded"] == 1
+    assert response["status"] == "succeeded"
+    assert response["result"]["state"] == "done"
+    assert state.state == "done"
+    assert "manual:remote-status-report" in state.evidence
+
+
+def test_task_ingest_nested_reply_to_creates_response_parent(tmp_path: Path) -> None:
+    """A nested reply_to path is created before the queue mutation is applied."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    response_path = config.effective_state_root / "commands" / "responses" / "nested/reply.json"
+    write_task_command(
+        config,
+        "cmd-claim-nested-reply",
+        payload={"lease_seconds": 7200},
+        reply_to="commands/responses/nested/reply.json",
+    )
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    response = json.loads(response_path.read_text(encoding="utf-8"))
+    state = coord.get_task("ready")
+
+    assert result["succeeded"] == 1
+    assert response["status"] == "succeeded"
+    assert response["result"]["state"] == "claimed"
+    assert state.state == "claimed"
+
+
+def test_task_ingest_duplicate_replays_response_without_second_mutation(
+    tmp_path: Path,
+) -> None:
+    """The same idempotency key replays a stored response without applying again."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    write_task_command(config, "cmd-claim-ready", payload={"lease_seconds": 7200})
+    coord.process_task_ingest_commands(actor="processor")
+    first_response = read_task_response(config, "cmd-claim-ready")
+    write_task_command(
+        config,
+        "cmd-claim-ready-retry",
+        idempotency_key="remote-agent-1:claim:ready:1",
+        payload={"lease_seconds": 7200},
+    )
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    replay_response = read_task_response(config, "cmd-claim-ready-retry")
+    state = coord.get_task("ready")
+
+    assert result["duplicates"] == 1
+    assert result["succeeded"] == 1
+    assert replay_response["duplicate"] is True
+    assert replay_response["command_id"] == "cmd-claim-ready-retry"
+    assert replay_response["result"] == first_response["result"]
+    assert state.lease_token == first_response["result"]["lease_token"]
+
+
+def test_task_ingest_idempotency_conflict_rejects_without_mutation(
+    tmp_path: Path,
+) -> None:
+    """Reusing an idempotency key for different command content is rejected."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    write_task_command(config, "cmd-claim-ready", payload={"lease_seconds": 7200})
+    coord.process_task_ingest_commands(actor="processor")
+    write_task_command(
+        config,
+        "cmd-claim-ready-conflict",
+        idempotency_key="remote-agent-1:claim:ready:1",
+        payload={"lease_seconds": 3600},
+    )
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    response = read_task_response(config, "cmd-claim-ready-conflict")
+
+    assert result["rejected"] == 1
+    assert response["status"] == "rejected"
+    assert response["error"]["code"] == "idempotency_conflict"
+
+
+def test_task_ingest_pending_idempotency_prevents_retry_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash after mutation but before final idempotency update does not remutate."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    write_task_command(config, "cmd-claim-crash", payload={"lease_seconds": 7200})
+
+    original_finish = coord.store.finish_task_ingest_idempotency
+
+    def fail_finish(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("simulated idempotency finish failure")
+
+    monkeypatch.setattr(coord.store, "finish_task_ingest_idempotency", fail_finish)
+    first_result = coord.process_task_ingest_commands(actor="processor")
+    first_response = read_task_response(config, "cmd-claim-crash")
+    state_after_crash = coord.get_task("ready")
+
+    monkeypatch.setattr(coord.store, "finish_task_ingest_idempotency", original_finish)
+    write_task_command(
+        config,
+        "cmd-claim-crash-retry",
+        idempotency_key="remote-agent-1:claim:ready:1",
+        payload={"lease_seconds": 7200},
+    )
+    retry_result = coord.process_task_ingest_commands(actor="processor")
+    retry_response = read_task_response(config, "cmd-claim-crash-retry")
+    state_after_retry = coord.get_task("ready")
+
+    assert first_result["failed"] == 1
+    assert first_response["status"] == "failed"
+    assert first_response["error"]["code"] == "internal_error"
+    assert state_after_crash.state == "claimed"
+    assert retry_result["duplicates"] == 1
+    assert retry_response["status"] == "pending"
+    assert retry_response["duplicate"] is True
+    assert state_after_retry.lease_token == state_after_crash.lease_token
+
+
+def test_task_ingest_malformed_json_moves_to_error_with_response(tmp_path: Path) -> None:
+    """Malformed command JSON is archived to error with a safe response."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    inbox = config.effective_state_root / "commands" / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    request_path = inbox / "cmd-bad.json"
+    request_path.write_text('"not an object"', encoding="utf-8")
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    response = read_task_response(config, "cmd-bad")
+
+    assert result["rejected"] == 1
+    assert response["status"] == "rejected"
+    assert response["error"]["code"] == "invalid_payload"
+    assert not request_path.exists()
+    assert (config.effective_state_root / "commands" / "error" / request_path.name).exists()
+
+
+def test_task_ingest_project_mismatch_rejects_without_queue_mutation(tmp_path: Path) -> None:
+    """A command for a different project cannot mutate local queue state."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    write_task_command(config, "cmd-wrong-project", project_id="other-project")
+
+    result = coord.process_task_ingest_commands(actor="processor")
+    response = read_task_response(config, "cmd-wrong-project")
+    state = coord.get_task("ready")
+
+    assert result["rejected"] == 1
+    assert response["status"] == "rejected"
+    assert response["error"]["code"] == "project_mismatch"
+    assert state.state == "ready"
+    assert state.lease_token == ""
+
+
+@pytest.mark.parametrize(
+    "command_paths",
+    [
+        {"inbox": "../outside"},
+        {"inbox": "/tmp/agent-tracker-command-escape"},
+    ],
+)
+def test_task_ingest_configured_paths_must_stay_below_state_root(
+    tmp_path: Path,
+    command_paths: dict[str, str],
+) -> None:
+    """Configured task-ingest paths cannot escape the configured state root."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["commands"] = command_paths
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="below the configured state root"):
+        coord.process_task_ingest_commands(actor="processor")
+
+
+def test_cli_process_task_ingest_prints_summary_json(tmp_path: Path) -> None:
+    """The process-task-ingest CLI emits parseable summary JSON on stdout."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    Coordinator(config).import_tasks()
+    write_task_command(config, "cmd-claim-ready", payload={"lease_seconds": 7200})
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "process-task-ingest",
+            "--config",
+            str(config_path),
+            "--actor",
+            "processor",
+            "--json",
+        ]
+    )
+    result = json.loads(stdout)
+
+    assert code == 0
+    assert "agent-tracker paths:" in stderr
+    assert result["processed"] == 1
+    assert result["succeeded"] == 1
+    assert read_task_response(config, "cmd-claim-ready")["status"] == "succeeded"
 
 
 def test_stale_claim_is_recovered(tmp_path: Path) -> None:

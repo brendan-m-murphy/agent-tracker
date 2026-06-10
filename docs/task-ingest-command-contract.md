@@ -16,10 +16,17 @@ shared filesystems, and SSH-backed Codex projects. Future adapters can expose
 the same request and response payloads through MCP or HTTP, but the service
 layer remains the owner of SQLite writes.
 
+The canonical project processes local filesystem command files with:
+
+```bash
+agent-tracker process-task-ingest --config tracking/project.json --json
+```
+
 ## Directory Layout
 
 A command spool has separate request, processing, archive, error, and response
-paths. Relative paths resolve below the project `state_root`.
+paths. Relative paths resolve below the project `state_root`; configured command
+paths, including absolute paths, must also resolve below `state_root`.
 
 ```text
 commands/
@@ -32,9 +39,9 @@ commands/
 
 Remote writers publish requests by writing to a temporary name ending in
 `.partial`, `.part`, or `.tmp`, then atomically renaming to `<command_id>.json`.
-Processors ignore temporary names. Processors write the response before moving a
-valid request to `done` so a remote agent can observe the result even if archive
-movement fails.
+Processors ignore temporary names. Processors write the response before moving
+the request to `done` or `error` so a remote agent can observe the result even
+if archive movement fails.
 
 ## Request Payload
 
@@ -101,7 +108,7 @@ Every processable request receives one response JSON object.
     "state": "claimed"
   },
   "error": null,
-  "audit_id": 42
+  "audit_id": null
 }
 ```
 
@@ -113,11 +120,17 @@ Every processable request receives one response JSON object.
   project mismatch, missing lease token, unmet dependency, or unauthorized
   command.
 - `failed`: processing encountered an internal error after validation.
+- `pending`: an idempotency key was reserved before mutation but no final
+  response was recorded. This is a crash-recovery marker; retries must not
+  reapply the mutation and an operator should inspect the local audit/queue
+  state before clearing or repairing the pending record.
 
 `duplicate` is `true` when the same `idempotency_key` is replayed with the same
 command body and the stored response is returned. A replay with the same
 `idempotency_key` but different command body is rejected as an idempotency
-conflict and must not mutate state.
+conflict and must not mutate state. The persisted request digest is semantic:
+`command_id` and `reply_to` are excluded so a retried request can ask for a fresh
+response file without reapplying the mutation.
 
 ## Supported Commands
 
@@ -191,13 +204,15 @@ to `processing`. If the move fails because another processor already claimed
 the file, skip it. After processing:
 
 1. validate schema, project, command, actor, lease, and idempotency;
-2. run the corresponding `Coordinator` method against canonical config/state;
-3. write or reuse `responses/<command_id>.json`;
-4. move the request file to `done` for successful commands or `error` for
+2. create or verify the response path parent below `state_root`;
+3. reserve the idempotency key with a pending response before queue mutation;
+4. run the corresponding `Coordinator` method against canonical config/state;
+5. replace the pending idempotency response with the final response;
+6. write or reuse `responses/<command_id>.json`;
+7. move the request file to `done` for successful commands or `error` for
    rejected/failed commands;
-5. record audit with the actor, command, request digest, response path, and
-   final archive path.
+8. record audit entries for idempotency begin/finish and the underlying queue
+   mutation.
 
 The processor owns all SQLite writes. Remote agents only write request files and
 read response files.
-

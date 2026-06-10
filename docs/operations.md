@@ -429,6 +429,9 @@ payloads:
   whose stored evidence no longer satisfies current completion policy.
 - `pull_spool(dry_run=False)`: pull-spool counts and per-file actions.
 - `ingest_spool(actor="system")`: processed, inserted, and error counts.
+- `process_task_ingest_commands(actor="task-ingest", limit=0)`: process
+  mediated queue-mutation command files and return counts plus per-file
+  response/archive paths.
 - `launch_worker_prompt(task_id, agent_id="", markdown=True, branch="",
   base_ref="", worktree_path="")`: prompt-only worker handoff data with
   `launch_mode` set to `prompt_only`, `launched` set to `false`, the rendered
@@ -606,8 +609,8 @@ after `--command` is treated as part of the worker command argv.
 
 `launch-worker` execution is currently local-only. SSH workspaces can be
 validated and listed, and SSH/SFTP `pull-spool` can collect remote event files,
-but remote queue mutation should wait for the task-ingest command processor
-instead of letting remote agents write canonical SQLite directly.
+but remote queue mutation should use task-ingest command files instead of
+letting remote agents write canonical SQLite directly.
 
 ## Heartbeat A Lease
 
@@ -1252,6 +1255,34 @@ passwords and private-key material out of committed project config.
 
 `pull-spool` is a bounded copy step, not a daemon. Run it from an attendant,
 cron, or supervisor when polling is needed.
+
+## Process Task-Ingest Commands
+
+Use task-ingest commands when an agent cannot or should not open the canonical
+SQLite database directly. This is the queue-mutation path for remote workers:
+the remote side writes complete command request JSON files, and the canonical
+project applies them through normal `Coordinator` methods.
+
+```bash
+agent-tracker process-task-ingest --config project.json --json
+```
+
+By default, paths resolve below `state_root`:
+
+- `commands/inbox`: complete request files ready to process;
+- `commands/processing`: request files claimed by the processor;
+- `commands/done`: successful request archive;
+- `commands/error`: rejected or failed request archive;
+- `commands/responses`: durable response files.
+
+Configure an explicit `commands` block when a project needs different paths.
+Keep it separate from `spool`, which is for event facts consumed by
+`ingest-spool`. The processor ignores `.partial`, `.part`, and `.tmp` files.
+
+Responses are written before requests are archived. Idempotency keys are
+persisted in SQLite with a semantic request digest, so a retry with the same
+command body returns the stored result while a reused key with different command
+content is rejected without another queue mutation.
 
 ## Export Audit State
 

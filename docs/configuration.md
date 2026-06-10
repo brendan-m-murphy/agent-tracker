@@ -151,6 +151,7 @@ when replacing a built-in default with project-specific behavior.
 | `export_path` | No | `agent-tracker-snapshot.json` | Output path used by the default JSON exporter. Relative paths resolve below `state_root`. |
 | `notifications` | No | None | Optional notification settings. `notifications.github.allow_live` must be `true` before setup diagnostics report live PR comments as supported. `notifications.github.prepared_payload_path` can override the prepared PR payload output path. |
 | `spool` | No | None | Spool paths for `pull-spool` and `ingest-spool`. Relative paths resolve below `state_root`. |
+| `commands` | No | `commands/...` below `state_root` | Task-ingest command request, archive, and response paths for mediated queue mutations from remote or non-canonical agents. |
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
 | `spool_error` | No | `<inbox>/error` | Legacy top-level error path used when `spool` is absent. |
@@ -400,6 +401,35 @@ and should not store secrets in committed config files.
 
 `pull-spool` is a bounded copy step. It does not run as a daemon.
 
+## Task-Ingest Commands
+
+Task-ingest command files are separate from event spool files. They request
+canonical queue mutations such as `claim`, `heartbeat`, `complete`, review or
+integration handoff, intake capture, proposal creation, and proposal promotion.
+Remote or non-canonical agents write request files; the canonical project runs
+`process-task-ingest` and owns all SQLite writes.
+
+Relative command paths resolve below `state_root`. Absolute command paths are
+allowed only when they also resolve below `state_root`; paths that escape the
+runtime state directory are rejected by `process-task-ingest`.
+
+```json
+{
+  "commands": {
+    "inbox": "commands/inbox",
+    "processing": "commands/processing",
+    "done": "commands/done",
+    "error": "commands/error",
+    "responses": "commands/responses"
+  }
+}
+```
+
+When omitted, the defaults above are used. Request files are complete `*.json`
+files in `commands.inbox`; names ending in `.partial`, `.part`, or `.tmp` are
+ignored so writers can publish atomically. Responses are written before the
+request is moved to `done` or `error`.
+
 ## Workspace Registry
 
 The optional `workspaces` object gives coordinators stable names for local or
@@ -468,8 +498,8 @@ SSH workspace entries are validated and listed, but not launched yet:
 ```
 
 Use SSH/SFTP `pull-spool` for remote event collection today. Remote queue
-mutation should wait for the task-ingest command processor rather than letting
-remote workers open canonical SQLite directly.
+mutation should use task-ingest command files rather than letting remote
+workers open canonical SQLite directly.
 
 ## Current Validation Behavior
 

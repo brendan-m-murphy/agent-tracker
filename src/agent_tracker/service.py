@@ -54,6 +54,7 @@ from agent_tracker.rendering import DefaultPromptRenderer
 _SSH_SPOOL_SCHEMES = {"ssh", "sftp"}
 _DISABLED_KNOWN_HOSTS = {"none", "off", "false", "disabled"}
 STRUCTURED_INTAKE_KINDS = ("idea", "feature", "check", "concern", "note")
+TASK_INGEST_SCHEMA_VERSION = 1
 
 
 class _GitBranchCheck(TypedDict):
@@ -1400,6 +1401,352 @@ class Coordinator:
                 result["copied"] += 1
         return result
 
+    def process_task_ingest_commands(
+        self,
+        *,
+        actor: str = "task-ingest",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Process filesystem task-ingest command request files.
+
+        The processor owns canonical SQLite mutations. Remote or non-canonical
+        agents publish command request files and read durable response files.
+        """
+        self._ensure_mutation_allowed()
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
+        paths = _task_command_paths(self.config)
+        if not paths.inbox.exists():
+            return _task_command_result(paths)
+        paths.processing.mkdir(parents=True, exist_ok=True)
+        paths.done.mkdir(parents=True, exist_ok=True)
+        paths.error.mkdir(parents=True, exist_ok=True)
+        paths.responses.mkdir(parents=True, exist_ok=True)
+
+        result = _task_command_result(paths)
+        request_paths = [
+            path
+            for path in sorted(paths.inbox.iterdir())
+            if path.is_file() and _is_spool_event_file(path)
+        ]
+        for request_path in request_paths[:limit] if limit else request_paths:
+            result["processed"] += 1
+            processing_path = paths.processing / request_path.name
+            if processing_path.exists():
+                result["skipped"] += 1
+                result["files"].append(
+                    {
+                        "request": str(request_path),
+                        "action": "skip_processing_exists",
+                        "archive": str(processing_path),
+                    }
+                )
+                continue
+            try:
+                request_path.rename(processing_path)
+            except FileNotFoundError:
+                result["skipped"] += 1
+                result["files"].append({"request": str(request_path), "action": "skip_missing"})
+                continue
+            item = self._process_task_command_file(processing_path, paths, actor=actor)
+            result["files"].append(item)
+            status = item.get("status", "")
+            if item.get("duplicate"):
+                result["duplicates"] += 1
+            if status == "succeeded":
+                result["succeeded"] += 1
+            elif status == "rejected":
+                result["rejected"] += 1
+            elif status == "failed":
+                result["failed"] += 1
+        return result
+
+    def _process_task_command_file(
+        self,
+        processing_path: Path,
+        paths: _TaskCommandPaths,
+        *,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Process one claimed task-ingest command request file."""
+        response: dict[str, Any] | None = None
+        archive_dir = paths.error
+        request: dict[str, Any] | None = None
+        command_id = processing_path.stem
+        try:
+            raw_text = processing_path.read_text(encoding="utf-8")
+            loaded = json.loads(raw_text)
+            if not isinstance(loaded, dict):
+                raise _TaskCommandRejected(
+                    "invalid_payload",
+                    "command request must be a JSON object",
+                )
+            request = loaded
+            command_id = _first_text(request.get("command_id"), command_id)
+            response_path = _task_command_response_path(self.config, paths, request, command_id)
+            response_path.parent.mkdir(parents=True, exist_ok=True)
+            request_digest = _task_command_request_digest(request)
+            response = self._task_command_response_for_request(
+                request,
+                request_digest=request_digest,
+                actor=actor,
+            )
+            archive_dir = paths.done if response["status"] == "succeeded" else paths.error
+        except _TaskCommandRejected as exc:
+            response = _task_command_response(
+                self.config.project_id,
+                request or {},
+                command_id=command_id,
+                status="rejected",
+                error={"code": exc.code, "message": exc.message},
+            )
+            response_path = _default_task_command_response_path(paths, command_id)
+        except Exception as exc:
+            response = _task_command_response(
+                self.config.project_id,
+                request or {},
+                command_id=command_id,
+                status="failed",
+                error={"code": "internal_error", "message": str(exc)},
+            )
+            response_path = _default_task_command_response_path(paths, command_id)
+        if response is not None and response.get("command_id"):
+            _write_spool_file_atomic(
+                (json.dumps(response, indent=2, sort_keys=True) + "\n").encode(),
+                response_path,
+            )
+        archive_path = archive_dir / processing_path.name
+        shutil.move(str(processing_path), str(archive_path))
+        return {
+            "request": str(processing_path),
+            "archive": str(archive_path),
+            "response": (
+                str(response_path) if response is not None and response.get("command_id") else ""
+            ),
+            "status": response.get("status", "failed") if response else "failed",
+            "duplicate": bool(response.get("duplicate")) if response else False,
+            "command": response.get("command", "") if response else "",
+            "task_id": response.get("task_id", "") if response else "",
+        }
+
+    def _task_command_response_for_request(
+        self,
+        request: dict[str, Any],
+        *,
+        request_digest: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Return the response for a valid task-ingest request."""
+        _validate_task_command_envelope(self.config.project_id, request)
+        idempotency_key = _first_text(request.get("idempotency_key"))
+        pending_response = _task_command_response(
+            self.config.project_id,
+            request,
+            status="pending",
+            error={
+                "code": "command_pending",
+                "message": ("command was accepted but no final response has been recorded yet"),
+            },
+        )
+        try:
+            existing = self.store.begin_task_ingest_idempotency(
+                self.config.project_id,
+                idempotency_key,
+                request_digest=request_digest,
+                response=pending_response,
+                actor=actor,
+            )
+        except ValueError as exc:
+            if "idempotency conflict" in str(exc).lower():
+                raise _TaskCommandRejected(
+                    "idempotency_conflict",
+                    "idempotency key was already used for a different command body",
+                ) from exc
+            raise
+        if existing is not None:
+            duplicate = dict(existing.response)
+            duplicate["command_id"] = _first_text(request.get("command_id"))
+            duplicate["duplicate"] = True
+            return duplicate
+        try:
+            applied_result = self._apply_task_command(request)
+        except _TaskCommandRejected:
+            self.store.discard_task_ingest_idempotency(
+                self.config.project_id,
+                idempotency_key,
+                request_digest=request_digest,
+            )
+            raise
+        except KeyError as exc:
+            self.store.discard_task_ingest_idempotency(
+                self.config.project_id,
+                idempotency_key,
+                request_digest=request_digest,
+            )
+            raise _TaskCommandRejected("invalid_payload", str(exc)) from exc
+        except ValueError as exc:
+            self.store.discard_task_ingest_idempotency(
+                self.config.project_id,
+                idempotency_key,
+                request_digest=request_digest,
+            )
+            raise _TaskCommandRejected(_task_command_error_code(str(exc)), str(exc)) from exc
+        response = _task_command_response(
+            self.config.project_id,
+            request,
+            status="succeeded",
+            result=applied_result,
+        )
+        self.store.finish_task_ingest_idempotency(
+            self.config.project_id,
+            idempotency_key,
+            request_digest=request_digest,
+            response=response,
+            actor=actor,
+        )
+        return response
+
+    def _apply_task_command(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Apply one validated task-ingest command through service methods."""
+        command = _first_text(request.get("command"))
+        actor_id = _task_command_actor_id(request)
+        task_id = _first_text(request.get("task_id"))
+        lease_token = _first_text(request.get("lease_token"))
+        payload = _task_command_payload(request)
+        if command == "claim":
+            claim = self.claim(
+                agent_id=actor_id,
+                task_id=_required_task_command_field(task_id, "task_id"),
+                lease_seconds=_task_command_int(payload, "lease_seconds", default=3600),
+            )
+            return {
+                "lease_token": claim.lease_token,
+                "lease_expires_at": claim.lease_expires_at,
+                "state": "claimed",
+            }
+        if command == "heartbeat":
+            claim = self.heartbeat(
+                _required_task_command_field(task_id, "task_id"),
+                lease_token=_required_task_command_field(lease_token, "lease_token"),
+                lease_seconds=_task_command_int(payload, "lease_seconds", default=3600),
+                agent_id=actor_id,
+            )
+            return {"lease_expires_at": claim.lease_expires_at, "state": "in_progress"}
+        if command == "complete":
+            self.complete(
+                _required_task_command_field(task_id, "task_id"),
+                lease_token=_required_task_command_field(lease_token, "lease_token"),
+                evidence=_task_command_string_list(payload.get("evidence")),
+                agent_id=actor_id,
+                direct_merge=payload.get("direct_merge") is True,
+            )
+            return {"state": "done"}
+        if command == "fail":
+            self.fail(
+                _required_task_command_field(task_id, "task_id"),
+                lease_token=_required_task_command_field(lease_token, "lease_token"),
+                reason=_required_task_command_field(
+                    _first_text(payload.get("reason")),
+                    "payload.reason",
+                ),
+                agent_id=actor_id,
+            )
+            return {"state": "failed"}
+        if command == "submit_review":
+            self.submit_review(
+                _required_task_command_field(task_id, "task_id"),
+                lease_token=_required_task_command_field(lease_token, "lease_token"),
+                evidence=_task_command_string_list(payload.get("evidence")),
+                agent_id=actor_id,
+            )
+            return {"state": "awaiting_review"}
+        if command == "await_integration":
+            status = _first_text(payload.get("status")) or "awaiting_integration"
+            self.await_integration(
+                _required_task_command_field(task_id, "task_id"),
+                lease_token=_required_task_command_field(lease_token, "lease_token"),
+                status=status,
+                evidence=_task_command_string_list(payload.get("evidence")),
+                agent_id=actor_id,
+            )
+            return {"state": status}
+        if command == "resolve_review":
+            status = _first_text(payload.get("status")) or "done"
+            self.resolve_review(
+                _required_task_command_field(task_id, "task_id"),
+                status=status,
+                evidence=_task_command_string_list(payload.get("evidence")),
+                agent_id=actor_id,
+                reason=_first_text(payload.get("reason")),
+                direct_merge=payload.get("direct_merge") is True,
+            )
+            return {"state": status}
+        if command == "resolve_integration":
+            status = _first_text(payload.get("status")) or "done"
+            self.resolve_integration(
+                _required_task_command_field(task_id, "task_id"),
+                status=status,
+                evidence=_task_command_string_list(payload.get("evidence")),
+                agent_id=actor_id,
+                reason=_first_text(payload.get("reason")),
+                direct_merge=payload.get("direct_merge") is True,
+            )
+            return {"state": status}
+        if command == "record_intake":
+            intake = self.record_intake(
+                _required_task_command_field(
+                    _first_text(payload.get("description")) or _first_text(payload.get("text")),
+                    "payload.description",
+                ),
+                kind=_first_text(payload.get("kind")) or "idea",
+                source=_first_text(payload.get("source")),
+                repo=_first_text(payload.get("repo")),
+                tags=_task_command_string_list(payload.get("tags")),
+                metadata=_task_command_dict(payload.get("metadata")),
+                intake_id=_first_text(payload.get("intake_id")),
+                actor=actor_id,
+            )
+            return {"intake_id": intake.intake_id, "status": intake.status}
+        if command == "propose_task":
+            task_payload = _task_command_dict(payload.get("task"))
+            proposal = self.propose_task_from_intake(
+                _required_task_command_field(
+                    _first_text(payload.get("intake_id")),
+                    "payload.intake_id",
+                ),
+                task_id=_required_task_command_field(
+                    _first_text(task_payload.get("id")) or _first_text(task_payload.get("task_id")),
+                    "payload.task.id",
+                ),
+                title=_required_task_command_field(
+                    _first_text(task_payload.get("title")),
+                    "payload.task.title",
+                ),
+                repo=_first_text(task_payload.get("repo")),
+                summary=_first_text(task_payload.get("summary")),
+                next_action=_first_text(task_payload.get("next_action")),
+                write_scopes=_task_command_string_list(
+                    _task_command_dict(task_payload.get("metadata")).get("write_scopes")
+                    or _task_command_dict(task_payload.get("execution")).get("primary_files")
+                ),
+                validation_checks=_task_command_string_list(task_payload.get("validation_checks")),
+                requirements=_task_command_requirements(payload.get("requirements")),
+                metadata=_task_command_dict(task_payload.get("metadata")),
+                proposal_id=_first_text(payload.get("proposal_id")),
+                actor=actor_id,
+            )
+            return {"proposal_id": proposal.proposal_id, "task_id": proposal.task.task_id}
+        if command == "promote_proposal":
+            proposal = self.promote_proposed_task(
+                _required_task_command_field(
+                    _first_text(payload.get("proposal_id")),
+                    "payload.proposal_id",
+                ),
+                actor=actor_id,
+            )
+            return {"proposal_id": proposal.proposal_id, "task_id": proposal.task.task_id}
+        raise _TaskCommandRejected("unknown_command", f"unknown task-ingest command: {command}")
+
     def workspace_payload(self) -> dict[str, Any]:
         """Return configured cross-project workspaces."""
         return {
@@ -2112,6 +2459,262 @@ def _local_spool_paths(
         _spool_path(config, spool.get("done")),
         _spool_path(config, spool.get("error")),
     )
+
+
+@dataclass(frozen=True)
+class _TaskCommandPaths:
+    """Resolved local task-ingest command spool paths."""
+
+    inbox: Path
+    processing: Path
+    done: Path
+    error: Path
+    responses: Path
+
+
+class _TaskCommandRejected(ValueError):
+    """A valid task-ingest request that cannot be applied."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _task_command_paths(config: ProjectConfig) -> _TaskCommandPaths:
+    """Return configured task-ingest command spool paths."""
+    commands = config.raw.get("commands", {})
+    if not isinstance(commands, dict):
+        commands = {}
+    return _TaskCommandPaths(
+        inbox=_command_path(config, commands.get("inbox"), "commands/inbox"),
+        processing=_command_path(config, commands.get("processing"), "commands/processing"),
+        done=_command_path(config, commands.get("done"), "commands/done"),
+        error=_command_path(config, commands.get("error"), "commands/error"),
+        responses=_command_path(config, commands.get("responses"), "commands/responses"),
+    )
+
+
+def _command_path(config: ProjectConfig, value: Any, default: str) -> Path:
+    """Resolve one task-ingest command spool path below state root by default."""
+    text = _first_text(value) or default
+    state_root = config.effective_state_root.resolve(strict=False)
+    path = Path(text).expanduser()
+    resolved = (path if path.is_absolute() else state_root / path).resolve(strict=False)
+    try:
+        resolved.relative_to(state_root)
+    except ValueError as exc:
+        raise ValueError(
+            "task-ingest command paths must resolve below the configured state root"
+        ) from exc
+    return resolved
+
+
+def _task_command_result(paths: _TaskCommandPaths) -> dict[str, Any]:
+    """Return the initial task-ingest processor result payload."""
+    return {
+        "inbox": str(paths.inbox),
+        "processing": str(paths.processing),
+        "done": str(paths.done),
+        "error": str(paths.error),
+        "responses": str(paths.responses),
+        "processed": 0,
+        "succeeded": 0,
+        "rejected": 0,
+        "failed": 0,
+        "duplicates": 0,
+        "skipped": 0,
+        "files": [],
+    }
+
+
+def _task_command_response(
+    project_id: str,
+    request: dict[str, Any],
+    *,
+    command_id: str = "",
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return a task-ingest command response payload."""
+    return {
+        "schema_version": TASK_INGEST_SCHEMA_VERSION,
+        "command_id": _first_text(command_id, request.get("command_id")),
+        "idempotency_key": _first_text(request.get("idempotency_key")),
+        "project_id": project_id,
+        "command": _first_text(request.get("command")),
+        "status": status,
+        "duplicate": False,
+        "actor_id": _task_command_actor_id(request, required=False),
+        "task_id": _first_text(request.get("task_id")),
+        "result": result or {},
+        "error": error,
+        "audit_id": None,
+    }
+
+
+def _validate_task_command_envelope(project_id: str, request: dict[str, Any]) -> None:
+    """Validate common task-ingest request fields."""
+    schema_version = request.get("schema_version")
+    if schema_version != TASK_INGEST_SCHEMA_VERSION:
+        raise _TaskCommandRejected(
+            "unsupported_schema_version",
+            f"schema_version must be {TASK_INGEST_SCHEMA_VERSION}",
+        )
+    if not _first_text(request.get("command_id")):
+        raise _TaskCommandRejected("invalid_payload", "command_id is required")
+    if not _first_text(request.get("idempotency_key")):
+        raise _TaskCommandRejected("invalid_payload", "idempotency_key is required")
+    if _first_text(request.get("project_id")) != project_id:
+        raise _TaskCommandRejected("project_mismatch", "request project_id does not match")
+    if not _first_text(request.get("command")):
+        raise _TaskCommandRejected("unknown_command", "command is required")
+    _task_command_actor_id(request)
+
+
+def _task_command_actor_id(request: dict[str, Any], *, required: bool = True) -> str:
+    """Return a task-ingest actor ID."""
+    actor = request.get("actor", {})
+    actor_id = ""
+    if isinstance(actor, dict):
+        actor_id = _first_text(actor.get("id"))
+    if required and not actor_id:
+        raise _TaskCommandRejected("invalid_payload", "actor.id is required")
+    return actor_id
+
+
+def _task_command_payload(request: dict[str, Any]) -> dict[str, Any]:
+    """Return the command-specific payload object."""
+    payload = request.get("payload", {})
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise _TaskCommandRejected("invalid_payload", "payload must be a JSON object")
+    return payload
+
+
+def _task_command_request_digest(request: dict[str, Any]) -> str:
+    """Return a semantic digest for idempotent command replay."""
+    semantic_request = {
+        key: value for key, value in request.items() if key not in {"command_id", "reply_to"}
+    }
+    data = json.dumps(semantic_request, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _task_command_response_path(
+    config: ProjectConfig,
+    paths: _TaskCommandPaths,
+    request: dict[str, Any],
+    command_id: str,
+) -> Path:
+    """Return the response path for a task-ingest request."""
+    reply_to = _first_text(request.get("reply_to"))
+    if not reply_to:
+        return _default_task_command_response_path(paths, command_id)
+    path = Path(reply_to).expanduser()
+    if not path.is_absolute():
+        path = config.effective_state_root / path
+    state_root = config.effective_state_root.resolve(strict=False)
+    try:
+        path.resolve(strict=False).relative_to(state_root)
+    except ValueError as exc:
+        raise _TaskCommandRejected(
+            "invalid_payload",
+            "reply_to must resolve below the configured state root",
+        ) from exc
+    return path
+
+
+def _default_task_command_response_path(paths: _TaskCommandPaths, command_id: str) -> Path:
+    """Return the default response path for a command ID."""
+    component = _launch_id_component(command_id, fallback="command")
+    return paths.responses / f"{component}.json"
+
+
+def _required_task_command_field(value: str, field_name: str) -> str:
+    """Return a required command field or raise a task-ingest rejection."""
+    cleaned = _first_text(value)
+    if not cleaned:
+        raise _TaskCommandRejected("invalid_payload", f"{field_name} is required")
+    return cleaned
+
+
+def _task_command_int(payload: dict[str, Any], key: str, *, default: int) -> int:
+    """Return a positive integer command payload field."""
+    value = payload.get(key, default)
+    if not isinstance(value, int):
+        raise _TaskCommandRejected("invalid_payload", f"payload.{key} must be an integer")
+    if value <= 0:
+        raise _TaskCommandRejected(
+            "invalid_payload",
+            f"payload.{key} must be greater than zero",
+        )
+    return value
+
+
+def _task_command_string_list(value: Any) -> list[str]:
+    """Return a normalized string list from a command payload value."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _clean_strings([value])
+    if isinstance(value, list):
+        return _clean_strings([str(item) for item in value])
+    raise _TaskCommandRejected("invalid_payload", "expected a string list")
+
+
+def _task_command_dict(value: Any) -> dict[str, Any]:
+    """Return a JSON object from a command payload value."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _TaskCommandRejected("invalid_payload", "expected a JSON object")
+    return value
+
+
+def _task_command_requirements(value: Any) -> list[dict[str, str]]:
+    """Return normalized proposal dependency records from command payload."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _TaskCommandRejected("invalid_payload", "payload.requirements must be a list")
+    requirements: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise _TaskCommandRejected(
+                "invalid_payload",
+                "payload.requirements items must be JSON objects",
+            )
+        dependency = _first_text(item.get("task"), item.get("dependency_task_id"))
+        if dependency:
+            requirements.append(
+                {
+                    "kind": "task",
+                    "task": dependency,
+                    "description": _first_text(item.get("description")),
+                }
+            )
+    return requirements
+
+
+def _task_command_error_code(message: str) -> str:
+    """Map service exceptions to stable task-ingest error codes."""
+    text = message.lower()
+    if "lease token" in text:
+        return "missing_lease_token" if "required" in text else "invalid_lease_owner"
+    if "lease" in text and "expired" in text:
+        return "lease_expired"
+    if "not owned" in text or "different agent" in text:
+        return "invalid_lease_owner"
+    if "no matching ready task" in text or "depends" in text:
+        return "dependency_blocked"
+    if "completion evidence" in text or "evidence" in text:
+        return "completion_evidence_missing"
+    if "unknown task" in text:
+        return "invalid_payload"
+    return "invalid_payload"
 
 
 def _pull_spool_result(

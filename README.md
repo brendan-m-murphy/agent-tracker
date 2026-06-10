@@ -338,6 +338,7 @@ agent-tracker status --json
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `pull-spool` | Copy complete JSON files from `spool.remote_inbox` to the local spool inbox; add `--dry-run` to preview. | `agent-tracker pull-spool --config demo-tracker/project.json --dry-run` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
+| `process-task-ingest` | Process mediated queue-mutation command files from `commands.inbox` and write durable responses. | `agent-tracker process-task-ingest --config demo-tracker/project.json --json` |
 | `list-workspaces` | List configured cross-project worker workspaces. | `agent-tracker list-workspaces --config demo-tracker/project.json` |
 | `launch-worker` | Prepare or run a one-shot local worker in a configured workspace. | `agent-tracker launch-worker --config demo-tracker/project.json --workspace hpc --task-id write-readme` |
 | `record-intervention` | Record durable human intervention state without sending a notification. | `agent-tracker record-intervention --config demo-tracker/project.json --task-id write-readme --reason pr_review_needed "PR review is needed"` |

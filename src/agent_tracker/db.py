@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,18 @@ from agent_tracker.models import (
 
 DB_SCHEMA_VERSION = 1
 DB_SCHEMA_VERSION_KEY = "db_schema_version"
+
+
+@dataclass(frozen=True)
+class TaskIngestIdempotencyRecord:
+    """Stored task-ingest idempotency response."""
+
+    project_id: str
+    idempotency_key: str
+    request_digest: str
+    response: dict[str, Any]
+    created_at: str
+    updated_at: str
 
 
 def utcnow() -> datetime:
@@ -250,6 +262,17 @@ class Store:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (project_id, target_key, channel),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS task_ingest_idempotency (
+                    project_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, idempotency_key),
                     FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
                 );
 
@@ -998,6 +1021,233 @@ class Store:
                     {"event_id": event.event_id, "kind": event.kind},
                 )
             return inserted
+
+    def get_task_ingest_idempotency(
+        self,
+        project_id: str,
+        idempotency_key: str,
+    ) -> TaskIngestIdempotencyRecord | None:
+        """Return a persisted task-ingest idempotency response, if present."""
+        self.init_schema()
+        cleaned_key = _clean_idempotency_key(idempotency_key)
+        with self.transaction(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, cleaned_key),
+            ).fetchone()
+        return None if row is None else _task_ingest_idempotency_from_row(row)
+
+    def record_task_ingest_idempotency(
+        self,
+        project_id: str,
+        idempotency_key: str,
+        *,
+        request_digest: str,
+        response: dict[str, Any],
+    ) -> TaskIngestIdempotencyRecord:
+        """Persist a task-ingest response for idempotent replay."""
+        self.init_schema()
+        cleaned_key = _clean_idempotency_key(idempotency_key)
+        cleaned_digest = _clean_request_digest(request_digest)
+        response_json = dumps(response)
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, cleaned_key),
+            ).fetchone()
+            if row is not None:
+                existing = _task_ingest_idempotency_from_row(row)
+                if existing.request_digest != cleaned_digest:
+                    raise ValueError(
+                        f"idempotency conflict for {cleaned_key}: request digest does not match"
+                    )
+                return existing
+            conn.execute(
+                """
+                INSERT INTO task_ingest_idempotency (
+                    project_id, idempotency_key, request_digest, response_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, cleaned_key, cleaned_digest, response_json, now, now),
+            )
+            inserted = conn.execute(
+                """
+                SELECT *
+                FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, cleaned_key),
+            ).fetchone()
+        if inserted is None:
+            raise RuntimeError(f"failed to persist idempotency key: {cleaned_key}")
+        return _task_ingest_idempotency_from_row(inserted)
+
+    def begin_task_ingest_idempotency(
+        self,
+        project_id: str,
+        idempotency_key: str,
+        *,
+        request_digest: str,
+        response: dict[str, Any],
+        actor: str = "task-ingest",
+    ) -> TaskIngestIdempotencyRecord | None:
+        """Reserve an idempotency key before applying a task-ingest mutation.
+
+        Returns an existing record when the key has already been used. A newly
+        reserved key returns ``None`` so the caller can apply the mutation and
+        then replace the pending response with the final response.
+        """
+        self.init_schema()
+        cleaned_key = _clean_idempotency_key(idempotency_key)
+        cleaned_digest = _clean_request_digest(request_digest)
+        response_json = dumps(response)
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, cleaned_key),
+            ).fetchone()
+            if row is not None:
+                existing = _task_ingest_idempotency_from_row(row)
+                if existing.request_digest != cleaned_digest:
+                    raise ValueError(
+                        f"idempotency conflict for {cleaned_key}: request digest does not match"
+                    )
+                return existing
+            conn.execute(
+                """
+                INSERT INTO task_ingest_idempotency (
+                    project_id, idempotency_key, request_digest, response_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, cleaned_key, cleaned_digest, response_json, now, now),
+            )
+            self._audit(
+                conn,
+                project_id,
+                str(response.get("task_id") or ""),
+                "task_ingest.begin",
+                actor,
+                {
+                    "command_id": response.get("command_id", ""),
+                    "command": response.get("command", ""),
+                    "idempotency_key": cleaned_key,
+                    "request_digest": cleaned_digest,
+                },
+            )
+        return None
+
+    def finish_task_ingest_idempotency(
+        self,
+        project_id: str,
+        idempotency_key: str,
+        *,
+        request_digest: str,
+        response: dict[str, Any],
+        actor: str = "task-ingest",
+    ) -> TaskIngestIdempotencyRecord:
+        """Replace a pending task-ingest idempotency response after success."""
+        self.init_schema()
+        cleaned_key = _clean_idempotency_key(idempotency_key)
+        cleaned_digest = _clean_request_digest(request_digest)
+        response_json = dumps(response)
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, cleaned_key),
+            ).fetchone()
+            if row is not None:
+                existing = _task_ingest_idempotency_from_row(row)
+                if existing.request_digest != cleaned_digest:
+                    raise ValueError(
+                        f"idempotency conflict for {cleaned_key}: request digest does not match"
+                    )
+                conn.execute(
+                    """
+                    UPDATE task_ingest_idempotency
+                    SET response_json = ?, updated_at = ?
+                    WHERE project_id = ? AND idempotency_key = ?
+                    """,
+                    (response_json, now, project_id, cleaned_key),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO task_ingest_idempotency (
+                        project_id, idempotency_key, request_digest, response_json,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (project_id, cleaned_key, cleaned_digest, response_json, now, now),
+                )
+            self._audit(
+                conn,
+                project_id,
+                str(response.get("task_id") or ""),
+                "task_ingest.finish",
+                actor,
+                {
+                    "command_id": response.get("command_id", ""),
+                    "command": response.get("command", ""),
+                    "idempotency_key": cleaned_key,
+                    "request_digest": cleaned_digest,
+                    "status": response.get("status", ""),
+                },
+            )
+            updated = conn.execute(
+                """
+                SELECT *
+                FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ?
+                """,
+                (project_id, cleaned_key),
+            ).fetchone()
+        if updated is None:
+            raise RuntimeError(f"failed to persist idempotency key: {cleaned_key}")
+        return _task_ingest_idempotency_from_row(updated)
+
+    def discard_task_ingest_idempotency(
+        self,
+        project_id: str,
+        idempotency_key: str,
+        *,
+        request_digest: str,
+    ) -> None:
+        """Remove a pending task-ingest reservation after a rejected mutation."""
+        self.init_schema()
+        cleaned_key = _clean_idempotency_key(idempotency_key)
+        cleaned_digest = _clean_request_digest(request_digest)
+        with self.transaction(immediate=True) as conn:
+            conn.execute(
+                """
+                DELETE FROM task_ingest_idempotency
+                WHERE project_id = ? AND idempotency_key = ? AND request_digest = ?
+                """,
+                (project_id, cleaned_key, cleaned_digest),
+            )
 
     def record_intake(
         self,
@@ -2643,6 +2893,22 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _clean_idempotency_key(idempotency_key: str) -> str:
+    """Return a validated idempotency key."""
+    cleaned = str(idempotency_key).strip()
+    if not cleaned:
+        raise ValueError("idempotency key is required")
+    return cleaned
+
+
+def _clean_request_digest(request_digest: str) -> str:
+    """Return a validated request digest."""
+    cleaned = str(request_digest).strip()
+    if not cleaned:
+        raise ValueError("request digest is required")
+    return cleaned
+
+
 def _intake_exists(conn: sqlite3.Connection, project_id: str, intake_id: str) -> bool:
     """Return whether an intake record exists."""
     if not _table_exists(conn, "intake"):
@@ -2661,6 +2927,21 @@ def _task_exists(conn: sqlite3.Connection, project_id: str, task_id: str) -> boo
         (project_id, task_id),
     ).fetchone()
     return row is not None
+
+
+def _task_ingest_idempotency_from_row(row: sqlite3.Row) -> TaskIngestIdempotencyRecord:
+    """Convert a SQLite row to a task-ingest idempotency record."""
+    response = loads(str(row["response_json"]), {})
+    if not isinstance(response, dict):
+        response = {}
+    return TaskIngestIdempotencyRecord(
+        project_id=str(row["project_id"]),
+        idempotency_key=str(row["idempotency_key"]),
+        request_digest=str(row["request_digest"]),
+        response=response,
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
 
 
 def _intake_from_row(row: sqlite3.Row) -> IntakeRecord:

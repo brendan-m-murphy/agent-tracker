@@ -43,6 +43,7 @@ _TEXT_FIELDS = {
 }
 _SPOOL_PATH_FIELDS = {"inbox", "done", "error", "remote_inbox"}
 _SPOOL_SSH_TEXT_FIELDS = {"username", "password", "known_hosts"}
+_COMMAND_PATH_FIELDS = {"inbox", "processing", "done", "error", "responses"}
 _WORKSPACE_TEXT_FIELDS = {
     "kind",
     "path",
@@ -159,6 +160,7 @@ def load_config(path: str | Path) -> ProjectConfig:
     config_schema_version = _config_schema_version(data)
     _validate_text_fields(data)
     _validate_spool(data)
+    _validate_commands(data)
     _validate_workspaces(data)
     _validate_notifications(data)
     coordination_policy = _coordination_policy(data)
@@ -268,6 +270,20 @@ def _validate_spool(data: dict[str, Any]) -> None:
                 raise ValueError(
                     "config field 'spool.ssh.client_keys' must be a string or list of strings"
                 )
+
+
+def _validate_commands(data: dict[str, Any]) -> None:
+    """Validate the optional task-ingest command spool config block."""
+    if "commands" not in data or data["commands"] is None:
+        return
+    commands = data["commands"]
+    if not isinstance(commands, dict):
+        raise ValueError("config field 'commands' must be an object")
+    for key in _COMMAND_PATH_FIELDS:
+        if key not in commands or commands[key] is None:
+            continue
+        if not isinstance(commands[key], str):
+            raise ValueError(f"config field 'commands.{key}' must be a string")
 
 
 def _validate_workspaces(data: dict[str, Any]) -> None:

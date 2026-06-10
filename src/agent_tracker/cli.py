@@ -534,6 +534,17 @@ def command_pull_spool(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_process_task_ingest(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    result = coord.process_task_ingest_commands(actor=args.actor, limit=args.limit)
+    if args.json:
+        print_json(result)
+        return 0
+    human_renderer().task_ingest(result)
+    return 0
+
+
 def command_list_workspaces(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     payload = coord.workspace_payload()
@@ -1833,6 +1844,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(pull_spool)
     pull_spool.add_argument("--dry-run", action="store_true")
     pull_spool.set_defaults(func=command_pull_spool)
+
+    process_task_ingest = sub.add_parser(
+        "process-task-ingest",
+        help="Process task-ingest command request files.",
+    )
+    add_common(process_task_ingest)
+    process_task_ingest.add_argument("--actor", default="task-ingest")
+    process_task_ingest.add_argument("--limit", type=int, default=0)
+    process_task_ingest.add_argument("--json", action="store_true")
+    process_task_ingest.set_defaults(func=command_process_task_ingest)
 
     list_workspaces = sub.add_parser(
         "list-workspaces",

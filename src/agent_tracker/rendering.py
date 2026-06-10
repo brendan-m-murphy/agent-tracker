@@ -693,6 +693,29 @@ class HumanOutputRenderer:
             if workspace.get("capabilities"):
                 self.field("capabilities", ", ".join(workspace["capabilities"]))
 
+    def task_ingest(self, result: dict[str, Any]) -> None:
+        """Render task-ingest command processor results."""
+        self.section("Task ingest")
+        self.kv_table(
+            [
+                ("processed", result.get("processed", 0)),
+                ("succeeded", result.get("succeeded", 0)),
+                ("rejected", result.get("rejected", 0)),
+                ("failed", result.get("failed", 0)),
+                ("duplicates", result.get("duplicates", 0)),
+                ("skipped", result.get("skipped", 0)),
+            ],
+            label_width=10,
+        )
+        for item in result.get("files", []):
+            status = item.get("status") or item.get("action", "")
+            request = item.get("request", "")
+            self.line(f"- {status}: {request}", initial_indent="  ", subsequent_indent="    ")
+            if item.get("response"):
+                self.field("response", item["response"], indent=4)
+            if item.get("archive"):
+                self.field("archive", item["archive"], indent=4)
+
     def worker_launch(self, result: dict[str, Any]) -> None:
         """Render a worker launch summary."""
         self.section(f"Worker launch {result['launch_id']}")
