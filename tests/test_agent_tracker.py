@@ -1893,6 +1893,31 @@ def test_launch_worker_rejects_canonical_config_workspace_for_task(
         coord.launch_worker("canonical", task_id="ready", agent_id="agent-1")
 
 
+def test_launch_worker_rejects_canonical_assigned_worktree_before_claim(
+    tmp_path: Path,
+) -> None:
+    """Explicit worker assignments cannot point back at the canonical checkout."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="assigned worktree must not contain"):
+        coord.launch_worker(
+            "hpc",
+            task_id="ready",
+            agent_id="agent-1",
+            claim_task=True,
+            worktree_path=str(config_path.parent),
+        )
+
+    state = coord.get_task("ready")
+    assert state.task.status == "pending"
+    assert state.lease_token == ""
+    assert state.lease_agent_id == ""
+    assert not (workspace / "results" / "worker-launches").exists()
+
+
 def test_launch_worker_dry_run_rejects_claim_without_mutation(tmp_path: Path) -> None:
     """Dry-run worker launches cannot claim tasks as a side effect."""
     workspace = tmp_path / "hpc-ci-project-tracker"
@@ -3955,7 +3980,14 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     status = tools.status()
     alias_status = tools.get_project_status()
     overview = tools.overview(limit=1)
-    worker_prompt = tools.launch_worker_prompt("ready", agent_id="agent-1")
+    assigned_worktree = tmp_path / "worktrees" / "ready"
+    worker_prompt = tools.launch_worker_prompt(
+        "ready",
+        agent_id="agent-1",
+        branch="codex/ready-explicit",
+        base_ref="origin/main",
+        worktree_path=str(assigned_worktree),
+    )
     launch_worker = tools.launch_worker("ready", agent_id="agent-1")
 
     claim_keys = {"project_id", "task_id", "lease_token", "lease_expires_at", "agent_id"}
@@ -4000,12 +4032,18 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     assert worker_prompt["launch_mode"] == "prompt_only"
     assert worker_prompt["launched"] is False
     assert worker_prompt["coordination_policy"] == DEFAULT_COORDINATION_POLICY
-    assert worker_prompt["coordination"]["assignment"]["branch"] == "codex/ready"
+    assert worker_prompt["coordination"]["assignment"] == {
+        "branch": "codex/ready-explicit",
+        "base_ref": "origin/main",
+        "worktree_path": str(assigned_worktree),
+    }
     assert launch_worker["launch_mode"] == "prompt_only"
     assert launch_worker["launched"] is False
+    assert launch_worker["coordination"]["assignment"]["branch"] == "codex/ready"
     assert worker_prompt["task"]["id"] == "ready"
     assert "# Ready" in worker_prompt["prompt"]
     assert "## Coordination Context" in worker_prompt["prompt"]
+    assert f"Assigned worktree: `{assigned_worktree}`" in worker_prompt["prompt"]
     assert set(claim) == claim_keys
     assert set(alias_claim) == claim_keys
     assert set(heartbeat) == claim_keys

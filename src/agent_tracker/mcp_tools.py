@@ -263,6 +263,9 @@ class AgentTrackerTools:
         task_id: str,
         agent_id: str = "",
         markdown: bool = True,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
     ) -> WorkerPromptPayload:
         """Return task context and prompt for an external worker host.
 
@@ -271,8 +274,19 @@ class AgentTrackerTools:
         their own execution adapter while the tracker remains the queue authority.
         """
         task = self.get_task_context(task_id)
-        coordination = self.coordinator.worker_coordination_context(task_id=task_id)
-        prompt = self.coordinator.render_worker_prompt(task_id, markdown=markdown)
+        coordination = self.coordinator.worker_coordination_context(
+            task_id=task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
+        prompt = self.coordinator.render_worker_prompt(
+            task_id,
+            markdown=markdown,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
         return {
             "project_id": self.coordinator.config.project_id,
             "task_id": task_id,
@@ -290,12 +304,18 @@ class AgentTrackerTools:
         task_id: str,
         agent_id: str = "",
         markdown: bool = True,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
     ) -> WorkerPromptPayload:
         """Return the prompt-only worker payload for launch-worker tool hosts."""
         return self.launch_worker_prompt(
             task_id=task_id,
             agent_id=agent_id,
             markdown=markdown,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
         )
 
     def heartbeat_task(

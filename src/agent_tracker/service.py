@@ -847,6 +847,14 @@ class Coordinator:
                 "launch-worker task workspaces must not contain the canonical tracker "
                 "config; use an isolated task worktree or explicit non-canonical workspace"
             )
+        coordination = _worker_coordination_context(
+            self.config,
+            workspace=workspace,
+            task_id=cleaned_task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
 
         launch_id = (
             f"{_launch_id_component(self.config.project_id, fallback='project')}-"
@@ -870,14 +878,6 @@ class Coordinator:
             prompt = prompt_text.strip()
         if not prompt:
             raise ValueError("prompt text or task_id is required")
-        coordination = _worker_coordination_context(
-            self.config,
-            workspace=workspace,
-            task_id=cleaned_task_id,
-            branch=branch,
-            base_ref=base_ref,
-            worktree_path=worktree_path,
-        )
         prompt = _append_worker_coordination_prompt(prompt, coordination)
 
         launch_dir = workspace.artifacts_path / launch_id
@@ -980,14 +980,40 @@ class Coordinator:
             renderer = DefaultPromptRenderer()
         return renderer.render_prompt(self.config, state, markdown=markdown)
 
-    def worker_coordination_context(self, *, task_id: str = "") -> dict[str, Any]:
+    def worker_coordination_context(
+        self,
+        *,
+        task_id: str = "",
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
+    ) -> dict[str, Any]:
         """Return default worker coordination policy context for a task."""
-        return _worker_coordination_context(self.config, task_id=task_id)
+        return _worker_coordination_context(
+            self.config,
+            task_id=task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
 
-    def render_worker_prompt(self, task_id: str, *, markdown: bool = False) -> str:
+    def render_worker_prompt(
+        self,
+        task_id: str,
+        *,
+        markdown: bool = False,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
+    ) -> str:
         """Render a task prompt with worker coordination context appended."""
         prompt = self.render_prompt(task_id, markdown=markdown)
-        coordination = self.worker_coordination_context(task_id=task_id)
+        coordination = self.worker_coordination_context(
+            task_id=task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
         return _append_worker_coordination_prompt(prompt, coordination)
 
     def export(self) -> list[str]:
@@ -1413,10 +1439,23 @@ def _worker_coordination_context(
 ) -> dict[str, Any]:
     """Return worker launch context for task worktree and PR policy."""
     cleaned_task_id = _first_text(task_id)
+    assigned_worktree = _first_text(worktree_path)
+    if (
+        cleaned_task_id
+        and assigned_worktree
+        and _workspace_contains_config(
+            Path(assigned_worktree).expanduser(),
+            config,
+        )
+    ):
+        raise ValueError(
+            "launch-worker assigned worktree must not contain the canonical tracker "
+            "config; use an isolated task worktree or explicit non-canonical workspace"
+        )
     assignment: dict[str, str] = {
         "branch": _first_text(branch) or (f"codex/{cleaned_task_id}" if cleaned_task_id else ""),
         "base_ref": _first_text(base_ref) or ("main" if cleaned_task_id else ""),
-        "worktree_path": _first_text(worktree_path)
+        "worktree_path": assigned_worktree
         or (str(workspace.path) if workspace is not None else ""),
     }
     return {
@@ -1459,9 +1498,14 @@ def _append_worker_coordination_prompt(prompt: str, coordination: dict[str, Any]
 
 def _workspace_contains_config(workspace_path: Path, config: ProjectConfig) -> bool:
     """Return true when a workspace contains the canonical/effective config file."""
-    config_path = config.canonical_config_path or config.effective_config_path
+    config_path = (config.canonical_config_path or config.effective_config_path).resolve(
+        strict=False
+    )
+    workspace = workspace_path.resolve(strict=False)
+    if config_path == workspace:
+        return True
     try:
-        config_path.resolve().relative_to(workspace_path.resolve())
+        config_path.relative_to(workspace)
     except ValueError:
         return False
     return True
