@@ -15,8 +15,15 @@ from agent_tracker.config import ProjectConfig
 from agent_tracker.models import TaskState
 
 HUMAN_OUTPUT_WIDTH = 80
-OVERVIEW_ID_WIDTH = 32
+OVERVIEW_ID_INDENT = 2
+OVERVIEW_TITLE_INDENT = 4
+OVERVIEW_DETAIL_INDENT = 6
 OVERVIEW_DETAIL_LIMIT = 2
+OVERVIEW_HEADING_STYLE = "bold green"
+OVERVIEW_TASK_ID_STYLE = "cyan"
+OVERVIEW_TITLE_STYLE = "bold"
+OVERVIEW_LABEL_STYLE = "bold blue"
+OVERVIEW_DETAIL_STYLE = "dim"
 OVERVIEW_GROUPS = (
     ("ready", "Ready"),
     ("active", "Active"),
@@ -43,6 +50,7 @@ class HumanOutputRenderer:
         initial_indent: str = "",
         subsequent_indent: str = "",
         break_long_words: bool = False,
+        style: str | None = None,
     ) -> None:
         """Print a wrapped human-oriented line with stable indentation."""
         self._console.print(
@@ -54,7 +62,8 @@ class HumanOutputRenderer:
                     subsequent_indent=subsequent_indent or initial_indent,
                     break_long_words=break_long_words,
                     break_on_hyphens=False,
-                )
+                ),
+                style=style,
             )
         )
 
@@ -109,17 +118,26 @@ class HumanOutputRenderer:
         """Render a grouped project overview."""
         self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
         for key, heading in OVERVIEW_GROUPS:
+            self._console.print()
             items = payload["groups"][key]
             total = payload["counts"][key]
-            self._console.print(Text(f"{heading} ({total})", style="bold"))
+            self._console.print(Text(f"{heading} ({total})", style=OVERVIEW_HEADING_STYLE))
             if not items:
-                self._console.print(Text("  (none)"))
+                self._console.print(Text("  (none)", style=OVERVIEW_DETAIL_STYLE))
                 continue
-            for item in items:
+            for index, item in enumerate(items):
+                if index:
+                    self._console.print()
                 self.overview_item(key, item)
             if len(items) < total:
                 hidden_count = total - len(items)
-                self._console.print(Text(f"  ... {hidden_count} more; use --limit 0 to show all"))
+                self._console.print()
+                self._console.print(
+                    Text(
+                        f"  ... {hidden_count} more; use --limit 0 to show all",
+                        style=OVERVIEW_DETAIL_STYLE,
+                    )
+                )
 
     def overview_item(self, group: str, item: dict[str, Any]) -> None:
         """Render one overview item."""
@@ -128,15 +146,25 @@ class HumanOutputRenderer:
             qualifiers.append(str(item["state"]))
         if item.get("lease_agent_id"):
             qualifiers.append(f"agent {self._truncate(item['lease_agent_id'], 24)}")
-        qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
-        task_id = self._truncate(str(item["id"]), OVERVIEW_ID_WIDTH)
-        prefix = f"  {task_id:<{OVERVIEW_ID_WIDTH}}  "
+        id_width = max(1, self._width - OVERVIEW_ID_INDENT)
+        task_id = self._truncate(str(item["id"]), id_width)
+        id_indent = " " * OVERVIEW_ID_INDENT
+        title_indent = " " * OVERVIEW_TITLE_INDENT
         self.line(
-            self._compact_text(f"{item['title']}{qualifier}"),
-            initial_indent=prefix,
-            subsequent_indent=" " * len(prefix),
-            break_long_words=True,
+            task_id,
+            initial_indent=id_indent,
+            subsequent_indent=id_indent,
+            style=OVERVIEW_TASK_ID_STYLE,
         )
+        self.line(
+            self._compact_text(item["title"]),
+            initial_indent=title_indent,
+            subsequent_indent=title_indent,
+            break_long_words=True,
+            style=OVERVIEW_TITLE_STYLE,
+        )
+        if qualifiers:
+            self._overview_detail_line("state", "; ".join(qualifiers))
 
         detail_widths = {
             "blocker": self._detail_width("blocker"),
@@ -145,13 +173,7 @@ class HumanOutputRenderer:
             "completed": self._detail_width("completed"),
         }
         for label, value in self._overview_details(group, item, detail_widths):
-            prefix = f"    {label}: "
-            width = max(1, self._width - len(prefix))
-            self.line(
-                self._truncate(value, width),
-                initial_indent=prefix,
-                subsequent_indent=" " * len(prefix),
-            )
+            self._overview_detail_line(label, value)
 
     def _overview_details(
         self,
@@ -215,7 +237,15 @@ class HumanOutputRenderer:
 
     def _detail_width(self, label: str) -> int:
         """Return available display width for one overview detail value."""
-        return max(1, self._width - len(f"    {label}: "))
+        return max(1, self._width - len(f"{' ' * OVERVIEW_DETAIL_INDENT}{label}: "))
+
+    def _overview_detail_line(self, label: str, value: object) -> None:
+        """Render one compact overview detail with a styled label."""
+        prefix = f"{' ' * OVERVIEW_DETAIL_INDENT}{label}: "
+        width = max(1, self._width - len(prefix))
+        line = Text(prefix, style=OVERVIEW_LABEL_STYLE)
+        line.append(self._truncate(value, width), style=OVERVIEW_DETAIL_STYLE)
+        self._console.print(line)
 
     def next_tasks(self, states: list[TaskState]) -> None:
         """Render ready task summaries."""

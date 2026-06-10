@@ -795,30 +795,34 @@ def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
     assert "Toy Project (toy)" in output
     assert (
         "Ready (1)\n"
-        "  other-ready                       Other Ready\n"
-        "    next: Pick up the remaining ready task." in output
+        "  other-ready\n"
+        "    Other Ready\n"
+        "      next: Pick up the remaining ready task." in output
     )
-    assert (
-        "Active (1)\n  ready                             Ready [claimed; agent agent-1]" in output
-    )
+    assert "Active (1)\n  ready\n    Ready\n      state: claimed; agent agent-1" in output
     assert (
         "Review (1)\n"
-        "  review-task                       Review Task [awaiting_review]\n"
-        "    evidence: pr:review-task" in output
+        "  review-task\n"
+        "    Review Task\n"
+        "      state: awaiting_review\n"
+        "      evidence: pr:review-task" in output
     )
     assert (
         "Integration (1)\n"
-        "  integration-task                  Integration Task [awaiting_merge]\n"
-        "    evidence: git:integration-task"
+        "  integration-task\n"
+        "    Integration Task\n"
+        "      state: awaiting_merge\n"
+        "      evidence: git:integration-task"
     ) in output
     assert (
         "Blocked (1)\n"
-        "  blocked                           Blocked\n"
-        "    blocker: Depends on ready (ready: claimed)" in output
+        "  blocked\n"
+        "    Blocked\n"
+        "      blocker: Depends on ready (ready: claimed)" in output
     )
-    assert "Recently completed (2)\n  done-b                            Done B\n" in output
-    assert "    evidence: git:done-b" in output
-    assert "    completed: " not in output
+    assert "Recently completed (2)\n  done-b\n    Done B\n" in output
+    assert "      evidence: git:done-b" in output
+    assert "      completed: " not in output
     assert "foundation: Foundation" not in output
     assert "  - other-ready" not in output
 
@@ -842,7 +846,7 @@ def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
 
     assert "Toy Project (toy)" in overview_output
     assert "Ready (1)" in overview_output
-    assert "  other-ready                       Other Ready" in item_output
+    assert "  other-ready\n    Other Ready" in item_output
     assert "... 1 more; use --limit 0 to show all" in overview_output
     assert_no_box_drawing(overview_output)
     assert_no_box_drawing(item_output)
@@ -890,13 +894,13 @@ def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) 
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    assert any(line.startswith("    next: Coordinate the implementation") for line in lines)
-    assert any(line.startswith("    next: ") and line.endswith("...") for line in lines)
+    assert any(line.startswith("      next: Coordinate the implementation") for line in lines)
+    assert any(line.startswith("      next: ") and line.endswith("...") for line in lines)
     assert any(
-        line.startswith("    blocker: ") and line.endswith("... (+1 more)") for line in lines
+        line.startswith("      blocker: ") and line.endswith("... (+1 more)") for line in lines
     )
     assert not any(
-        line.startswith("          details before asking another worker") for line in lines
+        line.startswith("            details before asking another worker") for line in lines
     )
 
     stdout = StringIO()
@@ -939,11 +943,12 @@ def test_cli_overview_human_output_distinguishes_wrapped_titles(
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
     assert any(
-        line.startswith(" " * 36 + "with title continuation that should not look") for line in lines
+        line.startswith(" " * 4) and "should not look like a field" in line for line in lines
     )
-    assert any(line.startswith(" " * 36 + "like a field") for line in lines)
-    assert not any(line.startswith("    with title continuation") for line in lines)
-    assert any(line.startswith("    next: Keep detail fields") for line in lines)
+    assert not any(
+        line.startswith(" " * 6) and "should not look like a field" in line for line in lines
+    )
+    assert any(line.startswith("      next: Keep detail fields") for line in lines)
 
 
 def test_cli_overview_human_output_wraps_unbroken_titles_under_title_column(
@@ -969,8 +974,8 @@ def test_cli_overview_human_output_wraps_unbroken_titles_under_title_column(
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
     assert title_lines
-    assert title_lines[0].startswith("  ready                             ")
-    assert any(line.startswith(" " * 36 + "x") for line in title_lines[1:])
+    assert title_lines[0].startswith(" " * 4 + "x")
+    assert any(line.startswith(" " * 4 + "x") for line in title_lines[1:])
     assert not any(line.startswith("x") for line in title_lines)
 
 
