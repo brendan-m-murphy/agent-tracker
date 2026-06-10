@@ -176,6 +176,20 @@ Environment defaults do not bypass this authority model. A config path from
 `--config`, and mutating commands still refuse copied configs or database
 overrides when `canonical_config_path` is set.
 
+Sandbox and cache settings do not change state authority either. In Codex or
+other managed runners, `uv run` may need approval to read or populate its cache
+under the user's home directory. Prefer direct virtualenv commands such as
+`.venv/bin/agent-tracker status --config tracking/project.json` for read-only
+inspection after the environment has already been synced. A writable uv cache,
+for example `uv --cache-dir /tmp/agent-tracker-uv-cache run ...`, can reduce
+cache-path friction in some runners, but it does not grant permission to write a
+canonical SQLite database or Git metadata outside the worktree.
+
+Do not use `AGENT_TRACKER_DB` or a copied config to redirect mutating commands
+to a sandbox-local database unless you are deliberately inspecting or testing a
+separate throwaway project. Production coordination should keep leases,
+evidence, and audit rows in the configured canonical database.
+
 Absolute paths and `~` are also supported:
 
 ```json

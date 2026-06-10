@@ -1041,6 +1041,22 @@ class Store:
                 raise ValueError(f"unknown intake record: {proposal.intake_id}")
             if _task_exists(conn, project_id, proposal.task.task_id):
                 raise ValueError(f"task already exists: {proposal.task.task_id}")
+            existing_proposal = conn.execute(
+                """
+                SELECT proposal_id, status
+                FROM proposed_tasks
+                WHERE project_id = ? AND task_id = ?
+                """,
+                (project_id, proposal.task.task_id),
+            ).fetchone()
+            if existing_proposal is not None:
+                status = str(existing_proposal["status"])
+                if status == "rejected":
+                    raise ValueError(
+                        "proposal task id conflicts with an existing rejected proposal: "
+                        f"{proposal.task.task_id}"
+                    )
+                raise ValueError(f"proposal task id already exists: {proposal.task.task_id}")
             if proposal.status not in PROPOSAL_STATES:
                 raise ValueError(f"invalid proposal status: {proposal.status}")
             contract = proposed_task_to_dict(proposal)
@@ -1125,6 +1141,118 @@ class Store:
                 return []
             rows = list(conn.execute(sql, values))
         return [_proposed_task_from_row(row) for row in rows]
+
+    def proposed_task_record(
+        self,
+        project_id: str,
+        proposal_id: str,
+    ) -> ProposedTaskRecord | None:
+        """Return one proposed task record, if present."""
+        with self.transaction(read_only=True) as conn:
+            if not _table_exists(conn, "proposed_tasks"):
+                return None
+            row = conn.execute(
+                """
+                SELECT *
+                FROM proposed_tasks
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (project_id, proposal_id),
+            ).fetchone()
+        return _proposed_task_from_row(row) if row is not None else None
+
+    def update_proposed_task(
+        self,
+        project_id: str,
+        proposal_id: str,
+        proposal: ProposedTaskRecord,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Update a proposed task contract before promotion."""
+        self.init_schema()
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM proposed_tasks
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (project_id, proposal_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown proposed task: {proposal_id}")
+            current = _proposed_task_from_row(row)
+            if current.status != "proposed":
+                raise ValueError(
+                    f"cannot update proposal {proposal_id} from status {current.status}"
+                )
+            task = proposal.task
+            if proposal.status not in PROPOSAL_STATES:
+                raise ValueError(f"invalid proposal status: {proposal.status}")
+            if not task.task_id:
+                raise ValueError("proposed task id is required")
+            if not task.title:
+                raise ValueError("proposed task title is required")
+            if _task_exists(conn, project_id, task.task_id):
+                raise ValueError(f"task already exists: {task.task_id}")
+            proposal_row = conn.execute(
+                """
+                SELECT proposal_id, status
+                FROM proposed_tasks
+                WHERE project_id = ?
+                  AND task_id = ?
+                  AND proposal_id != ?
+                """,
+                (project_id, task.task_id, proposal_id),
+            ).fetchone()
+            if proposal_row is not None:
+                status = str(proposal_row["status"])
+                if status in {"proposed", "promoted"}:
+                    raise ValueError(f"proposal task id already exists: {task.task_id}")
+                raise ValueError(
+                    f"proposal task id conflicts with an existing rejected proposal: {task.task_id}"
+                )
+            updated = replace(
+                proposal,
+                proposal_id=proposal_id,
+                intake_id=current.intake_id,
+                status="proposed",
+                created_at=current.created_at,
+                updated_at=now,
+            )
+            changes = _proposal_contract_changes(current, updated)
+            conn.execute(
+                """
+                UPDATE proposed_tasks
+                SET task_id = ?, status = 'proposed', contract_json = ?, updated_at = ?
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (
+                    updated.task.task_id,
+                    dumps(proposed_task_to_dict(updated)),
+                    now,
+                    project_id,
+                    proposal_id,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                updated.task.task_id,
+                "proposal.update",
+                actor,
+                {
+                    "proposal_id": proposal_id,
+                    "intake_id": current.intake_id,
+                    "previous_task_id": current.task.task_id,
+                    "task_id": updated.task.task_id,
+                    "changed_fields": list(changes),
+                    "changes": changes,
+                },
+            )
+        return updated
 
     def promote_proposed_task(
         self,
@@ -1261,6 +1389,51 @@ class Store:
                 {"proposal_id": proposal_id, "intake_id": proposal.intake_id},
             )
         return replace(proposal, task=task, status="promoted", updated_at=now)
+
+    def withdraw_proposed_task(
+        self,
+        project_id: str,
+        proposal_id: str,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Withdraw a proposed task contract before promotion."""
+        self.init_schema()
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM proposed_tasks
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (project_id, proposal_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown proposed task: {proposal_id}")
+            proposal = _proposed_task_from_row(row)
+            if proposal.status != "proposed":
+                raise ValueError(
+                    f"cannot withdraw proposal {proposal_id} from status {proposal.status}"
+                )
+            withdrawn = replace(proposal, status="rejected", updated_at=now)
+            conn.execute(
+                """
+                UPDATE proposed_tasks
+                SET status = 'rejected', contract_json = ?, updated_at = ?
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (dumps(proposed_task_to_dict(withdrawn)), now, project_id, proposal_id),
+            )
+            self._audit(
+                conn,
+                project_id,
+                proposal.task.task_id,
+                "proposal.withdraw",
+                actor,
+                {"proposal_id": proposal_id, "intake_id": proposal.intake_id},
+            )
+        return withdrawn
 
     def record_evidence(
         self,
@@ -1734,6 +1907,35 @@ def _should_preserve_lease(row: sqlite3.Row | None, imported_status: str) -> boo
     if imported_status not in ACTIVE_STATES and imported_status != "pending":
         return False
     return str(row["status"]) in ACTIVE_STATES and bool(str(row["lease_token"]))
+
+
+def _proposal_contract_changes(
+    previous: ProposedTaskRecord,
+    updated: ProposedTaskRecord,
+) -> dict[str, dict[str, Any]]:
+    """Return field-level changes between two proposed task contracts."""
+    previous_task = previous.task
+    updated_task = updated.task
+    candidates: list[tuple[str, Any, Any]] = [
+        ("task.id", previous_task.task_id, updated_task.task_id),
+        ("task.title", previous_task.title, updated_task.title),
+        ("task.repo", previous_task.repo, updated_task.repo),
+        ("task.summary", previous_task.summary, updated_task.summary),
+        ("task.next_action", previous_task.next_action, updated_task.next_action),
+        ("task.execution", previous_task.execution, updated_task.execution),
+        (
+            "task.validation_checks",
+            previous_task.validation_checks,
+            updated_task.validation_checks,
+        ),
+        ("task.metadata", previous_task.metadata, updated_task.metadata),
+        ("requirements", previous.requirements, updated.requirements),
+    ]
+    return {
+        name: {"previous": before, "updated": after}
+        for name, before, after in candidates
+        if before != after
+    }
 
 
 def _row_has_stale_lease(row: sqlite3.Row, *, now: datetime) -> bool:

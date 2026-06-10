@@ -667,6 +667,41 @@ def command_promote_proposal(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_update_proposal(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    metadata = (
+        parse_json_object(args.metadata_json, "metadata-json")
+        if args.metadata_json is not None
+        else None
+    )
+    proposal = coord.update_proposed_task(
+        args.proposal_id,
+        task_id=args.task_id,
+        title=args.title,
+        repo=args.repo,
+        summary=args.summary,
+        next_action=args.next_action,
+        role=args.role,
+        write_scopes=args.write_scope,
+        validation_checks=args.validation_check,
+        requirements=parse_dependencies(args.dependency),
+        authority=args.authority,
+        metadata=metadata,
+        actor=args.actor,
+    )
+    print_json(proposed_task_to_dict(proposal))
+    return 0
+
+
+def command_withdraw_proposal(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    proposal = coord.withdraw_proposed_task(args.proposal_id, actor=args.actor)
+    print_json(proposed_task_to_dict(proposal))
+    return 0
+
+
 def command_list_proposals(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     payload = coord.proposed_tasks_payload(
@@ -732,6 +767,15 @@ def parse_dependency(value: str) -> dict[str, str]:
         "task": task_id,
         "description": description.strip() if separator else "",
     }
+
+
+def parse_dependencies(values: list[str] | None) -> list[dict[str, str]] | None:
+    """Parse optional proposed task dependency arguments."""
+    if values is None:
+        return None
+    if not any(value.strip() for value in values):
+        return []
+    return [parse_dependency(value) for value in values]
 
 
 def add_record_intake_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1160,6 +1204,35 @@ def build_parser() -> argparse.ArgumentParser:
     promote_proposal.add_argument("proposal_id")
     promote_proposal.add_argument("--actor", default="system")
     promote_proposal.set_defaults(func=command_promote_proposal)
+
+    update_proposal = sub.add_parser(
+        "update-proposal",
+        help="Update a proposed task contract before promotion.",
+    )
+    add_common(update_proposal)
+    update_proposal.add_argument("proposal_id")
+    update_proposal.add_argument("--task-id", default=None)
+    update_proposal.add_argument("--title", default=None)
+    update_proposal.add_argument("--repo", default=None)
+    update_proposal.add_argument("--summary", default=None)
+    update_proposal.add_argument("--next-action", default=None)
+    update_proposal.add_argument("--role", default=None)
+    update_proposal.add_argument("--write-scope", action="append", default=None)
+    update_proposal.add_argument("--validation-check", action="append", default=None)
+    update_proposal.add_argument("--dependency", action="append", default=None)
+    update_proposal.add_argument("--authority", default=None)
+    update_proposal.add_argument("--metadata-json", default=None)
+    update_proposal.add_argument("--actor", default="system")
+    update_proposal.set_defaults(func=command_update_proposal)
+
+    withdraw_proposal = sub.add_parser(
+        "withdraw-proposal",
+        help="Withdraw a proposed task contract before promotion.",
+    )
+    add_common(withdraw_proposal)
+    withdraw_proposal.add_argument("proposal_id")
+    withdraw_proposal.add_argument("--actor", default="system")
+    withdraw_proposal.set_defaults(func=command_withdraw_proposal)
 
     list_proposals = sub.add_parser("list-proposals", help="List proposed task contracts.")
     add_common(list_proposals)

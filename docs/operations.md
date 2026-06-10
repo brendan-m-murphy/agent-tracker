@@ -53,6 +53,52 @@ schema if needed, so automation can run it as the first command in a pull
 workflow. Mutating commands print the resolved config, task source, and database
 paths to stderr before changing state.
 
+## Sandboxed Codex Runs
+
+In managed Codex worktrees, the project files, Git metadata, uv cache, and
+canonical tracker state may live under different filesystem authorities. Treat
+those boundaries as part of the coordination contract instead of working around
+them with copied state.
+
+Prefer the existing virtualenv entrypoints for read-only inspection and focused
+validation when the environment has already been synced:
+
+```bash
+.venv/bin/agent-tracker overview --config tracking/project.json
+.venv/bin/agent-tracker status --config tracking/project.json --json
+.venv/bin/pytest
+.venv/bin/ruff check .
+```
+
+These commands avoid `uv run` cache discovery, which can require approval in
+sandboxed sessions even for read-only commands. Use `uv run` when dependencies
+need to be resolved, extras or groups need to be installed, or a fresh
+environment is being created. If the runner supports it, a writable uv cache
+such as `uv --cache-dir /tmp/agent-tracker-uv-cache run ...` or
+`UV_CACHE_DIR=/tmp/agent-tracker-uv-cache` can reduce home-directory cache
+friction, but it does not replace approval for commands that need network,
+system configuration, or out-of-worktree writes.
+
+Mutating tracker commands must still use the canonical config when
+`canonical_config_path` is configured:
+
+```bash
+agent-tracker claim --config /path/to/canonical/tracking/project.json \
+  --agent agent-1 \
+  --task-id write-readme
+```
+
+Those commands write the canonical SQLite database and may require approval when
+the database is outside the Codex worktree. Do not point `AGENT_TRACKER_DB`,
+`db_path`, or `state_root` at a temporary sandbox location just to avoid the
+approval; that creates a second live queue authority and can lose leases,
+evidence, and audit history.
+
+Git branch, commit, and push operations can also require approval when the
+worktree's `.git` file points to repository metadata outside the writable
+worktree. That is expected for copied Codex worktrees. Record these approvals as
+run evidence or friction only when they block normal coordinator progress.
+
 ## Initialize Storage
 
 Create the project row and database schema:
@@ -356,6 +402,31 @@ agent-tracker list-proposals --config project.json --json
 Proposed task records are stored in SQLite, audited as `proposal.record`, and
 included in snapshots. They do not appear in ready-task listings and cannot be
 claimed until promoted.
+
+If a proposed contract has a typo, incomplete next action, wrong write scope, or
+bad dependency, update the proposal before promotion instead of editing SQLite:
+
+```bash
+agent-tracker update-proposal --config project.json <proposal-id> \
+  --title "Add triage workflow" \
+  --next-action "Implement reviewed triage promotion." \
+  --write-scope src/agent_tracker/service.py \
+  --validation-check "uv run pytest"
+```
+
+If the intake should not become a task, withdraw the proposed contract before it
+is promoted:
+
+```bash
+agent-tracker withdraw-proposal --config project.json <proposal-id> --actor pm
+```
+
+Updating or withdrawing a proposal is audited and only applies while the
+proposal is still in the `proposed` state. Promoted proposals are live queue
+history; fix them with normal task follow-up work instead of rewriting the
+proposal record. Withdrawn proposals are retained with `rejected` status as
+audit history, and their task IDs remain reserved; create a new proposal with a
+new task ID if later work should replace the withdrawn contract.
 
 After review, promote a proposal into live queue state:
 

@@ -2638,6 +2638,184 @@ def test_promote_proposed_task_creates_claimable_live_task(tmp_path: Path) -> No
     )
 
 
+def test_update_proposed_task_edits_contract_before_promotion(tmp_path: Path) -> None:
+    """Proposed task contracts can be corrected before they become live tasks."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        repo="agent-tracker",
+        summary="Promote reviewed intake into live task state.",
+        next_action="Draft the change.",
+        validation_checks=["uv run pytest"],
+        metadata={"lane": "planning"},
+        actor="pm",
+    )
+
+    updated = coord.update_proposed_task(
+        proposal.proposal_id,
+        task_id="add-triage-v2",
+        title="Add proposal edit workflow",
+        repo="agent-tracker",
+        summary="Allow proposals to be corrected before promotion.",
+        next_action="Implement update and withdraw commands.",
+        role="maintainer",
+        write_scopes=["src/agent_tracker/service.py", "tests/test_agent_tracker.py"],
+        validation_checks=[".venv/bin/pytest tests/test_agent_tracker.py"],
+        requirements=[{"task": "foundation", "description": "Base queue exists."}],
+        authority="local code and tests",
+        metadata={"lane": "triage"},
+        actor="pm",
+    )
+    listed = coord.proposed_task_records()
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert updated.status == "proposed"
+    assert updated.created_at == proposal.created_at
+    assert updated.task.task_id == "add-triage-v2"
+    assert updated.task.title == "Add proposal edit workflow"
+    assert updated.task.next_action == "Implement update and withdraw commands."
+    assert updated.task.validation_checks == [".venv/bin/pytest tests/test_agent_tracker.py"]
+    assert updated.task.execution["primary_files"] == [
+        "src/agent_tracker/service.py",
+        "tests/test_agent_tracker.py",
+    ]
+    assert updated.task.metadata == {
+        "lane": "triage",
+        "roles": ["maintainer"],
+        "write_scopes": [
+            "src/agent_tracker/service.py",
+            "tests/test_agent_tracker.py",
+        ],
+        "authority": "local code and tests",
+    }
+    assert updated.requirements == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+    assert listed == [updated]
+    update_audit = next(
+        audit for audit in snapshot["audit"] if audit["action"] == "proposal.update"
+    )
+    assert update_audit["actor"] == "pm"
+    assert update_audit["payload"]["proposal_id"] == proposal.proposal_id
+    assert update_audit["payload"]["previous_task_id"] == "add-triage"
+    assert update_audit["payload"]["task_id"] == "add-triage-v2"
+    assert update_audit["payload"]["changed_fields"] == [
+        "task.id",
+        "task.title",
+        "task.summary",
+        "task.next_action",
+        "task.execution",
+        "task.validation_checks",
+        "task.metadata",
+        "requirements",
+    ]
+    assert update_audit["payload"]["changes"]["task.title"] == {
+        "previous": "Add triage workflow",
+        "updated": "Add proposal edit workflow",
+    }
+    with pytest.raises(ValueError, match="task already exists"):
+        coord.update_proposed_task(proposal.proposal_id, task_id="ready")
+
+    other_intake = coord.record_intake("Add another proposal.", kind="feature")
+    other = coord.propose_task_from_intake(
+        other_intake.intake_id,
+        task_id="other-triage",
+        title="Other triage workflow",
+    )
+    with pytest.raises(ValueError, match="proposal task id already exists"):
+        coord.update_proposed_task(proposal.proposal_id, task_id=other.task.task_id)
+
+    promoted = coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+    state = coord.get_task("add-triage-v2")
+
+    assert promoted.task.task_id == "add-triage-v2"
+    assert state.task.title == "Add proposal edit workflow"
+    assert state.task.next_action == "Implement update and withdraw commands."
+    assert state.task.validation_checks == [".venv/bin/pytest tests/test_agent_tracker.py"]
+    assert state.task.execution["primary_files"] == [
+        "src/agent_tracker/service.py",
+        "tests/test_agent_tracker.py",
+    ]
+    assert state.task.metadata == {
+        "lane": "triage",
+        "roles": ["maintainer"],
+        "write_scopes": [
+            "src/agent_tracker/service.py",
+            "tests/test_agent_tracker.py",
+        ],
+        "authority": "local code and tests",
+    }
+    assert state.requirements[0].detail == "foundation: done"
+
+
+def test_withdraw_proposed_task_prevents_promotion_and_audits(tmp_path: Path) -> None:
+    """Withdrawn proposals are retained as rejected records and cannot promote."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        actor="pm",
+    )
+
+    withdrawn = coord.withdraw_proposed_task(proposal.proposal_id, actor="pm")
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert withdrawn.status == "rejected"
+    assert coord.proposed_task_records(status="rejected") == [withdrawn]
+    with pytest.raises(ValueError, match="cannot promote proposal .* from status rejected"):
+        coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+    with pytest.raises(ValueError, match="cannot update proposal .* from status rejected"):
+        coord.update_proposed_task(proposal.proposal_id, title="Edited after withdrawal")
+    with pytest.raises(ValueError, match="cannot withdraw proposal .* from status rejected"):
+        coord.withdraw_proposed_task(proposal.proposal_id, actor="pm")
+    followup_intake = coord.record_intake("Re-propose the same ID.", kind="feature")
+    with pytest.raises(ValueError, match="existing rejected proposal"):
+        coord.propose_task_from_intake(
+            followup_intake.intake_id,
+            task_id=proposal.task.task_id,
+            title="Re-propose triage workflow",
+        )
+    assert any(
+        audit["action"] == "proposal.withdraw"
+        and audit["actor"] == "pm"
+        and audit["payload"]
+        == {
+            "proposal_id": proposal.proposal_id,
+            "intake_id": intake.intake_id,
+        }
+        for audit in snapshot["audit"]
+    )
+
+
+def test_promoted_proposal_cannot_be_updated_or_withdrawn(tmp_path: Path) -> None:
+    """Proposal edits and withdrawal stop once a task is live."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        actor="pm",
+    )
+    coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+
+    with pytest.raises(ValueError, match="cannot update proposal .* from status promoted"):
+        coord.update_proposed_task(proposal.proposal_id, title="Edited after promotion")
+    with pytest.raises(ValueError, match="cannot withdraw proposal .* from status promoted"):
+        coord.withdraw_proposed_task(proposal.proposal_id, actor="pm")
+
+
 def test_triage_rejects_missing_intake_and_existing_task_id(tmp_path: Path) -> None:
     """Proposed tasks must come from intake and not collide with live tasks."""
     config = load_config(write_project(tmp_path))
@@ -2799,6 +2977,85 @@ def test_cli_propose_and_list_proposals_json(tmp_path: Path) -> None:
     assert promoted["status"] == "promoted"
     assert state.state == "ready"
     assert state.task.task_id == "add-triage"
+
+
+def test_cli_update_and_withdraw_proposal_json(tmp_path: Path) -> None:
+    """CLI proposal edits and withdrawal return proposal JSON."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "update-proposal",
+                "--config",
+                str(config_path),
+                proposal.proposal_id,
+                "--title",
+                "Add proposal edit workflow",
+                "--next-action",
+                "Implement update and withdraw commands.",
+                "--validation-check",
+                ".venv/bin/pytest tests/test_agent_tracker.py",
+                "--dependency",
+                "foundation:Base queue exists.",
+                "--metadata-json",
+                '{"lane": "triage"}',
+                "--actor",
+                "pm",
+            ]
+        )
+
+    updated = json.loads(stdout.getvalue())
+    assert code == 0
+    assert updated["status"] == "proposed"
+    assert updated["task"]["title"] == "Add proposal edit workflow"
+    assert updated["task"]["next_action"] == "Implement update and withdraw commands."
+    assert updated["task"]["validation_checks"] == [".venv/bin/pytest tests/test_agent_tracker.py"]
+    assert updated["task"]["metadata"] == {"lane": "triage"}
+    assert updated["requirements"] == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "withdraw-proposal",
+                "--config",
+                str(config_path),
+                proposal.proposal_id,
+                "--actor",
+                "pm",
+            ]
+        )
+
+    withdrawn = json.loads(stdout.getvalue())
+    assert code == 0
+    assert withdrawn["status"] == "rejected"
+
+    stderr = StringIO()
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "promote-proposal",
+                "--config",
+                str(config_path),
+                proposal.proposal_id,
+            ]
+        )
+
+    assert code == 1
+    assert "from status rejected" in stderr.getvalue()
 
 
 def test_project_root_plugin_loads_from_config_directory(tmp_path: Path) -> None:

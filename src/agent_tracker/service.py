@@ -7,7 +7,7 @@ import json
 import posixpath
 import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -519,6 +519,97 @@ class Coordinator:
             limit=limit,
         )
 
+    def update_proposed_task(
+        self,
+        proposal_id: str,
+        *,
+        task_id: str | None = None,
+        title: str | None = None,
+        repo: str | None = None,
+        summary: str | None = None,
+        next_action: str | None = None,
+        role: str | None = None,
+        write_scopes: list[str] | None = None,
+        validation_checks: list[str] | None = None,
+        requirements: list[dict[str, str]] | None = None,
+        authority: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Update a proposed task contract before promotion."""
+        self._ensure_mutation_allowed()
+        cleaned_proposal_id = _first_text(proposal_id)
+        if not cleaned_proposal_id:
+            raise ValueError("proposal id is required")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("proposal metadata must be a JSON object")
+        current = self.store.proposed_task_record(self.config.project_id, cleaned_proposal_id)
+        if current is None:
+            raise ValueError(f"unknown proposed task: {cleaned_proposal_id}")
+
+        cleaned_task_id = current.task.task_id if task_id is None else _first_text(task_id)
+        cleaned_title = current.task.title if title is None else _first_text(title)
+        if not cleaned_task_id:
+            raise ValueError("proposed task id is required")
+        if not cleaned_title:
+            raise ValueError("proposed task title is required")
+
+        task_metadata = dict(current.task.metadata if metadata is None else metadata)
+        execution = dict(current.task.execution)
+        if role is not None:
+            roles = _clean_strings([role])
+            if roles:
+                task_metadata["roles"] = roles
+            else:
+                task_metadata.pop("roles", None)
+        if write_scopes is not None:
+            scopes = _clean_strings(write_scopes)
+            if scopes:
+                task_metadata["write_scopes"] = scopes
+                execution["primary_files"] = scopes
+            else:
+                task_metadata.pop("write_scopes", None)
+                execution.pop("primary_files", None)
+        if authority is not None:
+            cleaned_authority = _first_text(authority)
+            if cleaned_authority:
+                task_metadata["authority"] = cleaned_authority
+            else:
+                task_metadata.pop("authority", None)
+
+        task = replace(
+            current.task,
+            task_id=cleaned_task_id,
+            title=cleaned_title,
+            repo=current.task.repo if repo is None else _first_text(repo),
+            summary=current.task.summary if summary is None else _first_text(summary),
+            next_action=(
+                current.task.next_action if next_action is None else _first_text(next_action)
+            ),
+            execution=execution,
+            validation_checks=(
+                list(current.task.validation_checks)
+                if validation_checks is None
+                else _clean_strings(validation_checks)
+            ),
+            metadata=task_metadata,
+        )
+        proposal = replace(
+            current,
+            task=task,
+            requirements=(
+                list(current.requirements)
+                if requirements is None
+                else _clean_requirements(requirements)
+            ),
+        )
+        return self.store.update_proposed_task(
+            self.config.project_id,
+            cleaned_proposal_id,
+            proposal,
+            actor=actor,
+        )
+
     def promote_proposed_task(
         self,
         proposal_id: str,
@@ -531,6 +622,26 @@ class Coordinator:
         if not cleaned_proposal_id:
             raise ValueError("proposal id is required")
         proposal = self.store.promote_proposed_task(
+            self.config.project_id,
+            cleaned_proposal_id,
+            actor=actor,
+        )
+        if proposal.status not in PROPOSAL_STATES:
+            raise ValueError(f"invalid proposal status: {proposal.status}")
+        return proposal
+
+    def withdraw_proposed_task(
+        self,
+        proposal_id: str,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Withdraw a proposed task contract before promotion."""
+        self._ensure_mutation_allowed()
+        cleaned_proposal_id = _first_text(proposal_id)
+        if not cleaned_proposal_id:
+            raise ValueError("proposal id is required")
+        proposal = self.store.withdraw_proposed_task(
             self.config.project_id,
             cleaned_proposal_id,
             actor=actor,
