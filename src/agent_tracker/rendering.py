@@ -121,6 +121,52 @@ class HumanOutputRenderer:
         self._overview_ready(payload)
         self._overview_recent(payload)
 
+    def overview_plain(self, payload: dict[str, Any]) -> None:
+        """Render a grep-friendly overview without Rich-shaped output.
+
+        Args:
+            payload: Overview payload produced by `Coordinator.overview_payload`.
+
+        Side Effects:
+            Writes deterministic line-oriented text to the renderer stream. Long
+            values are not wrapped or truncated, so the output remains suitable
+            for grep, awk, and copy/paste into scripts.
+        """
+        self.raw_line(f"{payload['name']} ({payload['project_id']})")
+        counts = payload["counts"]
+        open_count = sum(
+            counts[key] for key in ("ready", "active", "review", "integration", "blocked")
+        )
+        self.raw_line(
+            "counts "
+            f"open={open_count} ready={counts['ready']} active={counts['active']} "
+            f"review={counts['review']} integration={counts['integration']} "
+            f"blocked={counts['blocked']} recent={counts['recently_completed']}"
+        )
+        for group, heading in OVERVIEW_GROUPS:
+            self.raw_line(f"{heading.lower().replace(' ', '_')} count={counts[group]}")
+            for item in payload["groups"][group]:
+                self._overview_plain_row(group, item)
+
+    def overview_wide(self, payload: dict[str, Any]) -> None:
+        """Render a width-aware overview with targeted context columns.
+
+        Args:
+            payload: Overview payload produced by `Coordinator.overview_payload`.
+
+        Side Effects:
+            Writes wrapped human text to the renderer stream using the detected
+            terminal width. The method intentionally keeps one task per logical
+            row and includes only the extra context useful for wide terminals.
+        """
+        self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
+        self.line(self._overview_summary(payload), style=OVERVIEW_MUTED_STYLE)
+        self._console.print()
+        self._overview_attention(payload, wide=True)
+        self._overview_blocked(payload, wide=True)
+        self._overview_ready(payload, wide=True)
+        self._overview_recent(payload, wide=True)
+
     def overview_item(self, group: str, item: dict[str, Any]) -> None:
         """Render one overview item."""
         if group == "blocked":
@@ -253,7 +299,7 @@ class HumanOutputRenderer:
             f"Blocked {counts['blocked']} | Done {counts['recently_completed']}"
         )
 
-    def _overview_attention(self, payload: dict[str, Any]) -> None:
+    def _overview_attention(self, payload: dict[str, Any], *, wide: bool = False) -> None:
         """Render active, review, and integration work as one attention list."""
         groups = payload["groups"]
         counts = payload["counts"]
@@ -266,11 +312,14 @@ class HumanOutputRenderer:
         if not items:
             self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
         for group, item in items:
-            self._overview_attention_row(group, item)
+            if wide:
+                self._overview_wide_row(group, item)
+            else:
+                self._overview_attention_row(group, item)
         self._overview_hidden_count(total - len(items), "attention items")
         self._console.print()
 
-    def _overview_blocked(self, payload: dict[str, Any]) -> None:
+    def _overview_blocked(self, payload: dict[str, Any], *, wide: bool = False) -> None:
         """Render blocked work with its blocker because it cannot be acted on directly."""
         items = payload["groups"]["blocked"]
         total = payload["counts"]["blocked"]
@@ -280,11 +329,14 @@ class HumanOutputRenderer:
         if not items:
             self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
         for item in items:
-            self._overview_blocked_row(item)
+            if wide:
+                self._overview_wide_row("blocked", item)
+            else:
+                self._overview_blocked_row(item)
         self._overview_hidden_count(total - len(items), "blocked tasks")
         self._console.print()
 
-    def _overview_ready(self, payload: dict[str, Any]) -> None:
+    def _overview_ready(self, payload: dict[str, Any], *, wide: bool = False) -> None:
         """Render ready work as a title-first task index."""
         items = payload["groups"]["ready"]
         total = payload["counts"]["ready"]
@@ -292,11 +344,14 @@ class HumanOutputRenderer:
         if not items:
             self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
         for item in items:
-            self._overview_ready_row(item)
+            if wide:
+                self._overview_wide_row("ready", item)
+            else:
+                self._overview_ready_row(item)
         self._overview_hidden_count(total - len(items), "ready tasks")
         self._console.print()
 
-    def _overview_recent(self, payload: dict[str, Any]) -> None:
+    def _overview_recent(self, payload: dict[str, Any], *, wide: bool = False) -> None:
         """Render recent completions as a short history tail."""
         items = payload["groups"]["recently_completed"]
         total = payload["counts"]["recently_completed"]
@@ -304,8 +359,31 @@ class HumanOutputRenderer:
         if not items:
             self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
         for item in items:
-            self._overview_recent_row(item)
+            if wide:
+                self._overview_wide_row("recently_completed", item)
+            else:
+                self._overview_recent_row(item)
         self._overview_hidden_count(total - len(items), "completed tasks")
+
+    def _overview_plain_row(self, group: str, item: dict[str, Any]) -> None:
+        """Render one plain overview task as stable key/value fragments."""
+        fragments = [
+            f"status={self._plain_value(self._overview_status(group).lower())}",
+            f"id={self._plain_value(item['id'])}",
+            f"title={self._plain_value(item['title'])}",
+        ]
+        if group in {"ready", "active", "review", "integration"} and item.get("next_action"):
+            fragments.append(f"next={self._plain_value(item['next_action'])}")
+        if group == "blocked" and self._overview_blocker(item):
+            fragments.append(f"blocker={self._plain_value(self._overview_blocker(item))}")
+        if group in {"review", "integration", "recently_completed"} and item.get("latest_evidence"):
+            fragments.append(f"evidence={self._plain_value(item['latest_evidence'])}")
+        if group == "recently_completed":
+            if item.get("completed_at"):
+                fragments.append(f"completed_at={self._plain_value(item['completed_at'])}")
+            if item.get("completion_action"):
+                fragments.append(f"completion={self._plain_value(item['completion_action'])}")
+        self.raw_line(" ".join(fragments))
 
     def _overview_attention_row(self, group: str, item: dict[str, Any]) -> None:
         """Render one attention row."""
@@ -354,6 +432,48 @@ class HumanOutputRenderer:
             style=OVERVIEW_MUTED_STYLE,
         )
 
+    def _overview_wide_row(self, group: str, item: dict[str, Any]) -> None:
+        """Render one wide-mode overview row with concise detail fragments."""
+        status = self._overview_status(group)
+        suffix = self._overview_wide_suffix(group, item)
+        title = self._compact_text(item["title"])
+        prefix, text_prefix = self._overview_wide_prefix(status, item)
+        core = f"{text_prefix}{title}"
+        text = f"{core} | {suffix}" if suffix else core
+        self.line(
+            text,
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=True,
+            style=OVERVIEW_MUTED_STYLE if group == "recently_completed" else None,
+        )
+
+    def _overview_wide_prefix(self, status: str, item: dict[str, Any]) -> tuple[str, str]:
+        """Return prefixes for a wide row that still work in narrow terminals."""
+        handle = self._overview_handle(item)
+        full_prefix = f"  {status:<{OVERVIEW_STATUS_WIDTH}} {handle:<{self._handle_width}} "
+        if self._terminal_width - len(full_prefix) >= 20:
+            return full_prefix, ""
+        return f"  {status} ", f"{handle} "
+
+    def _overview_wide_suffix(self, group: str, item: dict[str, Any]) -> str:
+        """Return targeted detail fragments for one wide-mode row."""
+        fragments: list[str] = []
+        if group in {"ready", "active", "review", "integration"} and item.get("next_action"):
+            fragments.append(f"next: {self._compact_text(item['next_action'])}")
+        if group == "blocked" and self._overview_blocker(item):
+            fragments.append(f"blocker: {self._overview_blocker(item)}")
+        if group in {"review", "integration", "recently_completed"} and item.get("latest_evidence"):
+            fragments.append(f"evidence: {self._compact_text(item['latest_evidence'])}")
+        if group == "recently_completed":
+            completed = self._compact_text(item.get("completed_at") or "")
+            if completed:
+                fragments.append(f"completed: {completed}")
+            action = self._compact_text(item.get("completion_action") or "")
+            if action:
+                fragments.append(f"action: {action}")
+        return " | ".join(fragments)
+
     def _overview_hidden_count(self, hidden_count: int, noun: str) -> None:
         """Render a hidden-count hint for a section."""
         if hidden_count <= 0:
@@ -367,9 +487,12 @@ class HumanOutputRenderer:
 
     def _overview_status(self, group: str) -> str:
         """Return a short status label for an overview group."""
-        return {"active": "ACTIVE", "review": "REVIEW", "integration": "MERGE"}.get(
-            group, group.upper()
-        )
+        return {
+            "active": "ACTIVE",
+            "review": "REVIEW",
+            "integration": "MERGE",
+            "recently_completed": "RECENT",
+        }.get(group, group.upper())
 
     def _overview_handle(self, item: dict[str, Any]) -> str:
         """Return a compact command-oriented task handle."""
@@ -387,6 +510,10 @@ class HumanOutputRenderer:
     def _compact_text(self, value: object) -> str:
         """Collapse internal whitespace for one-line summaries."""
         return " ".join(str(value).split())
+
+    def _plain_value(self, value: object) -> str:
+        """Return one shell-token-safe plain output value."""
+        return shlex.quote(self._compact_text(value))
 
     def _truncate(self, value: object, width: int) -> str:
         """Return a single-line value capped to a display width."""
