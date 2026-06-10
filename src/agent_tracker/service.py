@@ -613,6 +613,129 @@ class Coordinator:
             actor=actor,
         )
 
+    def plan_task_from_text(
+        self,
+        text: str,
+        *,
+        task_id: str,
+        title: str,
+        kind: str = "idea",
+        source: str = "agent-tracker plan task",
+        intake_repo: str = "",
+        tags: list[str] | None = None,
+        intake_metadata: dict[str, Any] | None = None,
+        repo: str = "",
+        summary: str = "",
+        next_action: str = "",
+        role: str = "",
+        write_scopes: list[str] | None = None,
+        validation_checks: list[str] | None = None,
+        requirements: list[dict[str, str]] | None = None,
+        authority: str = "",
+        intervention_needs: list[str] | None = None,
+        notebook_updates: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        proposal_id: str = "",
+        intake_id: str = "",
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Record planning intake and create its proposed task contract.
+
+        Args:
+            text: Raw planning request or note to preserve as intake.
+            task_id: Stable task identifier for the proposed task.
+            title: Human-readable proposed task title.
+            kind: Intake kind, such as `idea`, `feature`, or `check`.
+            source: Origin of the planning request.
+            intake_repo: Repository or component for the intake record. When
+                omitted, `repo` is reused.
+            tags: Optional intake triage tags.
+            intake_metadata: Optional structured intake metadata.
+            repo: Repository or component for the proposed task.
+            summary: Proposed task summary.
+            next_action: Immediate proposed task next action.
+            role: Optional role filter for the proposed task.
+            write_scopes: Optional files or directories expected to change.
+            validation_checks: Optional checks needed before completion.
+            requirements: Optional task dependency records.
+            authority: Optional authority note stored in task metadata.
+            intervention_needs: Optional human-intervention notes.
+            notebook_updates: Optional notebook update notes.
+            metadata: Optional proposed task metadata.
+            proposal_id: Optional stable proposal identifier.
+            intake_id: Optional stable intake identifier.
+            actor: Actor recorded in audit history.
+
+        Returns:
+            The durable proposed task contract created from the new intake.
+
+        Raises:
+            ValueError: If intake text, proposed task fields, or metadata are
+                invalid, or if the proposed task collides with existing state.
+        """
+        self._ensure_mutation_allowed()
+        cleaned_text = text.strip()
+        cleaned_task_id = _first_text(task_id)
+        cleaned_title = _first_text(title)
+        if not cleaned_text:
+            raise ValueError("intake text is required")
+        if not cleaned_task_id:
+            raise ValueError("proposed task id is required")
+        if not cleaned_title:
+            raise ValueError("proposed task title is required")
+        if intake_metadata is not None and not isinstance(intake_metadata, dict):
+            raise ValueError("intake metadata must be a JSON object")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("proposal metadata must be a JSON object")
+
+        scopes = _clean_strings(write_scopes or [])
+        task_metadata = dict(metadata or {})
+        if role:
+            task_metadata["roles"] = _clean_strings([role])
+        if scopes:
+            task_metadata["write_scopes"] = scopes
+        if authority:
+            task_metadata["authority"] = authority.strip()
+        needs = _clean_strings(intervention_needs or [])
+        if needs:
+            task_metadata["intervention_needs"] = needs
+        notebooks = _clean_strings(notebook_updates or [])
+        if notebooks:
+            task_metadata["notebook_updates"] = notebooks
+        cleaned_repo = _first_text(repo)
+        intake = IntakeRecord(
+            intake_id=_first_text(intake_id) or uuid.uuid4().hex,
+            text=cleaned_text,
+            kind=_first_text(kind) or "idea",
+            source=_first_text(source),
+            repo=_first_text(intake_repo) or cleaned_repo,
+            tags=_clean_tags(tags or []),
+            metadata=intake_metadata or {},
+        )
+        task = TaskRecord(
+            task_id=cleaned_task_id,
+            title=cleaned_title,
+            repo=cleaned_repo,
+            status="pending",
+            summary=_first_text(summary),
+            execution={"primary_files": scopes} if scopes else {},
+            validation_checks=_clean_strings(validation_checks or []),
+            next_action=_first_text(next_action),
+            metadata=task_metadata,
+        )
+        proposal = ProposedTaskRecord(
+            proposal_id=_first_text(proposal_id) or uuid.uuid4().hex,
+            intake_id=intake.intake_id,
+            task=task,
+            requirements=_clean_requirements(requirements or []),
+        )
+        return self.store.record_planned_task(
+            self.config.project_id,
+            intake,
+            proposal,
+            actor=actor,
+        )
+
     def proposed_task_records(
         self,
         *,

@@ -827,6 +827,43 @@ def command_propose_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_plan_task(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    intake_metadata = parse_intake_metadata(
+        args.intake_metadata_json,
+        args.intake_metadata,
+        label="intake-metadata-json",
+    )
+    metadata = parse_json_object(args.metadata_json, "metadata-json")
+    proposal = coord.plan_task_from_text(
+        args.text,
+        task_id=args.task_id,
+        title=args.title,
+        kind=args.kind,
+        source=args.source,
+        intake_repo=args.intake_repo,
+        tags=args.tag,
+        intake_metadata=intake_metadata,
+        repo=args.repo,
+        summary=args.summary,
+        next_action=args.next_action,
+        role=args.role,
+        write_scopes=args.write_scope,
+        validation_checks=args.validation_check,
+        requirements=[parse_dependency(value) for value in args.dependency],
+        authority=args.authority,
+        intervention_needs=args.intervention_need,
+        notebook_updates=args.notebook_update,
+        metadata=metadata,
+        proposal_id=args.proposal_id,
+        intake_id=args.intake_id,
+        actor=args.actor,
+    )
+    print_json(proposed_task_to_dict(proposal))
+    return 0
+
+
 def command_promote_proposal(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -935,9 +972,14 @@ def parse_key_value_metadata(values: list[str]) -> dict[str, str]:
     return metadata
 
 
-def parse_intake_metadata(metadata_json: str, metadata_entries: list[str]) -> dict[str, Any]:
+def parse_intake_metadata(
+    metadata_json: str,
+    metadata_entries: list[str],
+    *,
+    label: str = "metadata-json",
+) -> dict[str, Any]:
     """Parse intake metadata from JSON plus repeatable KEY=VALUE entries."""
-    metadata = parse_json_object(metadata_json, "metadata-json")
+    metadata = parse_json_object(metadata_json, label)
     metadata.update(parse_key_value_metadata(metadata_entries))
     return metadata
 
@@ -1045,6 +1087,116 @@ def add_update_intake_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--status", required=True, choices=sorted(INTAKE_STATES))
     parser.add_argument("--actor", default="system")
     parser.set_defaults(func=command_update_intake)
+
+
+def add_proposal_contract_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add proposed task contract arguments shared by planning commands."""
+    parser.add_argument("--proposal-id", default="", help="Optional stable proposal id.")
+    parser.add_argument("--task-id", required=True, help="Stable proposed task id.")
+    parser.add_argument("--title", required=True, help="Human-readable proposed task title.")
+    parser.add_argument("--repo", default="", help="Repository or component for the task.")
+    parser.add_argument("--summary", default="", help="Short proposed task summary.")
+    parser.add_argument("--next-action", default="", help="Immediate proposed task next action.")
+    parser.add_argument("--role", default="", help="Role allowed to claim the promoted task.")
+    parser.add_argument(
+        "--write-scope",
+        action="append",
+        default=[],
+        help="Repeatable file or directory expected to change.",
+    )
+    parser.add_argument(
+        "--validation-check",
+        action="append",
+        default=[],
+        help="Repeatable validation command or manual check.",
+    )
+    parser.add_argument(
+        "--dependency",
+        action="append",
+        default=[],
+        metavar="TASK[:DESCRIPTION]",
+        help="Repeatable live task dependency for the proposed task.",
+    )
+    parser.add_argument("--authority", default="", help="Authority note for the assignee.")
+    parser.add_argument(
+        "--intervention-need",
+        action="append",
+        default=[],
+        help="Repeatable human-intervention note.",
+    )
+    parser.add_argument(
+        "--notebook-update",
+        action="append",
+        default=[],
+        help="Repeatable notebook update note or config-relative path.",
+    )
+    parser.add_argument(
+        "--metadata-json",
+        default="{}",
+        help="JSON object for proposed task metadata.",
+    )
+    parser.add_argument("--actor", default="system", help="Actor recorded in audit history.")
+
+
+def add_plan_task_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for the readable project-planning task command."""
+    add_common(parser)
+    add_proposal_contract_arguments(parser)
+    parser.add_argument(
+        "--intake-id",
+        default="",
+        help="Optional stable intake id for the raw planning record.",
+    )
+    parser.add_argument(
+        "--kind",
+        default="idea",
+        choices=STRUCTURED_INTAKE_KINDS,
+        help="Planning intake kind.",
+    )
+    parser.add_argument(
+        "--source",
+        default="agent-tracker plan task",
+        help="Where the planning intake came from.",
+    )
+    parser.add_argument(
+        "--intake-repo",
+        default="",
+        help="Repository or component for intake when different from --repo.",
+    )
+    parser.add_argument("--tag", action="append", default=[], help="Repeatable intake tag.")
+    parser.add_argument(
+        "--intake-metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable intake metadata entry.",
+    )
+    parser.add_argument(
+        "--intake-metadata-json",
+        default="{}",
+        help="JSON object for intake metadata.",
+    )
+    parser.add_argument("text", help="Raw planning request or note to preserve as intake.")
+    parser.set_defaults(func=command_plan_task)
+
+
+def add_promote_proposal_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for commands that promote a proposed task."""
+    add_common(parser)
+    parser.add_argument("proposal_id")
+    parser.add_argument("--actor", default="system")
+    parser.set_defaults(func=command_promote_proposal)
+
+
+def add_list_proposals_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for commands that list proposed task contracts."""
+    add_common(parser)
+    parser.add_argument("--json", action="store_true")
+    add_human_output_arguments(parser)
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--status", default="")
+    parser.add_argument("--intake-id", default="")
+    parser.set_defaults(func=command_list_proposals)
 
 
 intake_typer_app = typer.Typer(
@@ -1728,31 +1880,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(propose_task)
     propose_task.add_argument("intake_id")
-    propose_task.add_argument("--proposal-id", default="")
-    propose_task.add_argument("--task-id", required=True)
-    propose_task.add_argument("--title", required=True)
-    propose_task.add_argument("--repo", default="")
-    propose_task.add_argument("--summary", default="")
-    propose_task.add_argument("--next-action", default="")
-    propose_task.add_argument("--role", default="")
-    propose_task.add_argument("--write-scope", action="append", default=[])
-    propose_task.add_argument("--validation-check", action="append", default=[])
-    propose_task.add_argument("--dependency", action="append", default=[])
-    propose_task.add_argument("--authority", default="")
-    propose_task.add_argument("--intervention-need", action="append", default=[])
-    propose_task.add_argument("--notebook-update", action="append", default=[])
-    propose_task.add_argument("--metadata-json", default="{}")
-    propose_task.add_argument("--actor", default="system")
+    add_proposal_contract_arguments(propose_task)
     propose_task.set_defaults(func=command_propose_task)
 
     promote_proposal = sub.add_parser(
         "promote-proposal",
         help="Promote a proposed task into live queue state.",
     )
-    add_common(promote_proposal)
-    promote_proposal.add_argument("proposal_id")
-    promote_proposal.add_argument("--actor", default="system")
-    promote_proposal.set_defaults(func=command_promote_proposal)
+    add_promote_proposal_arguments(promote_proposal)
 
     update_proposal = sub.add_parser(
         "update-proposal",
@@ -1784,13 +1919,25 @@ def build_parser() -> argparse.ArgumentParser:
     withdraw_proposal.set_defaults(func=command_withdraw_proposal)
 
     list_proposals = sub.add_parser("list-proposals", help="List proposed task contracts.")
-    add_common(list_proposals)
-    list_proposals.add_argument("--json", action="store_true")
-    add_human_output_arguments(list_proposals)
-    list_proposals.add_argument("--limit", type=int, default=0)
-    list_proposals.add_argument("--status", default="")
-    list_proposals.add_argument("--intake-id", default="")
-    list_proposals.set_defaults(func=command_list_proposals)
+    add_list_proposals_arguments(list_proposals)
+
+    plan = sub.add_parser(
+        "plan",
+        help="Readable project planning commands for proposed tasks.",
+    )
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
+    plan_task = plan_sub.add_parser(
+        "task",
+        help="Capture planning intake and create a proposed task contract.",
+    )
+    add_plan_task_arguments(plan_task)
+    plan_list = plan_sub.add_parser("list", help="List proposed task contracts.")
+    add_list_proposals_arguments(plan_list)
+    plan_promote = plan_sub.add_parser(
+        "promote",
+        help="Promote a proposed task into live queue state.",
+    )
+    add_promote_proposal_arguments(plan_promote)
 
     export = sub.add_parser("export", help="Export project audit snapshot.")
     add_common(export)

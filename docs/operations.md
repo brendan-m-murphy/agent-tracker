@@ -372,6 +372,11 @@ stay out of overview's live task groups until promoted. If a future planning
 section shows intake or proposals, it should be visibly distinct from Ready,
 Active, Review, Integration, Blocked, and Recently completed.
 
+Ordinary project planning should use `agent-tracker plan ...` commands instead
+of hand-editing `tasks.json`. `tasks.json` remains the import/bootstrap source
+for projects that manage definitions in files, while new manager intake should
+flow through raw intake, proposed task review, and explicit promotion.
+
 Keep the default overview compact. Downstream work that needs more task
 metadata should add an explicit human detail drilldown instead of expanding the
 default summary. The detailed UX contract for future overview work is in
@@ -734,6 +739,30 @@ The proposal is durable and reviewable, but it is still not live queue state.
 Creating a proposal marks open intake as `triaged`:
 
 ```bash
+agent-tracker plan task --config project.json \
+  --task-id add-triage \
+  --title "Add triage workflow" \
+  --repo agent-tracker \
+  --kind feature \
+  --source user \
+  --role maintainer \
+  --write-scope src/agent_tracker/service.py \
+  --validation-check "uv run pytest" \
+  --dependency foundation:"Base queue exists." \
+  --authority "local code and docs" \
+  "User asked for a readable triage workflow"
+```
+
+`plan task` records the raw planning text as intake and creates the proposed
+task contract in one command. It prints the proposal JSON and does not create a
+claimable live task. Use `--intake-metadata KEY=VALUE` or
+`--intake-metadata-json '{"key": "value"}'` for intake context; use
+`--metadata-json` for proposed task metadata. `--repo` applies to both the
+intake record and proposed task unless `--intake-repo` is provided.
+
+The flat compatibility flow remains available when intake already exists:
+
+```bash
 agent-tracker propose-task --config project.json <intake-id> \
   --task-id add-triage \
   --title "Add triage workflow" \
@@ -748,7 +777,7 @@ agent-tracker propose-task --config project.json <intake-id> \
 List proposals:
 
 ```bash
-agent-tracker list-proposals --config project.json --json
+agent-tracker plan list --config project.json --json
 ```
 
 Proposed task records are stored in SQLite, audited as `proposal.record`, and
@@ -783,7 +812,7 @@ new task ID if later work should replace the withdrawn contract.
 After review, promote a proposal into live queue state:
 
 ```bash
-agent-tracker promote-proposal --config project.json <proposal-id> --actor pm
+agent-tracker plan promote --config project.json <proposal-id> --actor pm
 ```
 
 Promotion audits `proposal.promote`, changes the proposal status to
@@ -791,6 +820,10 @@ Promotion audits `proposal.promote`, changes the proposal status to
 the task-plan JSON untouched. Normal definition imports preserve promoted
 runtime tasks; use destructive runtime reconciliation only when you intend to
 make the importer source authoritative again.
+
+The flat `list-proposals` and `promote-proposal` commands remain supported for
+scripts and produce the same proposal payloads as `plan list` and
+`plan promote`.
 
 ## Validate Preview Git Refs
 

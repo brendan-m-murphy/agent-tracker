@@ -348,6 +348,9 @@ agent-tracker status --json
 | `intake record` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker intake --config demo-tracker/project.json record --kind feature --tag inbox "Add triage workflow"` |
 | `intake list` | List raw intake records for later project-manager triage. | `agent-tracker intake --config demo-tracker/project.json list --json` |
 | `intake update` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker intake --config demo-tracker/project.json update <intake-id> --status closed` |
+| `plan task` | Record planning intake and create a proposed task contract without editing `tasks.json`. | `agent-tracker plan task --config demo-tracker/project.json --task-id add-triage --title "Add triage" "Raw request"` |
+| `plan list` | List proposed task contracts awaiting review or promotion. | `agent-tracker plan list --config demo-tracker/project.json --json` |
+| `plan promote` | Promote a proposed task into live queue state so it appears in `next` and can be claimed. | `agent-tracker plan promote --config demo-tracker/project.json <proposal-id>` |
 | `propose-task` | Create a reviewed proposed task contract from an intake record without importing it as a live task. | `agent-tracker propose-task --config demo-tracker/project.json <intake-id> --task-id add-triage --title "Add triage"` |
 | `promote-proposal` | Promote a proposed task into live queue state so it appears in `next` and can be claimed. | `agent-tracker promote-proposal --config demo-tracker/project.json <proposal-id>` |
 | `list-proposals` | List proposed task contracts awaiting review or promotion. | `agent-tracker list-proposals --config demo-tracker/project.json --json` |
@@ -482,18 +485,27 @@ Intake records are included in snapshots for project-manager triage, but they do
 not appear in ready-task listings and cannot be claimed.
 
 Project-manager triage can turn an intake item into a proposed task contract
-without adding it to the live queue:
+without adding it to the live queue. For ordinary planning, use `plan task`
+instead of hand-editing `tasks.json`:
 
 ```bash
-agent-tracker propose-task --config demo-tracker/project.json <intake-id> \
+agent-tracker plan task --config demo-tracker/project.json \
   --task-id add-triage --title "Add triage workflow" \
   --role maintainer --write-scope src/agent_tracker/service.py \
-  --validation-check "uv run pytest"
-agent-tracker list-proposals --config demo-tracker/project.json --json
+  --validation-check "uv run pytest" \
+  "User asked for a triage workflow"
+agent-tracker plan list --config demo-tracker/project.json --json
 ```
 
-Proposals are durable review artifacts. A later promotion workflow can convert
-approved proposals into task-plan entries or another authoritative importer.
+Proposals are durable review artifacts, not claimable work. Promote an approved
+proposal into live SQLite queue state without editing the task plan:
+
+```bash
+agent-tracker plan promote --config demo-tracker/project.json <proposal-id>
+```
+
+The flat `propose-task`, `list-proposals`, and `promote-proposal` commands
+remain available for scripts and JSON compatibility.
 
 Snapshots include evaluated task state, events, and audit log entries:
 

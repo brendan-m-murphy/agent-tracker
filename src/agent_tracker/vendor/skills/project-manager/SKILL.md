@@ -104,28 +104,41 @@ The flat `capture-intake` alias is available for scripts, while looser
 `record-intake` remains compatibility-only for intake that lacks full context.
 
 After reviewing an intake item, create a proposed task contract rather than a
-claimable task. Creating a proposal marks open intake as triaged:
+claimable task. For ordinary planning, prefer the readable `plan task` command;
+it records raw intake and creates the proposed task contract in one audited
+operation:
 
 ```bash
-uv run agent-tracker propose-task --config tracking/project.json <intake-id> \
+uv run agent-tracker plan task --config tracking/project.json \
   --task-id <stable-task-id> \
   --title "Task title" \
   --repo <repo-or-component> \
+  --kind feature \
+  --source <source-or-thread> \
   --role maintainer \
   --write-scope docs/ \
   --validation-check "uv run pytest" \
-  --authority "local code and docs"
-uv run agent-tracker list-proposals --config tracking/project.json --json
+  --authority "local code and docs" \
+  "Raw request or idea text"
+uv run agent-tracker plan list --config tracking/project.json --json
 ```
+
+Use `--intake-metadata KEY=VALUE` for intake context such as source date,
+thread, project, owner, or priority. Use `--metadata-json` for proposed task
+metadata only. The flat `propose-task` command remains available when intake
+already exists and scripts need the old JSON contract.
 
 Proposals are review artifacts. When the user or project workflow approves a
 proposal, promote it into live queue state through SQLite rather than editing
 the task plan by hand:
 
 ```bash
-uv run agent-tracker promote-proposal --config tracking/project.json <proposal-id> \
+uv run agent-tracker plan promote --config tracking/project.json <proposal-id> \
   --actor <project-manager-id>
 ```
+
+The flat `list-proposals` and `promote-proposal` aliases remain supported for
+existing automation.
 
 If an intake item should not become a task, close or defer it explicitly:
 
