@@ -413,7 +413,7 @@ remote project checkouts. `list-workspaces` reports the resolved registry.
         "codex",
         "exec",
         "--cd",
-        "{workspace_path}",
+        "{worktree_path}",
         "--output-last-message",
         "{report_path}",
         "-"
@@ -434,13 +434,15 @@ are absolute or start with `~`. `config_path`, `spool_outbox`, and
 inside argv items:
 
 - `{agent_id}`
+- `{base_ref}`
+- `{branch}`
 - `{launch_id}`
 - `{project_id}`
 - `{prompt_path}`
 - `{report_path}`
 - `{task_id}`
 - `{workspace}`
-- `{workspace_path}`
+- `{worktree_path}`
 
 SSH workspace entries are validated and listed, but not launched yet:
 

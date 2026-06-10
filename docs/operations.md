@@ -433,11 +433,11 @@ agent-tracker launch-worker --config project.json \
 The default command is:
 
 ```bash
-codex exec --cd {workspace_path} --output-last-message {report_path} -
+codex exec --cd {worktree_path} --output-last-message {report_path} -
 ```
 
-The rendered prompt is passed on stdin. The command runs in the workspace
-directory, stdout and stderr are captured as launch artifacts, and the final
+The rendered prompt is passed on stdin. The command runs from the assigned
+worktree path, stdout and stderr are captured as launch artifacts, and the final
 report path is exposed through `AGENT_TRACKER_WORKER_REPORT`.
 
 For smoke tests or non-Codex workers, pass an explicit command:
