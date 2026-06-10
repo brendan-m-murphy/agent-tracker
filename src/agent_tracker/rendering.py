@@ -15,15 +15,10 @@ from agent_tracker.config import ProjectConfig
 from agent_tracker.models import TaskState
 
 HUMAN_OUTPUT_WIDTH = 80
-OVERVIEW_ID_INDENT = 2
-OVERVIEW_TITLE_INDENT = 4
-OVERVIEW_DETAIL_INDENT = 6
-OVERVIEW_DETAIL_LIMIT = 2
-OVERVIEW_HEADING_STYLE = "bold green"
-OVERVIEW_TASK_ID_STYLE = "cyan"
-OVERVIEW_TITLE_STYLE = "bold"
-OVERVIEW_LABEL_STYLE = "bold blue"
-OVERVIEW_DETAIL_STYLE = "dim"
+OVERVIEW_TABLE_INDENT = 2
+OVERVIEW_COLUMN_GAP = 2
+OVERVIEW_HEADER_STYLE = "bold"
+OVERVIEW_MUTED_STYLE = "dim"
 OVERVIEW_GROUPS = (
     ("ready", "Ready"),
     ("active", "Active"),
@@ -121,96 +116,146 @@ class HumanOutputRenderer:
             self._console.print()
             items = payload["groups"][key]
             total = payload["counts"][key]
-            self._console.print(Text(f"{heading} ({total})", style=OVERVIEW_HEADING_STYLE))
+            self._console.print(Text(f"{heading.upper()} ({total})", style=OVERVIEW_HEADER_STYLE))
             if not items:
-                self._console.print(Text("  (none)", style=OVERVIEW_DETAIL_STYLE))
+                self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
                 continue
-            for index, item in enumerate(items):
-                if index:
-                    self._console.print()
-                self.overview_item(key, item)
+            self._overview_table(key, items)
             if len(items) < total:
                 hidden_count = total - len(items)
-                self._console.print()
                 self._console.print(
                     Text(
                         f"  ... {hidden_count} more; use --limit 0 to show all",
-                        style=OVERVIEW_DETAIL_STYLE,
+                        style=OVERVIEW_MUTED_STYLE,
                     )
                 )
 
     def overview_item(self, group: str, item: dict[str, Any]) -> None:
         """Render one overview item."""
-        qualifiers = []
-        if group in {"active", "review", "integration"}:
-            qualifiers.append(str(item["state"]))
-        if item.get("lease_agent_id"):
-            qualifiers.append(f"agent {self._truncate(item['lease_agent_id'], 24)}")
-        id_width = max(1, self._width - OVERVIEW_ID_INDENT)
-        task_id = self._truncate(str(item["id"]), id_width)
-        id_indent = " " * OVERVIEW_ID_INDENT
-        title_indent = " " * OVERVIEW_TITLE_INDENT
-        self.line(
-            task_id,
-            initial_indent=id_indent,
-            subsequent_indent=id_indent,
-            style=OVERVIEW_TASK_ID_STYLE,
-        )
-        self.line(
-            self._compact_text(item["title"]),
-            initial_indent=title_indent,
-            subsequent_indent=title_indent,
-            break_long_words=True,
-            style=OVERVIEW_TITLE_STYLE,
-        )
-        if qualifiers:
-            self._overview_detail_line("state", "; ".join(qualifiers))
+        self._overview_table(group, [item])
 
-        detail_widths = {
-            "blocker": self._detail_width("blocker"),
-            "evidence": self._detail_width("evidence"),
-            "next": self._detail_width("next"),
-            "completed": self._detail_width("completed"),
-        }
-        for label, value in self._overview_details(group, item, detail_widths):
-            self._overview_detail_line(label, value)
+    def _overview_table(self, group: str, items: list[dict[str, Any]]) -> None:
+        """Render overview items as one-row task summaries."""
+        columns = self._overview_columns(group)
+        widths = self._overview_column_widths(columns)
+        self._overview_row(
+            [label for label, _key, _minimum, _weight in columns], widths, header=True
+        )
+        for item in items:
+            self._overview_row(
+                [
+                    self._overview_cell(group, item, key, width)
+                    for (_label, key, _min, _weight), width in zip(columns, widths)
+                ],
+                widths,
+            )
 
-    def _overview_details(
+    def _overview_columns(self, group: str) -> list[tuple[str, str, int, int]]:
+        """Return label, value key, minimum width, and expansion weight for a group."""
+        if group == "ready":
+            return [
+                ("ID", "id", 14, 3),
+                ("SUMMARY", "summary", 14, 3),
+                ("NEXT", "next", 14, 4),
+            ]
+        if group == "active":
+            return [
+                ("ID", "id", 12, 3),
+                ("SUMMARY", "summary", 12, 3),
+                ("STATE", "state", 8, 1),
+                ("NEXT", "next", 12, 3),
+            ]
+        if group in {"review", "integration"}:
+            return [
+                ("ID", "id", 12, 3),
+                ("SUMMARY", "summary", 12, 3),
+                ("EVIDENCE", "evidence", 10, 2),
+                ("NEXT", "next", 10, 2),
+            ]
+        if group == "blocked":
+            return [
+                ("ID", "id", 12, 3),
+                ("SUMMARY", "summary", 12, 3),
+                ("BLOCKER", "blocker", 12, 3),
+                ("NEXT", "next", 10, 2),
+            ]
+        return [
+            ("ID", "id", 12, 3),
+            ("SUMMARY", "summary", 14, 3),
+            ("COMPLETED", "completed", 12, 2),
+            ("EVIDENCE", "evidence", 12, 2),
+        ]
+
+    def _overview_column_widths(self, columns: list[tuple[str, str, int, int]]) -> list[int]:
+        """Allocate table column widths across the configured output width."""
+        gaps = OVERVIEW_COLUMN_GAP * (len(columns) - 1)
+        available = max(len(columns), self._width - OVERVIEW_TABLE_INDENT - gaps)
+        minimums = [minimum for _label, _key, minimum, _weight in columns]
+        minimum_total = sum(minimums)
+        if available <= minimum_total:
+            return self._scaled_widths(minimums, available)
+
+        extra = available - minimum_total
+        weights = [weight for _label, _key, _minimum, weight in columns]
+        weight_total = sum(weights)
+        widths = [
+            minimum + (extra * weight // weight_total) for minimum, weight in zip(minimums, weights)
+        ]
+        remainder = available - sum(widths)
+        for index in range(remainder):
+            widths[index % len(widths)] += 1
+        return widths
+
+    def _scaled_widths(self, minimums: list[int], available: int) -> list[int]:
+        """Scale minimum widths down for very narrow output."""
+        total = sum(minimums)
+        widths = [max(1, available * width // total) for width in minimums]
+        while sum(widths) > available:
+            index = max(range(len(widths)), key=lambda item: widths[item])
+            widths[index] -= 1
+        while sum(widths) < available:
+            index = min(range(len(widths)), key=lambda item: widths[item])
+            widths[index] += 1
+        return widths
+
+    def _overview_cell(
         self,
         group: str,
         item: dict[str, Any],
-        detail_widths: dict[str, int],
-    ) -> list[tuple[str, str]]:
-        """Return compact overview detail lines for one item."""
-        details: list[tuple[str, str]] = []
-        blockers = [self._compact_text(value) for value in item.get("blockers", []) if value]
-        if blockers:
-            blocker = blockers[0]
-            if len(blockers) > 1:
-                blocker = self._truncate_with_suffix(
-                    blocker,
-                    detail_widths["blocker"],
-                    f" (+{len(blockers) - 1} more)",
-                )
-            details.append(("blocker", blocker))
-        if item.get("latest_evidence"):
-            details.append(("evidence", self._compact_text(item["latest_evidence"])))
-        if (
-            group != "recently_completed"
-            and item.get("next_action")
-            and len(details) < OVERVIEW_DETAIL_LIMIT
-        ):
-            details.append(("next", self._compact_text(item["next_action"])))
-        if group == "recently_completed" and not details and item.get("completed_at"):
-            details.append(
-                (
-                    "completed",
-                    self._compact_text(
-                        f"{item['completed_at']} by {item.get('completed_by') or 'system'}"
-                    ),
-                )
-            )
-        return details[:OVERVIEW_DETAIL_LIMIT]
+        key: str,
+        width: int,
+    ) -> str:
+        """Return a one-line overview table cell."""
+        if key == "id":
+            return self._truncate(item["id"], width)
+        if key == "summary":
+            return self._truncate(item["title"], width)
+        if key == "state":
+            return self._truncate(item.get("state") or "-", width)
+        if key == "next":
+            return self._truncate(item.get("next_action") or "-", width)
+        if key == "evidence":
+            return self._truncate(item.get("latest_evidence") or "-", width)
+        if key == "completed":
+            completed = self._compact_completed_at(item.get("completed_at") or "")
+            return self._truncate(completed or "-", width)
+        if key == "blocker":
+            blockers = [self._compact_text(value) for value in item.get("blockers", []) if value]
+            if not blockers:
+                return "-"
+            if len(blockers) == 1:
+                return self._truncate(blockers[0], width)
+            return self._truncate_with_suffix(blockers[0], width, f" (+{len(blockers) - 1} more)")
+        raise ValueError(f"unsupported overview column {key!r} for group {group!r}")
+
+    def _overview_row(self, values: list[str], widths: list[int], *, header: bool = False) -> None:
+        """Print one overview table row."""
+        line = Text(" " * OVERVIEW_TABLE_INDENT)
+        for index, (value, width) in enumerate(zip(values, widths)):
+            if index:
+                line.append(" " * OVERVIEW_COLUMN_GAP)
+            line.append(f"{value:<{width}}", style=OVERVIEW_HEADER_STYLE if header else "")
+        self._console.print(line)
 
     def _compact_text(self, value: object) -> str:
         """Collapse internal whitespace for one-line summaries."""
@@ -235,17 +280,12 @@ class HumanOutputRenderer:
             return suffix[-width:]
         return f"{self._truncate(text, available)}{suffix}"
 
-    def _detail_width(self, label: str) -> int:
-        """Return available display width for one overview detail value."""
-        return max(1, self._width - len(f"{' ' * OVERVIEW_DETAIL_INDENT}{label}: "))
-
-    def _overview_detail_line(self, label: str, value: object) -> None:
-        """Render one compact overview detail with a styled label."""
-        prefix = f"{' ' * OVERVIEW_DETAIL_INDENT}{label}: "
-        width = max(1, self._width - len(prefix))
-        line = Text(prefix, style=OVERVIEW_LABEL_STYLE)
-        line.append(self._truncate(value, width), style=OVERVIEW_DETAIL_STYLE)
-        self._console.print(line)
+    def _compact_completed_at(self, value: object) -> str:
+        """Return a compact completed timestamp for overview rows."""
+        text = self._compact_text(value)
+        if not text:
+            return ""
+        return text.replace("T", " ")[:16]
 
     def next_tasks(self, states: list[TaskState]) -> None:
         """Render ready task summaries."""

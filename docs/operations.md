@@ -201,13 +201,13 @@ Blocked entries include short blocker summaries derived from the evaluated
 latest evidence summaries when available. Recently completed entries are ordered
 from completion audit records, not task priority.
 
-Human overview output uses spaced item blocks: the task id anchors each block,
-the title wraps beneath it, and detail labels are indented one level deeper.
-Group headings, task ids, and detail labels use color when the terminal supports
-it, without decorative panels or box-drawing characters. Long blockers, next
-actions, evidence, and completion notes are truncated with `...` in default human
-output. Each group reports a count and defaults to five visible items for
-readability; pass `--limit 0` to show every grouped task.
+Human overview output uses compact grouped tables with one task per row. The
+table headers carry the field names, so rows do not repeat labels such as
+`next:` or `evidence:`. Long task ids, titles, blockers, next actions, evidence,
+and completion notes are truncated with `...` in default human output. Use
+`agent-tracker task <task-id>` for full detail. Each group reports a count and
+defaults to five visible items for readability; pass `--limit 0` to show every
+grouped task.
 
 Use JSON output for automation:
 

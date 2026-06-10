@@ -793,36 +793,33 @@ def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
 
     assert code == 0
     assert "Toy Project (toy)" in output
-    assert (
-        "Ready (1)\n"
-        "  other-ready\n"
-        "    Other Ready\n"
-        "      next: Pick up the remaining ready task." in output
-    )
-    assert "Active (1)\n  ready\n    Ready\n      state: claimed; agent agent-1" in output
-    assert (
-        "Review (1)\n"
-        "  review-task\n"
-        "    Review Task\n"
-        "      state: awaiting_review\n"
-        "      evidence: pr:review-task" in output
-    )
-    assert (
-        "Integration (1)\n"
-        "  integration-task\n"
-        "    Integration Task\n"
-        "      state: awaiting_merge\n"
-        "      evidence: git:integration-task"
-    ) in output
-    assert (
-        "Blocked (1)\n"
-        "  blocked\n"
-        "    Blocked\n"
-        "      blocker: Depends on ready (ready: claimed)" in output
-    )
-    assert "Recently completed (2)\n  done-b\n    Done B\n" in output
-    assert "      evidence: git:done-b" in output
-    assert "      completed: " not in output
+    lines = output.splitlines()
+    other_ready_row = next(line for line in lines if line.startswith("  other-ready"))
+    active_row = next(line for line in lines if line.startswith("  ready"))
+    review_row = next(line for line in lines if line.startswith("  review-task"))
+    integration_row = next(line for line in lines if line.startswith("  integration-task"))
+    blocked_row = next(line for line in lines if line.startswith("  blocked"))
+    completed_row = next(line for line in lines if line.startswith("  done-b"))
+
+    assert "READY (1)" in output
+    assert "SUMMARY" in output
+    assert "NEXT" in output
+    assert "EVIDENCE" in output
+    assert "Other Ready" in other_ready_row
+    assert "Pick up the remaining" in other_ready_row
+    assert "Ready" in active_row
+    assert "claimed" in active_row
+    assert "Review Task" in review_row
+    assert "pr:review-task" in review_row
+    assert "Integration Task" in integration_row
+    assert "git:integrat..." in integration_row
+    assert "Blocked" in blocked_row
+    assert "Depends on ready" in blocked_row
+    assert "Done B" in completed_row
+    assert "git:done-b" in completed_row
+    assert "completed: " not in output
+    assert "next:" not in output
+    assert "evidence:" not in output
     assert "foundation: Foundation" not in output
     assert "  - other-ready" not in output
 
@@ -845,8 +842,10 @@ def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
     item_output = stdout.getvalue()
 
     assert "Toy Project (toy)" in overview_output
-    assert "Ready (1)" in overview_output
-    assert "  other-ready\n    Other Ready" in item_output
+    assert "READY (1)" in overview_output
+    assert "  ID" in item_output
+    assert "  other-ready" in item_output
+    assert "Other Ready" in item_output
     assert "... 1 more; use --limit 0 to show all" in overview_output
     assert_no_box_drawing(overview_output)
     assert_no_box_drawing(item_output)
@@ -894,14 +893,11 @@ def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) 
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    assert any(line.startswith("      next: Coordinate the implementation") for line in lines)
-    assert any(line.startswith("      next: ") and line.endswith("...") for line in lines)
-    assert any(
-        line.startswith("      blocker: ") and line.endswith("... (+1 more)") for line in lines
-    )
-    assert not any(
-        line.startswith("            details before asking another worker") for line in lines
-    )
+    assert any("Coordinate" in line and "..." in line for line in lines)
+    assert any("(+1 more)" in line for line in lines)
+    assert not any("next:" in line for line in lines)
+    assert not any("blocker:" in line for line in lines)
+    assert not any("details before asking another worker" in line for line in lines)
 
     stdout = StringIO()
     with redirect_stdout(stdout):
@@ -916,10 +912,10 @@ def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) 
     assert any(value.endswith("resume safely. (ready: claimed)") for value in blocked["blockers"])
 
 
-def test_cli_overview_human_output_distinguishes_wrapped_titles(
+def test_cli_overview_human_output_truncates_long_title_cells(
     tmp_path: Path,
 ) -> None:
-    """Wrapped overview titles use a distinct indent from detail fields."""
+    """Long overview titles stay in one compact table row."""
     config_path = write_project(tmp_path)
     task_path = tmp_path / "tasks.json"
     payload = json.loads(task_path.read_text(encoding="utf-8"))
@@ -942,19 +938,17 @@ def test_cli_overview_human_output_distinguishes_wrapped_titles(
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    assert any(
-        line.startswith(" " * 4) and "should not look like a field" in line for line in lines
-    )
-    assert not any(
-        line.startswith(" " * 6) and "should not look like a field" in line for line in lines
-    )
-    assert any(line.startswith("      next: Keep detail fields") for line in lines)
+    ready_row = next(line for line in lines if line.startswith("  ready"))
+    assert "Add repository" in ready_row
+    assert "..." in ready_row
+    assert "should not look like a field" not in "\n".join(lines)
+    assert "Keep detail fields" in ready_row
 
 
-def test_cli_overview_human_output_wraps_unbroken_titles_under_title_column(
+def test_cli_overview_human_output_truncates_unbroken_title_cells(
     tmp_path: Path,
 ) -> None:
-    """Unbroken overview title tokens stay under the compact title column."""
+    """Unbroken overview title tokens stay in one compact table row."""
     config_path = write_project(tmp_path)
     task_path = tmp_path / "tasks.json"
     payload = json.loads(task_path.read_text(encoding="utf-8"))
@@ -973,9 +967,9 @@ def test_cli_overview_human_output_wraps_unbroken_titles_under_title_column(
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    assert title_lines
-    assert title_lines[0].startswith(" " * 4 + "x")
-    assert any(line.startswith(" " * 4 + "x") for line in title_lines[1:])
+    assert len(title_lines) == 1
+    assert title_lines[0].startswith("  ready")
+    assert "x..." in title_lines[0]
     assert not any(line.startswith("x") for line in title_lines)
 
 
