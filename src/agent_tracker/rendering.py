@@ -14,7 +14,10 @@ from rich.text import Text
 from agent_tracker.config import ProjectConfig
 from agent_tracker.models import TaskState
 
-HUMAN_OUTPUT_WIDTH = 80
+OVERVIEW_HANDLE_WIDTH = 24
+OVERVIEW_STATUS_WIDTH = 8
+OVERVIEW_HEADER_STYLE = "bold"
+OVERVIEW_MUTED_STYLE = "dim"
 OVERVIEW_GROUPS = (
     ("ready", "Ready"),
     ("active", "Active"),
@@ -28,11 +31,13 @@ OVERVIEW_GROUPS = (
 class HumanOutputRenderer:
     """Render copy-paste-safe human CLI output."""
 
-    def __init__(self, output: TextIO | None = None, *, width: int = HUMAN_OUTPUT_WIDTH) -> None:
-        """Bind the renderer to an output stream and fixed terminal width."""
+    def __init__(self, output: TextIO | None = None, *, width: int | None = None) -> None:
+        """Bind the renderer to an output stream."""
         self._output = output or sys.stdout
-        self._width = width
-        self._console = Console(file=self._output, width=width, highlight=False)
+        console_options: dict[str, Any] = {"file": self._output, "highlight": False}
+        if width is not None:
+            console_options["width"] = width
+        self._console = Console(**console_options)
 
     def line(
         self,
@@ -40,18 +45,21 @@ class HumanOutputRenderer:
         *,
         initial_indent: str = "",
         subsequent_indent: str = "",
+        break_long_words: bool = False,
+        style: str | None = None,
     ) -> None:
         """Print a wrapped human-oriented line with stable indentation."""
         self._console.print(
             Text(
                 textwrap.fill(
                     text,
-                    width=self._width,
+                    width=self._terminal_width,
                     initial_indent=initial_indent,
                     subsequent_indent=subsequent_indent or initial_indent,
-                    break_long_words=False,
+                    break_long_words=break_long_words,
                     break_on_hyphens=False,
-                )
+                ),
+                style=style or "",
             )
         )
 
@@ -105,46 +113,199 @@ class HumanOutputRenderer:
     def overview(self, payload: dict[str, Any]) -> None:
         """Render a grouped project overview."""
         self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
-        for key, heading in OVERVIEW_GROUPS:
-            items = payload["groups"][key]
-            total = payload["counts"][key]
-            self._console.print(Text(f"{heading} ({total})", style="bold"))
-            if not items:
-                self._console.print(Text("  (none)"))
-                continue
-            for item in items:
-                self.overview_item(key, item)
-            if len(items) < total:
-                self._console.print(Text(f"  ... {total - len(items)} more"))
+        self.line(self._overview_summary(payload), style=OVERVIEW_MUTED_STYLE)
+        self._console.print()
+        self._overview_attention(payload)
+        self._overview_blocked(payload)
+        self._overview_ready(payload)
+        self._overview_recent(payload)
 
     def overview_item(self, group: str, item: dict[str, Any]) -> None:
         """Render one overview item."""
-        qualifiers = []
-        if group in {"active", "review", "integration"}:
-            qualifiers.append(str(item["state"]))
-        if item.get("lease_agent_id"):
-            qualifiers.append(f"agent {item['lease_agent_id']}")
-        qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
-        self.line(
-            f"- {item['id']}: {item['title']}{qualifier}",
-            initial_indent="  ",
-            subsequent_indent="      ",
+        if group == "blocked":
+            self._overview_blocked_row(item)
+        elif group == "recently_completed":
+            self._overview_recent_row(item)
+        elif group == "ready":
+            self._overview_ready_row(item)
+        else:
+            self._overview_attention_row(group, item)
+
+    def _overview_summary(self, payload: dict[str, Any]) -> str:
+        """Return the one-line overview count summary."""
+        counts = payload["counts"]
+        open_count = sum(
+            counts[key] for key in ("ready", "active", "review", "integration", "blocked")
+        )
+        return (
+            f"Open {open_count} | Ready {counts['ready']} | Active {counts['active']} | "
+            f"Review {counts['review']} | Merge {counts['integration']} | "
+            f"Blocked {counts['blocked']} | Done {counts['recently_completed']}"
         )
 
-        for blocker in item.get("blockers", [])[:2]:
+    def _overview_attention(self, payload: dict[str, Any]) -> None:
+        """Render active, review, and integration work as one attention list."""
+        groups = payload["groups"]
+        counts = payload["counts"]
+        keys = ("active", "review", "integration")
+        items = [(key, item) for key in keys for item in groups[key]]
+        total = sum(counts[key] for key in keys)
+        if not items and total == 0:
+            return
+        self._console.print(Text("ATTENTION", style=OVERVIEW_HEADER_STYLE))
+        if not items:
+            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+        for group, item in items:
+            self._overview_attention_row(group, item)
+        self._overview_hidden_count(total - len(items), "attention items")
+        self._console.print()
+
+    def _overview_blocked(self, payload: dict[str, Any]) -> None:
+        """Render blocked work with its blocker because it cannot be acted on directly."""
+        items = payload["groups"]["blocked"]
+        total = payload["counts"]["blocked"]
+        if not items and total == 0:
+            return
+        self._console.print(Text(f"BLOCKED ({total})", style=OVERVIEW_HEADER_STYLE))
+        if not items:
+            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+        for item in items:
+            self._overview_blocked_row(item)
+        self._overview_hidden_count(total - len(items), "blocked tasks")
+        self._console.print()
+
+    def _overview_ready(self, payload: dict[str, Any]) -> None:
+        """Render ready work as a title-first task index."""
+        items = payload["groups"]["ready"]
+        total = payload["counts"]["ready"]
+        self._console.print(Text(f"READY ({total})", style=OVERVIEW_HEADER_STYLE))
+        if not items:
+            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+        for item in items:
+            self._overview_ready_row(item)
+        self._overview_hidden_count(total - len(items), "ready tasks")
+        self._console.print()
+
+    def _overview_recent(self, payload: dict[str, Any]) -> None:
+        """Render recent completions as a short history tail."""
+        items = payload["groups"]["recently_completed"]
+        total = payload["counts"]["recently_completed"]
+        self._console.print(Text(f"RECENT ({total})", style=OVERVIEW_HEADER_STYLE))
+        if not items:
+            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+        for item in items:
+            self._overview_recent_row(item)
+        self._overview_hidden_count(total - len(items), "completed tasks")
+
+    def _overview_attention_row(self, group: str, item: dict[str, Any]) -> None:
+        """Render one attention row."""
+        status = self._overview_status(group)
+        handle = self._overview_handle(item)
+        prefix = f"  {status:<{OVERVIEW_STATUS_WIDTH}} {handle:<{self._handle_width}} "
+        self.line(
+            self._compact_text(item["title"]),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=True,
+        )
+
+    def _overview_blocked_row(self, item: dict[str, Any]) -> None:
+        """Render one blocked row with the concise blocker summary."""
+        prefix = f"  {self._overview_handle(item):<{self._handle_width}} "
+        self.line(
+            self._compact_text(item["title"]),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=True,
+        )
+        blocker = self._overview_blocker(item)
+        if blocker:
             self.field("blocker", blocker, indent=4)
-        if len(item.get("blockers", [])) > 2:
-            self.field("blocker", f"+{len(item['blockers']) - 2} more", indent=4)
-        if item.get("next_action"):
-            self.field("next", item["next_action"], indent=4)
-        if item.get("latest_evidence"):
-            self.field("evidence", item["latest_evidence"], indent=4)
-        if group == "recently_completed" and item.get("completed_at"):
-            self.field(
-                "completed",
-                f"{item['completed_at']} by {item.get('completed_by') or 'system'}",
-                indent=4,
+
+    def _overview_ready_row(self, item: dict[str, Any]) -> None:
+        """Render one ready row."""
+        prefix = f"  {self._overview_handle(item):<{self._handle_width}} "
+        self.line(
+            self._compact_text(item["title"]),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=True,
+        )
+
+    def _overview_recent_row(self, item: dict[str, Any]) -> None:
+        """Render one recent completion row."""
+        completed = self._compact_completed_time(item.get("completed_at") or "")
+        prefix = f"  {completed:<5} "
+        self.line(
+            self._compact_text(item["title"]),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=True,
+            style=OVERVIEW_MUTED_STYLE,
+        )
+
+    def _overview_hidden_count(self, hidden_count: int, noun: str) -> None:
+        """Render a hidden-count hint for a section."""
+        if hidden_count <= 0:
+            return
+        self._console.print(
+            Text(
+                f"  ... {hidden_count} more {noun}; use --limit 0 to show all",
+                style=OVERVIEW_MUTED_STYLE,
             )
+        )
+
+    def _overview_status(self, group: str) -> str:
+        """Return a short status label for an overview group."""
+        return {"active": "ACTIVE", "review": "REVIEW", "integration": "MERGE"}.get(
+            group, group.upper()
+        )
+
+    def _overview_handle(self, item: dict[str, Any]) -> str:
+        """Return a compact command-oriented task handle."""
+        return self._truncate(item["id"], self._handle_width)
+
+    def _overview_blocker(self, item: dict[str, Any]) -> str:
+        """Return the concise blocker summary for a blocked task."""
+        blockers = [self._compact_text(value) for value in item.get("blockers", []) if value]
+        if not blockers:
+            return ""
+        if len(blockers) == 1:
+            return blockers[0]
+        return f"{blockers[0]} (+{len(blockers) - 1} more)"
+
+    def _compact_text(self, value: object) -> str:
+        """Collapse internal whitespace for one-line summaries."""
+        return " ".join(str(value).split())
+
+    def _truncate(self, value: object, width: int) -> str:
+        """Return a single-line value capped to a display width."""
+        text = self._compact_text(value)
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[: width - 3].rstrip() + "..."
+
+    def _compact_completed_time(self, value: object) -> str:
+        """Return a compact completed time for the recent-completion tail."""
+        text = self._compact_text(value)
+        if not text:
+            return ""
+        text = text.replace("T", " ")
+        if len(text) >= 16 and text[10] == " ":
+            return text[11:16]
+        return self._truncate(text, 5)
+
+    @property
+    def _terminal_width(self) -> int:
+        """Return the width Rich detected for this output stream."""
+        return max(20, self._console.size.width)
+
+    @property
+    def _handle_width(self) -> int:
+        """Return a width-aware cap for overview task handles."""
+        return min(OVERVIEW_HANDLE_WIDTH, max(12, self._terminal_width // 4))
 
     def next_tasks(self, states: list[TaskState]) -> None:
         """Render ready task summaries."""

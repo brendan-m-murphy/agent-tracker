@@ -289,24 +289,24 @@ stable labels, no decorative panels, and readable wrapping when copied into
 logs, chat, or pull request comments. It is a coordination summary, not a full
 task dump.
 
-The human output is grouped under stable headings:
+The human output is grouped under quick-triage headings:
 
+- Attention, combining Active, Review, and Integration work that can move now;
+- Blocked, with the current blocker summary;
 - Ready;
-- Active;
-- Review;
-- Integration;
-- Blocked;
-- Recently completed.
+- Recent.
 
-Blocked entries include short blocker summaries derived from the evaluated
-`requirements` data. Ready and waiting entries show `next_action` and latest
-evidence when available. Recently completed entries are ordered from completion
-audit records, not task priority.
+The JSON payload keeps the more detailed stable groups. Recently completed
+entries are ordered from completion audit records, not task priority.
 
-Human overview output wraps long task titles, blockers, next actions, evidence,
-and completion details at a standard terminal width. Wrapped task titles use a
-distinct continuation indent so they do not read like `next`, `blocker`, or
-other detail fields. Each group reports a count and defaults to five visible
+Human overview output is a quick triage view, not a task detail report. It
+starts with count summaries, separates actionable Active/Review/Merge work from
+blocked work, shows ready task titles, keeps blocker text only for the separate
+`BLOCKED` section, and ends with a short recent completion tail. It
+intentionally omits full `next_action` prose, evidence paths, and completion
+evidence from the default view. Use
+`agent-tracker task <task-id>` for full detail or `overview --json` for full
+structured values. Each group reports a count and defaults to five visible
 items for readability; pass `--limit 0` to show every grouped task.
 
 Use JSON output for automation:
@@ -319,7 +319,8 @@ The JSON payload contains `counts` plus grouped task dictionaries under
 `groups.ready`, `groups.active`, `groups.review`, `groups.integration`,
 `groups.blocked`, and `groups.recently_completed`. By default, each group is
 limited to five entries for readability; pass `--limit 0` for every grouped
-task dictionary.
+task dictionary. JSON output keeps full field values and does not inherit human
+truncation, wrapping, or display labels.
 
 Like `status`, `overview` is read-only by default. It reports the effective
 state without mutating stale leases. Pass `--recover-stale-leases` only when
