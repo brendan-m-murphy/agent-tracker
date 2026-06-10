@@ -4499,14 +4499,12 @@ def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
 
 def test_skills_document_coordinator_worktree_isolation_policy() -> None:
     """Vendored skills keep coordinator-managed edits out of canonical checkouts."""
-    coordinator = vendored_skill_path("agent-coordinator").joinpath("SKILL.md").read_text(
-        encoding="utf-8"
+    coordinator = (
+        vendored_skill_path("agent-coordinator").joinpath("SKILL.md").read_text(encoding="utf-8")
     )
-    worker = vendored_skill_path("task-worker").joinpath("SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    manager = vendored_skill_path("project-manager").joinpath("SKILL.md").read_text(
-        encoding="utf-8"
+    worker = vendored_skill_path("task-worker").joinpath("SKILL.md").read_text(encoding="utf-8")
+    manager = (
+        vendored_skill_path("project-manager").joinpath("SKILL.md").read_text(encoding="utf-8")
     )
 
     assert "worktree_mode: one_task_per_worktree" in coordinator
