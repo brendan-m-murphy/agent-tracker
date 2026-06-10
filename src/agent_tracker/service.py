@@ -351,6 +351,7 @@ class Coordinator:
     def completion_integrity_payload(self) -> dict[str, Any]:
         """Return a deterministic diagnostic for completed task evidence."""
         issues = self.store.completion_integrity_issues(self.config.project_id)
+        issues.extend(_completion_file_evidence_git_issues(self.config, self.task_states()))
         return {
             "project_id": self.config.project_id,
             "ok": not issues,
@@ -1295,6 +1296,135 @@ def _top_level_state_path(config: ProjectConfig, key: str) -> Path | None:
         return None
     value = _first_text(config.raw.get(key))
     return config.resolve_state_path(key) if value else None
+
+
+def _completion_file_evidence_git_issues(
+    config: ProjectConfig,
+    states: list[TaskState],
+) -> list[dict[str, Any]]:
+    """Return completed-task file evidence pointing at untracked or unstaged files."""
+    git_root = _git_worktree_root(config.effective_config_path)
+    if git_root is None:
+        return []
+    issues: list[dict[str, Any]] = []
+    for state in states:
+        if state.task.status != "done":
+            continue
+        for uri in state.evidence:
+            evidence_path = _file_evidence_path(uri)
+            if not evidence_path:
+                continue
+            relative_path = _git_relative_evidence_path(git_root, evidence_path)
+            if relative_path is None:
+                continue
+            evidence_state = _git_file_evidence_state(git_root, relative_path)
+            if evidence_state == "clean":
+                continue
+            if evidence_state == "untracked":
+                reason = "file evidence points at an untracked workspace file"
+                kind = "file_evidence_untracked"
+            else:
+                reason = "file evidence points at an unstaged workspace file"
+                kind = "file_evidence_unstaged"
+            issues.append(
+                {
+                    "task_id": state.task.task_id,
+                    "title": state.task.title,
+                    "status": state.task.status,
+                    "kind": kind,
+                    "reason": reason,
+                    "evidence": [uri],
+                    "completion_action": "",
+                    "completed_by": "",
+                    "completed_at": "",
+                    "direct_merge": False,
+                }
+            )
+    return issues
+
+
+def _git_worktree_root(path: Path) -> Path | None:
+    """Return the containing Git worktree root, or ``None`` outside Git."""
+    start = path if path.is_dir() else path.parent
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    root = completed.stdout.strip().splitlines()
+    if not root:
+        return None
+    return Path(root[0]).resolve()
+
+
+def _file_evidence_path(uri: str) -> str:
+    """Return a local path from a file evidence URI, or an empty string."""
+    if not uri.startswith("file:"):
+        return ""
+    text = uri.removeprefix("file:")
+    if text.startswith("//"):
+        parsed = urlsplit(uri)
+        if parsed.netloc and parsed.netloc != "localhost":
+            return ""
+        text = parsed.path
+    return unquote(text).strip()
+
+
+def _git_relative_evidence_path(git_root: Path, evidence_path: str) -> str | None:
+    """Resolve evidence below the Git root and return a Git pathspec."""
+    path = Path(evidence_path).expanduser()
+    candidate = path if path.is_absolute() else git_root / path
+    git_root_text = os.path.abspath(os.path.normpath(str(git_root)))
+    candidate_text = os.path.abspath(os.path.normpath(str(candidate)))
+    try:
+        common_path = os.path.commonpath([git_root_text, candidate_text])
+    except ValueError:
+        return None
+    if common_path != git_root_text:
+        return None
+    pathspec = Path(os.path.relpath(candidate_text, git_root_text)).as_posix()
+    if pathspec == ".":
+        return None
+    return pathspec or None
+
+
+def _git_file_evidence_state(git_root: Path, relative_path: str) -> str:
+    """Return whether a Git pathspec is clean, untracked, or unstaged."""
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(git_root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+                "--",
+                relative_path,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return "clean"
+    if completed.returncode != 0:
+        return "clean"
+    status_lines = [line for line in completed.stdout.splitlines() if len(line) >= 2]
+    if any(line[:2] in {"??", "!!"} for line in status_lines):
+        return "untracked"
+    if any(line[1] != " " for line in status_lines if line[:2] != "??"):
+        return "unstaged"
+    return "clean"
 
 
 def _spool_path(config: ProjectConfig, value: Any) -> Path | None:

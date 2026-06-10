@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
@@ -1291,6 +1292,63 @@ def test_completion_integrity_check_reports_direct_merge_git_only_completion(
     assert payload["issues"][0]["completion_action"] == "task.complete"
     assert payload["issues"][0]["evidence"] == ["git:main-abc123"]
     assert "pr:/review:/integration:" in payload["issues"][0]["reason"]
+    assert tool_payload == payload
+
+
+def test_completion_integrity_check_reports_file_evidence_git_hygiene(
+    tmp_path: Path,
+) -> None:
+    """Integrity check reports completed file evidence with dirty Git hygiene."""
+    config_path = write_project(tmp_path)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    git("init")
+    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / "staged.txt").write_text("ready\n", encoding="utf-8")
+    (tmp_path / "unstaged.txt").write_text("ready\n", encoding="utf-8")
+    (tmp_path / "deleted.txt").write_text("ready\n", encoding="utf-8")
+    git("add", ".gitignore", "staged.txt", "unstaged.txt", "deleted.txt")
+    (tmp_path / "unstaged.txt").write_text("changed\n", encoding="utf-8")
+    (tmp_path / "deleted.txt").unlink()
+    (tmp_path / "untracked.txt").write_text("local only\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("ignored local only\n", encoding="utf-8")
+
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["file:staged.txt", "file:unstaged.txt", "file:untracked.txt"],
+    )
+    coord.record_evidence("ready", "file:deleted.txt")
+    coord.record_evidence("ready", "file:ignored.txt")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["check-completion-integrity", "--config", str(config_path), "--json"])
+    payload = json.loads(stdout.getvalue())
+    tool_payload = AgentTrackerTools(config_path).check_completion_integrity()
+
+    issues_by_evidence = {issue["evidence"][0]: issue for issue in payload["issues"]}
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["issue_count"] == 4
+    assert "file:staged.txt" not in issues_by_evidence
+    assert issues_by_evidence["file:unstaged.txt"]["kind"] == "file_evidence_unstaged"
+    assert issues_by_evidence["file:deleted.txt"]["kind"] == "file_evidence_unstaged"
+    assert issues_by_evidence["file:untracked.txt"]["kind"] == "file_evidence_untracked"
+    assert issues_by_evidence["file:ignored.txt"]["kind"] == "file_evidence_untracked"
     assert tool_payload == payload
 
 

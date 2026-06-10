@@ -1115,7 +1115,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_completion = sub.add_parser(
         "check-completion-integrity",
-        help="Check completed tasks for evidence that no longer satisfies policy.",
+        help=(
+            "Check completed tasks for evidence that no longer satisfies policy "
+            "or points at untracked, ignored, or unstaged files."
+        ),
     )
     add_common(check_completion)
     check_completion.add_argument("--json", action="store_true")

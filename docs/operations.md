@@ -776,9 +776,14 @@ agent-tracker check-completion-integrity --config project.json --json
 ```
 
 The check is read-only and uses the same completion-policy validator as the
-state transitions. It exits non-zero when it finds issues. Missing, malformed,
-or unknown `completion_policy` metadata remains legacy behavior and is not
-reported as a policy issue.
+state transitions. It also inspects completed-task `file:` evidence inside the
+containing Git worktree and reports evidence that still points at untracked,
+ignored, or unstaged workspace files. Ignored files are reported with the
+untracked hygiene kind, because they are also absent from durable tracked
+history. These hygiene findings use additive issue kinds:
+`file_evidence_untracked` and `file_evidence_unstaged`. The check exits non-zero
+when it finds issues. Missing, malformed, or unknown `completion_policy`
+metadata remains legacy behavior and is not reported as a policy issue.
 
 ## Await Review Or Integration
 

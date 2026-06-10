@@ -201,7 +201,9 @@ Use evidence that future reviewers can inspect. Good examples:
 - `file:docs/operations.md`
 - `pr:https://github.com/<owner>/<repo>/pull/<number>`
 
-Check completed tasks for policy drift or missing integrated evidence:
+Check completed tasks for policy drift, missing integrated evidence, or
+`file:` evidence that still points at untracked, ignored, or unstaged workspace
+files:
 
 ```bash
 uv run agent-tracker check-completion-integrity --config tracking/project.json
