@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import posixpath
@@ -1625,10 +1626,9 @@ def _is_safe_spool_entry_name(name: str) -> bool:
 def _load_asyncssh() -> Any:
     """Import AsyncSSH lazily for optional SSH spool support."""
     try:
-        import asyncssh  # type: ignore[import-not-found]
+        return importlib.import_module("asyncssh")
     except ModuleNotFoundError as exc:
         raise ImportError(
             "SSH spool transport requires the optional 'ssh' extra; "
             "install it with `agent-tracker[ssh]` or run `uv run --extra ssh ...`"
         ) from exc
-    return asyncssh
