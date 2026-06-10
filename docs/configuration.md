@@ -115,6 +115,10 @@ when replacing a built-in default with project-specific behavior.
     "error": "spool/error",
     "remote_inbox": "/shared/demo/spool/outbox"
   },
+  "coordination_policy": {
+    "worktree_mode": "one_task_per_worktree",
+    "pr_mode": "one_task_per_pr"
+  },
   "workspaces": {
     "hpc": {
       "kind": "local",
@@ -150,6 +154,7 @@ when replacing a built-in default with project-specific behavior.
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
 | `spool_error` | No | `<inbox>/error` | Legacy top-level error path used when `spool` is absent. |
+| `coordination_policy` | No | Conservative defaults | Coordinator-managed implementation policy for task worktrees and PR mapping. |
 | `workspaces` | No | None | Named local or SSH workspace registry for cross-project worker launch and diagnostics. |
 
 Use stable `project_id` values. Evidence, events, audit entries, and snapshots
@@ -208,6 +213,40 @@ Do not use `AGENT_TRACKER_DB` or a copied config to redirect mutating commands
 to a sandbox-local database unless you are deliberately inspecting or testing a
 separate throwaway project. Production coordination should keep leases,
 evidence, and audit rows in the configured canonical database.
+
+## Coordination Policy
+
+`coordination_policy` lets a project choose how coordinator-managed
+implementation maps tasks onto writable worktrees and PRs. When omitted, the
+defaults are conservative:
+
+```json
+{
+  "coordination_policy": {
+    "worktree_mode": "one_task_per_worktree",
+    "pr_mode": "one_task_per_pr"
+  }
+}
+```
+
+Allowed `worktree_mode` values:
+
+- `one_task_per_worktree`: create or assign one non-canonical task worktree per
+  implementation task.
+- `shared_worktree_serial`: allow a shared non-canonical worktree only for
+  serially related tasks with non-conflicting write scopes. Parallel agents
+  must still use separate writable worktrees.
+
+Allowed `pr_mode` values:
+
+- `one_task_per_pr`: open one PR or equivalent review surface per task.
+- `batch_pr_allowed`: allow an explicit batch or epic PR. The PR must list the
+  covered task IDs, the batching rationale, and closeout evidence for each
+  task.
+
+These settings guide coordinators, project managers, and worker prompts. They
+do not replace task leases, write scopes, completion policy metadata, or final
+tracker evidence.
 
 Absolute paths and `~` are also supported:
 
@@ -382,7 +421,7 @@ remote project checkouts. `list-workspaces` reports the resolved registry.
         "codex",
         "exec",
         "--cd",
-        "{workspace_path}",
+        "{worktree_path}",
         "--output-last-message",
         "{report_path}",
         "-"
@@ -403,13 +442,15 @@ are absolute or start with `~`. `config_path`, `spool_outbox`, and
 inside argv items:
 
 - `{agent_id}`
+- `{base_ref}`
+- `{branch}`
 - `{launch_id}`
 - `{project_id}`
 - `{prompt_path}`
 - `{report_path}`
 - `{task_id}`
 - `{workspace}`
-- `{workspace_path}`
+- `{worktree_path}`
 
 SSH workspace entries are validated and listed, but not launched yet:
 

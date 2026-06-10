@@ -80,7 +80,9 @@ from agent_tracker.models import DependencyRecord, EventRecord, TaskRecord, Task
 - `name`: human-readable name;
 - `root`: directory containing the config file;
 - `db_path`: resolved SQLite path;
-- `raw`: original config dictionary.
+- `coordination_policy`: validated worktree and PR policy with conservative
+  defaults filled in;
+- `raw`: loaded config dictionary for project-specific extension fields.
 
 Use the resolver that matches the kind of path:
 

@@ -21,6 +21,9 @@ from agent_tracker import cli  # noqa: E402
 from agent_tracker import service as service_module  # noqa: E402
 from agent_tracker import skill_bootstrap as skill_bootstrap_module  # noqa: E402
 from agent_tracker.config import (  # noqa: E402
+    COORDINATION_PR_MODES,
+    COORDINATION_WORKTREE_MODES,
+    DEFAULT_COORDINATION_POLICY,
     PROJECT_CONFIG_ENV_VAR,
     PROJECT_DB_ENV_VAR,
     SUPPORTED_CONFIG_SCHEMA_VERSION,
@@ -322,6 +325,33 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
     assert config.raw["config_schema_version"] == SUPPORTED_CONFIG_SCHEMA_VERSION
 
 
+def test_coordination_policy_defaults_to_conservative_modes(tmp_path: Path) -> None:
+    """Projects default to isolated task worktrees and one PR per task."""
+    config = load_config(write_project(tmp_path))
+
+    assert config.coordination_policy == DEFAULT_COORDINATION_POLICY
+
+
+def test_coordination_policy_accepts_configured_modes(tmp_path: Path) -> None:
+    """Projects can loosen task worktree and PR mapping policy explicitly."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["coordination_policy"] = {
+        "worktree_mode": "shared_worktree_serial",
+        "pr_mode": "batch_pr_allowed",
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.coordination_policy == {
+        "worktree_mode": "shared_worktree_serial",
+        "pr_mode": "batch_pr_allowed",
+    }
+    assert config.coordination_policy["worktree_mode"] in COORDINATION_WORKTREE_MODES
+    assert config.coordination_policy["pr_mode"] in COORDINATION_PR_MODES
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -389,6 +419,10 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
             "config field 'workspaces.hpc.capabilities' must be a string or list of strings",
         ),
         (
+            {"project_id": "toy", "coordination_policy": []},
+            "config field 'coordination_policy' must be an object",
+        ),
+        (
             {"project_id": "toy", "pr_notification_setup_checker": []},
             "config field 'pr_notification_setup_checker' must be a string",
         ),
@@ -399,6 +433,17 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
         (
             {"project_id": "toy", "notifications": {"github": {"allow_live": "yes"}}},
             "config field 'notifications.github.allow_live' must be a boolean",
+        ),
+        (
+            {
+                "project_id": "toy",
+                "coordination_policy": {"worktree_mode": "canonical_repo"},
+            },
+            "config field 'coordination_policy.worktree_mode' must be one of",
+        ),
+        (
+            {"project_id": "toy", "coordination_policy": {"pr_mode": "batch_by_default"}},
+            "config field 'coordination_policy.pr_mode' must be one of",
         ),
         (
             {
@@ -2006,7 +2051,75 @@ def test_launch_worker_dry_run_does_not_create_artifacts(tmp_path: Path) -> None
     assert result["status"] == "dry_run"
     assert result["workspace"]["name"] == "hpc"
     assert result["command"] == []
+    assert result["coordination"]["policy"] == DEFAULT_COORDINATION_POLICY
+    assert result["coordination"]["assignment"]["worktree_path"] == str(workspace)
     assert not Path(result["artifacts"]["directory"]).exists()
+
+
+def test_launch_worker_default_command_targets_assigned_worktree(
+    tmp_path: Path,
+) -> None:
+    """The default executed worker command uses the assigned task worktree."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    result = coord.launch_worker(
+        "hpc",
+        task_id="ready",
+        execute=True,
+        dry_run=True,
+        worktree_path=str(assigned_worktree),
+    )
+
+    assert result["command"][0:4] == ["codex", "exec", "--cd", str(assigned_worktree)]
+
+
+def test_launch_worker_rejects_canonical_config_workspace_for_task(
+    tmp_path: Path,
+) -> None:
+    """Task launches must target an isolated/non-canonical implementation workspace."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "canonical": {
+            "kind": "local",
+            "path": str(tmp_path),
+        }
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="must not contain the canonical tracker config"):
+        coord.launch_worker("canonical", task_id="ready", agent_id="agent-1")
+
+
+def test_launch_worker_rejects_canonical_assigned_worktree_before_claim(
+    tmp_path: Path,
+) -> None:
+    """Explicit worker assignments cannot point back at the canonical checkout."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="assigned worktree must not contain"):
+        coord.launch_worker(
+            "hpc",
+            task_id="ready",
+            agent_id="agent-1",
+            claim_task=True,
+            worktree_path=str(config_path.parent),
+        )
+
+    state = coord.get_task("ready")
+    assert state.task.status == "pending"
+    assert state.lease_token == ""
+    assert state.lease_agent_id == ""
+    assert not (workspace / "results" / "worker-launches").exists()
 
 
 def test_launch_worker_dry_run_rejects_claim_without_mutation(tmp_path: Path) -> None:
@@ -2048,6 +2161,17 @@ def test_launch_worker_prepares_prompt_report_spool_and_task_evidence(
 
     assert result["status"] == "prepared"
     assert Path(artifacts["prompt"]).read_text(encoding="utf-8").startswith("# Ready")
+    prompt_text = Path(artifacts["prompt"]).read_text(encoding="utf-8")
+    assert "## Coordination Context" in prompt_text
+    assert "Worktree policy: `one_task_per_worktree`" in prompt_text
+    assert "Assigned branch: `codex/ready`" in prompt_text
+    launch_payload = json.loads(Path(artifacts["launch"]).read_text(encoding="utf-8"))
+    assert launch_payload["coordination"]["policy"] == DEFAULT_COORDINATION_POLICY
+    assert launch_payload["coordination"]["assignment"] == {
+        "branch": "codex/ready",
+        "base_ref": "main",
+        "worktree_path": str(workspace),
+    }
     assert Path(artifacts["report"]).read_text(encoding="utf-8") == (
         "Worker launch prepared; no command was executed.\n"
     )
@@ -2106,6 +2230,85 @@ def test_cli_launch_worker_executes_local_command_and_writes_report(
     )
     assert Path(result["artifacts"]["stdout"]).read_text(encoding="utf-8") == ""
     assert Path(result["artifacts"]["stderr"]).read_text(encoding="utf-8") == ""
+
+
+def test_cli_launch_worker_records_explicit_coordination_assignment(
+    tmp_path: Path,
+) -> None:
+    """CLI launch-worker flags can pass branch/base/worktree context to workers."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--task-id",
+                "ready",
+                "--branch",
+                "codex/ready-custom",
+                "--base-ref",
+                "origin/main",
+                "--worktree-path",
+                str(assigned_worktree),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    result = json.loads(stdout.getvalue())
+    assert result["coordination"]["assignment"] == {
+        "branch": "codex/ready-custom",
+        "base_ref": "origin/main",
+        "worktree_path": str(assigned_worktree),
+    }
+
+
+def test_cli_launch_worker_human_output_includes_coordination_assignment(
+    tmp_path: Path,
+) -> None:
+    """Human launch-worker output includes assigned branch and worktree context."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--task-id",
+                "ready",
+                "--branch",
+                "codex/ready-custom",
+                "--base-ref",
+                "origin/main",
+                "--worktree-path",
+                str(assigned_worktree),
+                "--dry-run",
+            ]
+        )
+
+    output = stdout.getvalue()
+    unwrapped_output = output.replace("\n", "")
+    assert code == 0
+    assert "Worker launch " in output
+    assert "  branch    codex/ready-custom" in output
+    assert f"  worktree  {assigned_worktree}" in unwrapped_output
+    assert_no_box_drawing(output)
 
 
 def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
@@ -5311,7 +5514,14 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     status = tools.status()
     alias_status = tools.get_project_status()
     overview = tools.overview(limit=1)
-    worker_prompt = tools.launch_worker_prompt("ready", agent_id="agent-1")
+    assigned_worktree = tmp_path / "worktrees" / "ready"
+    worker_prompt = tools.launch_worker_prompt(
+        "ready",
+        agent_id="agent-1",
+        branch="codex/ready-explicit",
+        base_ref="origin/main",
+        worktree_path=str(assigned_worktree),
+    )
     launch_worker = tools.launch_worker("ready", agent_id="agent-1")
 
     claim_keys = {"project_id", "task_id", "lease_token", "lease_expires_at", "agent_id"}
@@ -5345,6 +5555,8 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
         "agent_id",
         "launch_mode",
         "launched",
+        "coordination_policy",
+        "coordination",
         "prompt",
         "task",
     }
@@ -5353,10 +5565,19 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     assert worker_prompt["agent_id"] == "agent-1"
     assert worker_prompt["launch_mode"] == "prompt_only"
     assert worker_prompt["launched"] is False
+    assert worker_prompt["coordination_policy"] == DEFAULT_COORDINATION_POLICY
+    assert worker_prompt["coordination"]["assignment"] == {
+        "branch": "codex/ready-explicit",
+        "base_ref": "origin/main",
+        "worktree_path": str(assigned_worktree),
+    }
     assert launch_worker["launch_mode"] == "prompt_only"
     assert launch_worker["launched"] is False
+    assert launch_worker["coordination"]["assignment"]["branch"] == "codex/ready"
     assert worker_prompt["task"]["id"] == "ready"
     assert "# Ready" in worker_prompt["prompt"]
+    assert "## Coordination Context" in worker_prompt["prompt"]
+    assert f"Assigned worktree: `{assigned_worktree}`" in worker_prompt["prompt"]
     assert set(claim) == claim_keys
     assert set(alias_claim) == claim_keys
     assert set(heartbeat) == claim_keys
@@ -5997,6 +6218,28 @@ def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
     assert "Do not run `next` to select your own work." in skill_text
     assert "claim that exact task" in skill_text
     assert "triage intake" in skill_text
+
+
+def test_skills_document_coordinator_worktree_isolation_policy() -> None:
+    """Vendored skills keep coordinator-managed edits out of canonical checkouts."""
+    coordinator = (
+        vendored_skill_path("agent-coordinator").joinpath("SKILL.md").read_text(encoding="utf-8")
+    )
+    worker = vendored_skill_path("task-worker").joinpath("SKILL.md").read_text(encoding="utf-8")
+    manager = (
+        vendored_skill_path("project-manager").joinpath("SKILL.md").read_text(encoding="utf-8")
+    )
+
+    assert "worktree_mode: one_task_per_worktree" in coordinator
+    assert "pr_mode: one_task_per_pr" in coordinator
+    assert "must not write to the same worktree" in coordinator
+    assert "not stale canonical `main`" in coordinator
+    assert "edit the canonical repository checkout for implementation" in worker
+    assert "assigned branch/worktree" in worker
+    assert "shared worktree policy" in worker
+    assert "configured `coordination_policy`" in manager
+    assert "batch_pr_allowed" in manager
+    assert "task IDs, batching rationale, and closeout evidence" in manager
 
 
 def test_available_skill_names_lists_vendored_skills() -> None:

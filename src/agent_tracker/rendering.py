@@ -195,15 +195,28 @@ class HumanOutputRenderer:
     def worker_launch(self, result: dict[str, Any]) -> None:
         """Render a worker launch summary."""
         self.section(f"Worker launch {result['launch_id']}")
-        self.kv_table(
+        assignment = result.get("coordination", {}).get("assignment", {})
+        rows: list[tuple[str, object]] = [
+            ("status", result["status"]),
+            ("workspace", result["workspace"]["name"]),
+            ("task", result.get("task_id") or "(prompt only)"),
+        ]
+        if assignment:
+            rows.extend(
+                [
+                    ("branch", assignment.get("branch") or "(none)"),
+                    ("worktree", assignment.get("worktree_path") or "(none)"),
+                ]
+            )
+        rows.extend(
             [
-                ("status", result["status"]),
-                ("workspace", result["workspace"]["name"]),
-                ("task", result.get("task_id") or "(prompt only)"),
                 ("prompt", result["artifacts"]["prompt"]),
                 ("report", result["artifacts"]["report"]),
                 ("launch", result["artifacts"]["launch"]),
-            ],
+            ]
+        )
+        self.kv_table(
+            rows,
             label_width=9,
         )
         if result.get("command"):

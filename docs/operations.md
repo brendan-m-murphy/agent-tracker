@@ -99,6 +99,36 @@ worktree's `.git` file points to repository metadata outside the writable
 worktree. That is expected for copied Codex worktrees. Record these approvals as
 run evidence or friction only when they block normal coordinator progress.
 
+## Coordinator Worktree Policy
+
+Coordinator-managed implementation should not edit the canonical repository
+checkout directly. The conservative default policy is one task branch and
+worktree per implementation task, and one PR per task:
+
+```json
+{
+  "coordination_policy": {
+    "worktree_mode": "one_task_per_worktree",
+    "pr_mode": "one_task_per_pr"
+  }
+}
+```
+
+Projects can loosen those defaults explicitly. `worktree_mode:
+shared_worktree_serial` allows a coordinator to reuse one non-canonical
+worktree only for serially related tasks with non-conflicting scopes. It does
+not allow parallel agents to write to the same worktree. `pr_mode:
+batch_pr_allowed` allows an explicit batch or epic PR; the PR description or
+review record must list every task ID, the batching rationale, and closeout
+evidence for each task.
+
+Before implementation begins, a coordinator should record the branch, base ref,
+worktree path, and selected policy in its working notes or worker prompt. If the
+coordinator is in the canonical checkout, create or switch to an isolated
+worktree before editing. Subagents and reviewers should receive the same branch
+or explicit patch content that will be integrated; do not ask them to review
+stale canonical `main` when the task diff lives elsewhere.
+
 ## Initialize Storage
 
 Create the project row and database schema:
@@ -346,15 +376,19 @@ payloads:
   whose stored evidence no longer satisfies current completion policy.
 - `pull_spool(dry_run=False)`: pull-spool counts and per-file actions.
 - `ingest_spool(actor="system")`: processed, inserted, and error counts.
-- `launch_worker_prompt(task_id, agent_id="", markdown=True)`: prompt-only
-  worker handoff data with `launch_mode` set to `prompt_only`, `launched` set to
-  `false`, the rendered prompt, and the current task context.
+- `launch_worker_prompt(task_id, agent_id="", markdown=True, branch="",
+  base_ref="", worktree_path="")`: prompt-only worker handoff data with
+  `launch_mode` set to `prompt_only`, `launched` set to `false`, the rendered
+  prompt, the current task context, `coordination_policy`, and `coordination`
+  assignment details. Pass `branch`, `base_ref`, and `worktree_path` when the
+  host has already assigned the worker's task branch or non-canonical worktree.
 
 `launch_worker(...)` is an equivalent prompt-only alias for hosts that name the
 tool after the launch-worker operation. Neither launch helper starts Codex, an
 app server, or any external worker. Hosts that own execution can use the
-returned prompt and task context as their launch input, then report progress
-back through normal tracker state, evidence, and event APIs.
+returned prompt, task context, and coordination assignment as their launch input,
+then report progress back through normal tracker state, evidence, and event
+APIs.
 
 Existing method names remain supported as compatibility aliases:
 `get_project_status()`, `claim_task(...)`, `heartbeat_task(...)`,
@@ -460,7 +494,10 @@ Prepare a worker launch for a task without executing a command:
 ```bash
 agent-tracker launch-worker --config project.json \
   --workspace hpc \
-  --task-id write-readme
+  --task-id write-readme \
+  --branch codex/write-readme \
+  --base-ref main \
+  --worktree-path /path/to/worktrees/write-readme
 ```
 
 This writes a rendered prompt, a placeholder report, and a launch JSON artifact
@@ -471,6 +508,14 @@ both modes. The launcher records `worker-launch:<id>` and
 `file:<launch.json>` evidence on the task when `--task-id` is supplied. If the
 workspace has `spool_outbox`, it also writes a complete
 `agent_tracker.worker_launch` event JSON file there for later collection.
+
+For implementation workers, choose the workspace and prompt context according
+to `coordination_policy` before launch. A worker prompt should name the assigned
+task branch, worktree path, base ref, write scope, and whether the closeout is a
+single-task PR or an explicitly batched PR. Parallel implementation workers
+must receive separate writable worktrees. For task launches, `launch-worker`
+refuses a workspace that contains the canonical tracker config; use an isolated
+task worktree or another explicit non-canonical workspace.
 
 Run the configured local worker command with `--execute`:
 
@@ -485,11 +530,11 @@ agent-tracker launch-worker --config project.json \
 The default command is:
 
 ```bash
-codex exec --cd {workspace_path} --output-last-message {report_path} -
+codex exec --cd {worktree_path} --output-last-message {report_path} -
 ```
 
-The rendered prompt is passed on stdin. The command runs in the workspace
-directory, stdout and stderr are captured as launch artifacts, and the final
+The rendered prompt is passed on stdin. The command runs from the assigned
+worktree path, stdout and stderr are captured as launch artifacts, and the final
 report path is exposed through `AGENT_TRACKER_WORKER_REPORT`.
 
 For smoke tests or non-Codex workers, pass an explicit command:
@@ -1191,6 +1236,11 @@ agent-tracker await-integration --config project.json <task-id> \
   --status awaiting_pr \
   --evidence "git:<branch-commit>"
 ```
+
+When one PR intentionally covers multiple tasks under `pr_mode:
+batch_pr_allowed`, include all covered task IDs, the batching rationale, and
+per-task validation and closeout evidence in the PR or review surface. Each
+tracker task still needs its own evidence entries and terminal state transition.
 
 If you need to stop early or switch scope before work is ready for review,
 return the task to the queue with an audited reason:
