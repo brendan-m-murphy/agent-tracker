@@ -8,14 +8,11 @@ import os
 import shlex
 import sqlite3
 import sys
-import textwrap
 from pathlib import Path
 from typing import Any
 
 import click
 import typer
-from rich.console import Console
-from rich.text import Text
 
 from agent_tracker.config import (
     PROJECT_CONFIG_ENV_VAR,
@@ -25,27 +22,14 @@ from agent_tracker.config import (
 )
 from agent_tracker.db import intake_to_dict, proposed_task_to_dict, state_to_dict
 from agent_tracker.models import INTAKE_STATES, INTEGRATION_STATES
+from agent_tracker.rendering import HumanOutputRenderer
 from agent_tracker.service import Coordinator
 
-OVERVIEW_GROUPS = (
-    ("ready", "Ready"),
-    ("active", "Active"),
-    ("review", "Review"),
-    ("integration", "Integration"),
-    ("blocked", "Blocked"),
-    ("recently_completed", "Recently completed"),
-)
-_HUMAN_OUTPUT_WIDTH = 80
 BOOTSTRAP_GITIGNORE_LINES = (
     ".agent-tracker/",
     "spool/",
     "exports/*.json",
 )
-
-
-def _human_console() -> Console:
-    """Return a Rich console bound to the current stdout stream."""
-    return Console(file=sys.stdout, width=_HUMAN_OUTPUT_WIDTH, highlight=False)
 
 
 def coordinator(args: argparse.Namespace) -> Coordinator:
@@ -83,51 +67,19 @@ def print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2))
 
 
-def _print_human_line(
-    text: str,
-    *,
-    initial_indent: str = "",
-    subsequent_indent: str = "",
-) -> None:
-    """Print a human-oriented line with stable wrapping indentation."""
-    _human_console().print(
-        Text(
-            textwrap.fill(
-                text,
-                width=_HUMAN_OUTPUT_WIDTH,
-                initial_indent=initial_indent,
-                subsequent_indent=subsequent_indent or initial_indent,
-                break_long_words=False,
-                break_on_hyphens=False,
-            )
-        )
-    )
+def human_renderer() -> HumanOutputRenderer:
+    """Return a human output renderer bound to the current stdout stream."""
+    return HumanOutputRenderer()
 
 
-def _print_human_field(label: str, value: object, *, indent: int = 2) -> None:
-    """Print a labeled human field with wrapped continuation lines."""
-    prefix = f"{' ' * indent}{label}: "
-    _print_human_line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
+def print_overview(payload: dict[str, Any]) -> None:
+    """Print a grouped project overview."""
+    human_renderer().overview(payload)
 
 
-def _print_human_kv_row(label: str, value: object, *, label_width: int = 12) -> None:
-    """Print a compact aligned key/value row."""
-    prefix = f"  {label:<{label_width}} "
-    _print_human_line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
-
-
-def _print_human_kv_table(rows: list[tuple[str, object]], *, label_width: int = 12) -> None:
-    """Print aligned key/value rows using Rich text without borders."""
-    console = _human_console()
-    for label, value in rows:
-        line = Text(f"  {label:<{label_width}} ")
-        line.append(str(value))
-        console.print(line)
-
-
-def _print_human_section(heading: str) -> None:
-    """Print a plain section heading without box-drawing decoration."""
-    _human_console().print(Text(heading, style="bold"))
+def print_overview_item(group: str, item: dict[str, Any]) -> None:
+    """Print one overview item."""
+    human_renderer().overview_item(group, item)
 
 
 def print_path_report(coord: Coordinator) -> None:
@@ -322,25 +274,7 @@ def command_status(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    _human_console().print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
-    _print_human_section("Paths")
-    path_rows: list[tuple[str, object]] = [
-        ("config", payload["config_path"]),
-        ("db", payload["db_path"]),
-    ]
-    if payload.get("task_source_path"):
-        path_rows.append(("task source", payload["task_source_path"]))
-    _print_human_kv_table(path_rows)
-    _print_human_section("Queue")
-    _print_human_kv_table(
-        [
-            ("ready", len(payload["ready"])),
-            ("active", len(payload["active"])),
-            ("review", len(payload["review"])),
-            ("integration", len(payload["integration"])),
-            ("blocked", len(payload["blocked"])),
-        ]
-    )
+    human_renderer().status(payload)
     return 0
 
 
@@ -357,52 +291,6 @@ def command_overview(args: argparse.Namespace) -> int:
     return 0
 
 
-def print_overview(payload: dict[str, Any]) -> None:
-    """Print a grouped project overview."""
-    _human_console().print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
-    for key, heading in OVERVIEW_GROUPS:
-        items = payload["groups"][key]
-        total = payload["counts"][key]
-        _human_console().print(Text(f"{heading} ({total})", style="bold"))
-        if not items:
-            _human_console().print(Text("  (none)"))
-            continue
-        for item in items:
-            print_overview_item(key, item)
-        if len(items) < total:
-            _human_console().print(Text(f"  ... {total - len(items)} more"))
-
-
-def print_overview_item(group: str, item: dict[str, Any]) -> None:
-    """Print one overview item."""
-    qualifiers = []
-    if group in {"active", "review", "integration"}:
-        qualifiers.append(str(item["state"]))
-    if item.get("lease_agent_id"):
-        qualifiers.append(f"agent {item['lease_agent_id']}")
-    qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
-    _print_human_line(
-        f"- {item['id']}: {item['title']}{qualifier}",
-        initial_indent="  ",
-        subsequent_indent="      ",
-    )
-
-    for blocker in item.get("blockers", [])[:2]:
-        _print_human_field("blocker", blocker, indent=4)
-    if len(item.get("blockers", [])) > 2:
-        _print_human_field("blocker", f"+{len(item['blockers']) - 2} more", indent=4)
-    if item.get("next_action"):
-        _print_human_field("next", item["next_action"], indent=4)
-    if item.get("latest_evidence"):
-        _print_human_field("evidence", item["latest_evidence"], indent=4)
-    if group == "recently_completed" and item.get("completed_at"):
-        _print_human_field(
-            "completed",
-            f"{item['completed_at']} by {item.get('completed_by') or 'system'}",
-            indent=4,
-        )
-
-
 def command_next(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     ready = coord.ready_tasks(
@@ -414,16 +302,7 @@ def command_next(args: argparse.Namespace) -> int:
     if args.json:
         print_json([state_to_dict(state) for state in ready])
         return 0
-    if not ready:
-        _human_console().print(Text("No ready tasks."))
-        return 0
-    for state in ready:
-        task = state.task
-        _print_human_line(f"{task.task_id}: {task.title}", subsequent_indent="  ")
-        if task.repo:
-            _print_human_field("repo", task.repo)
-        if task.next_action:
-            _print_human_field("next", task.next_action)
+    human_renderer().next_tasks(ready)
     return 0
 
 
@@ -506,19 +385,7 @@ def command_check_completion_integrity(args: argparse.Namespace) -> int:
     if payload["ok"]:
         print("Completion integrity OK")
         return 0
-    _print_human_section(f"Completion integrity issues ({payload['issue_count']})")
-    for issue in payload["issues"]:
-        _print_human_line(
-            f"- {issue['task_id']}: {issue['reason']}",
-            initial_indent="  ",
-            subsequent_indent="      ",
-        )
-        if issue.get("completion_action"):
-            _print_human_field("completion", issue["completion_action"], indent=4)
-        if issue.get("direct_merge"):
-            _print_human_field("direct_merge", "true", indent=4)
-        if issue.get("evidence"):
-            _print_human_field("evidence", ", ".join(issue["evidence"]), indent=4)
+    human_renderer().completion_integrity(payload)
     return 1
 
 
@@ -615,20 +482,7 @@ def command_list_workspaces(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    if not payload["workspaces"]:
-        _human_console().print(Text("No workspaces configured."))
-        return 0
-    for workspace in payload["workspaces"]:
-        _print_human_line(
-            f"{workspace['name']}: {workspace['kind']} {workspace['path']}",
-            subsequent_indent="  ",
-        )
-        if workspace.get("config_path"):
-            _print_human_field("config", workspace["config_path"])
-        if workspace.get("spool_outbox"):
-            _print_human_field("spool", workspace["spool_outbox"])
-        if workspace.get("capabilities"):
-            _print_human_field("capabilities", ", ".join(workspace["capabilities"]))
+    human_renderer().workspaces(payload)
     return 0
 
 
@@ -658,22 +512,7 @@ def command_launch_worker(args: argparse.Namespace) -> int:
     if args.json:
         print_json(result)
         return 0
-    _print_human_section(f"Worker launch {result['launch_id']}")
-    _print_human_kv_table(
-        [
-            ("status", result["status"]),
-            ("workspace", result["workspace"]["name"]),
-            ("task", result.get("task_id") or "(prompt only)"),
-            ("prompt", result["artifacts"]["prompt"]),
-            ("report", result["artifacts"]["report"]),
-            ("launch", result["artifacts"]["launch"]),
-        ],
-        label_width=9,
-    )
-    if result.get("command"):
-        _print_human_kv_table([("command", shlex.join(result["command"]))], label_width=9)
-    if "returncode" in result:
-        _print_human_kv_table([("return", result["returncode"])], label_width=9)
+    human_renderer().worker_launch(result)
     return 0
 
 
@@ -706,24 +545,7 @@ def command_list_intake(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    if not payload["intake"]:
-        _human_console().print(Text("No intake records."))
-        return 0
-    for item in payload["intake"]:
-        rows: list[tuple[str, object]] = [
-            ("status", item["status"]),
-            ("kind", item["kind"]),
-        ]
-        if item["repo"]:
-            rows.append(("repo", item["repo"]))
-        if item["source"]:
-            rows.append(("source", item["source"]))
-        _print_human_line(f"{item['id']}: {item['text']}", subsequent_indent="  ")
-        _print_human_kv_table(rows, label_width=8)
-        if item["tags"]:
-            _print_human_kv_table([("tags", ", ".join(item["tags"]))], label_width=8)
-        if item.get("created_at"):
-            _print_human_kv_table([("created", item["created_at"])], label_width=8)
+    human_renderer().intake(payload)
     return 0
 
 
@@ -818,17 +640,7 @@ def command_list_proposals(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    if not payload["proposals"]:
-        print("No proposed tasks.")
-        return 0
-    for proposal in payload["proposals"]:
-        task = proposal["task"]
-        print(f"{proposal['id']}: {task['id']} - {task['title']}")
-        print(f"  intake: {proposal['intake_id']}; status: {proposal['status']}")
-        if task.get("repo"):
-            print(f"  repo: {task['repo']}")
-        if task.get("next_action"):
-            print(f"  next: {task['next_action']}")
+    human_renderer().proposals(payload)
     return 0
 
 

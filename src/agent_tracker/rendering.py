@@ -1,11 +1,250 @@
-"""Default prompt rendering."""
+"""Prompt and human CLI rendering."""
 
 from __future__ import annotations
 
+import shlex
+import sys
+import textwrap
 from pathlib import Path
+from typing import Any, TextIO
+
+from rich.console import Console
+from rich.text import Text
 
 from agent_tracker.config import ProjectConfig
 from agent_tracker.models import TaskState
+
+HUMAN_OUTPUT_WIDTH = 80
+OVERVIEW_GROUPS = (
+    ("ready", "Ready"),
+    ("active", "Active"),
+    ("review", "Review"),
+    ("integration", "Integration"),
+    ("blocked", "Blocked"),
+    ("recently_completed", "Recently completed"),
+)
+
+
+class HumanOutputRenderer:
+    """Render copy-paste-safe human CLI output."""
+
+    def __init__(self, output: TextIO | None = None, *, width: int = HUMAN_OUTPUT_WIDTH) -> None:
+        """Bind the renderer to an output stream and fixed terminal width."""
+        self._output = output or sys.stdout
+        self._width = width
+        self._console = Console(file=self._output, width=width, highlight=False)
+
+    def line(
+        self,
+        text: str,
+        *,
+        initial_indent: str = "",
+        subsequent_indent: str = "",
+    ) -> None:
+        """Print a wrapped human-oriented line with stable indentation."""
+        self._console.print(
+            Text(
+                textwrap.fill(
+                    text,
+                    width=self._width,
+                    initial_indent=initial_indent,
+                    subsequent_indent=subsequent_indent or initial_indent,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            )
+        )
+
+    def field(self, label: str, value: object, *, indent: int = 2) -> None:
+        """Print a labeled human field with wrapped continuation lines."""
+        prefix = f"{' ' * indent}{label}: "
+        self.line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
+
+    def kv_row(self, label: str, value: object, *, label_width: int = 12) -> None:
+        """Print one compact aligned key/value row."""
+        prefix = f"  {label:<{label_width}} "
+        self.line(str(value), initial_indent=prefix, subsequent_indent=" " * len(prefix))
+
+    def kv_table(self, rows: list[tuple[str, object]], *, label_width: int = 12) -> None:
+        """Print aligned key/value rows using Rich text without borders."""
+        for label, value in rows:
+            line = Text(f"  {label:<{label_width}} ")
+            line.append(str(value))
+            self._console.print(line)
+
+    def section(self, heading: str) -> None:
+        """Print a plain section heading without box-drawing decoration."""
+        self._console.print(Text(heading, style="bold"))
+
+    def raw_line(self, text: str) -> None:
+        """Print an unwrapped line for legacy plain-print output."""
+        print(text, file=self._output)
+
+    def status(self, payload: dict[str, Any]) -> None:
+        """Render a project status summary."""
+        self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
+        self.section("Paths")
+        path_rows: list[tuple[str, object]] = [
+            ("config", payload["config_path"]),
+            ("db", payload["db_path"]),
+        ]
+        if payload.get("task_source_path"):
+            path_rows.append(("task source", payload["task_source_path"]))
+        self.kv_table(path_rows)
+        self.section("Queue")
+        self.kv_table(
+            [
+                ("ready", len(payload["ready"])),
+                ("active", len(payload["active"])),
+                ("review", len(payload["review"])),
+                ("integration", len(payload["integration"])),
+                ("blocked", len(payload["blocked"])),
+            ]
+        )
+
+    def overview(self, payload: dict[str, Any]) -> None:
+        """Render a grouped project overview."""
+        self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
+        for key, heading in OVERVIEW_GROUPS:
+            items = payload["groups"][key]
+            total = payload["counts"][key]
+            self._console.print(Text(f"{heading} ({total})", style="bold"))
+            if not items:
+                self._console.print(Text("  (none)"))
+                continue
+            for item in items:
+                self.overview_item(key, item)
+            if len(items) < total:
+                self._console.print(Text(f"  ... {total - len(items)} more"))
+
+    def overview_item(self, group: str, item: dict[str, Any]) -> None:
+        """Render one overview item."""
+        qualifiers = []
+        if group in {"active", "review", "integration"}:
+            qualifiers.append(str(item["state"]))
+        if item.get("lease_agent_id"):
+            qualifiers.append(f"agent {item['lease_agent_id']}")
+        qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
+        self.line(
+            f"- {item['id']}: {item['title']}{qualifier}",
+            initial_indent="  ",
+            subsequent_indent="      ",
+        )
+
+        for blocker in item.get("blockers", [])[:2]:
+            self.field("blocker", blocker, indent=4)
+        if len(item.get("blockers", [])) > 2:
+            self.field("blocker", f"+{len(item['blockers']) - 2} more", indent=4)
+        if item.get("next_action"):
+            self.field("next", item["next_action"], indent=4)
+        if item.get("latest_evidence"):
+            self.field("evidence", item["latest_evidence"], indent=4)
+        if group == "recently_completed" and item.get("completed_at"):
+            self.field(
+                "completed",
+                f"{item['completed_at']} by {item.get('completed_by') or 'system'}",
+                indent=4,
+            )
+
+    def next_tasks(self, states: list[TaskState]) -> None:
+        """Render ready task summaries."""
+        if not states:
+            self._console.print(Text("No ready tasks."))
+            return
+        for state in states:
+            task = state.task
+            self.line(f"{task.task_id}: {task.title}", subsequent_indent="  ")
+            if task.repo:
+                self.field("repo", task.repo)
+            if task.next_action:
+                self.field("next", task.next_action)
+
+    def completion_integrity(self, payload: dict[str, Any]) -> None:
+        """Render completion integrity issues."""
+        self.section(f"Completion integrity issues ({payload['issue_count']})")
+        for issue in payload["issues"]:
+            self.line(
+                f"- {issue['task_id']}: {issue['reason']}",
+                initial_indent="  ",
+                subsequent_indent="      ",
+            )
+            if issue.get("completion_action"):
+                self.field("completion", issue["completion_action"], indent=4)
+            if issue.get("direct_merge"):
+                self.field("direct_merge", "true", indent=4)
+            if issue.get("evidence"):
+                self.field("evidence", ", ".join(issue["evidence"]), indent=4)
+
+    def workspaces(self, payload: dict[str, Any]) -> None:
+        """Render configured worker workspaces."""
+        if not payload["workspaces"]:
+            self._console.print(Text("No workspaces configured."))
+            return
+        for workspace in payload["workspaces"]:
+            self.line(
+                f"{workspace['name']}: {workspace['kind']} {workspace['path']}",
+                subsequent_indent="  ",
+            )
+            if workspace.get("config_path"):
+                self.field("config", workspace["config_path"])
+            if workspace.get("spool_outbox"):
+                self.field("spool", workspace["spool_outbox"])
+            if workspace.get("capabilities"):
+                self.field("capabilities", ", ".join(workspace["capabilities"]))
+
+    def worker_launch(self, result: dict[str, Any]) -> None:
+        """Render a worker launch summary."""
+        self.section(f"Worker launch {result['launch_id']}")
+        self.kv_table(
+            [
+                ("status", result["status"]),
+                ("workspace", result["workspace"]["name"]),
+                ("task", result.get("task_id") or "(prompt only)"),
+                ("prompt", result["artifacts"]["prompt"]),
+                ("report", result["artifacts"]["report"]),
+                ("launch", result["artifacts"]["launch"]),
+            ],
+            label_width=9,
+        )
+        if result.get("command"):
+            self.kv_table([("command", shlex.join(result["command"]))], label_width=9)
+        if "returncode" in result:
+            self.kv_table([("return", result["returncode"])], label_width=9)
+
+    def intake(self, payload: dict[str, Any]) -> None:
+        """Render raw intake records."""
+        if not payload["intake"]:
+            self._console.print(Text("No intake records."))
+            return
+        for item in payload["intake"]:
+            rows: list[tuple[str, object]] = [
+                ("status", item["status"]),
+                ("kind", item["kind"]),
+            ]
+            if item["repo"]:
+                rows.append(("repo", item["repo"]))
+            if item["source"]:
+                rows.append(("source", item["source"]))
+            self.line(f"{item['id']}: {item['text']}", subsequent_indent="  ")
+            self.kv_table(rows, label_width=8)
+            if item["tags"]:
+                self.kv_table([("tags", ", ".join(item["tags"]))], label_width=8)
+            if item.get("created_at"):
+                self.kv_table([("created", item["created_at"])], label_width=8)
+
+    def proposals(self, payload: dict[str, Any]) -> None:
+        """Render proposed task records."""
+        if not payload["proposals"]:
+            self.raw_line("No proposed tasks.")
+            return
+        for proposal in payload["proposals"]:
+            task = proposal["task"]
+            self.raw_line(f"{proposal['id']}: {task['id']} - {task['title']}")
+            self.raw_line(f"  intake: {proposal['intake_id']}; status: {proposal['status']}")
+            if task.get("repo"):
+                self.raw_line(f"  repo: {task['repo']}")
+            if task.get("next_action"):
+                self.raw_line(f"  next: {task['next_action']}")
 
 
 class DefaultPromptRenderer:
