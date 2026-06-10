@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -154,6 +157,78 @@ def write_overview_project(root: Path) -> Path:
     return config_path
 
 
+class LoopbackSFTPServer:
+    """Run an AsyncSSH SFTP server in a background thread for sync tests."""
+
+    def __init__(self, root: Path, asyncssh_module: Any):
+        self.root = root
+        self.asyncssh = asyncssh_module
+        self.host_key = asyncssh_module.generate_private_key("ssh-rsa")
+        self.port = 0
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> LoopbackSFTPServer:
+        self._thread.start()
+        if not self._ready.wait(timeout=10):
+            raise TimeoutError("timed out starting loopback SFTP server")
+        if self._error is not None:
+            raise self._error
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10)
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def serve() -> None:
+            asyncssh = self.asyncssh
+
+            class NoAuthServer(asyncssh.SSHServer):  # type: ignore[name-defined]
+                def begin_auth(self, username: str) -> bool:
+                    return False
+
+            server = await asyncssh.listen(
+                "127.0.0.1",
+                0,
+                server_factory=NoAuthServer,
+                server_host_keys=[self.host_key],
+                sftp_factory=lambda chan: asyncssh.SFTPServer(chan, chroot=str(self.root)),
+            )
+            self.port = server.get_port()
+            self._ready.set()
+            try:
+                while not self._stop.is_set():
+                    await asyncio.sleep(0.05)
+            finally:
+                server.close()
+                await server.wait_closed()
+
+        try:
+            loop.run_until_complete(serve())
+        except BaseException as exc:  # pragma: no cover - surfaced through __enter__
+            self._error = exc
+            self._ready.set()
+        finally:
+            loop.close()
+
+
+def configure_sftp_spool(config_path: Path, port: int, remote_path: str = "/outbox") -> None:
+    """Point a test project at a loopback SFTP remote inbox."""
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = f"sftp://127.0.0.1:{port}{remote_path}"
+    config_payload["spool"]["ssh"] = {
+        "username": "agent",
+        "known_hosts": "none",
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+
 def prepare_overview_state(root: Path) -> tuple[Path, Coordinator]:
     """Create a mixed queue state for overview tests."""
     config_path = write_overview_project(root)
@@ -246,6 +321,18 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
         (
             {"project_id": "toy", "spool": {"remote_inbox": 1}},
             "config field 'spool.remote_inbox' must be a string",
+        ),
+        (
+            {"project_id": "toy", "spool": {"ssh": []}},
+            "config field 'spool.ssh' must be an object",
+        ),
+        (
+            {"project_id": "toy", "spool": {"ssh": {"known_hosts": False}}},
+            "config field 'spool.ssh.known_hosts' must be a string",
+        ),
+        (
+            {"project_id": "toy", "spool": {"ssh": {"client_keys": [1]}}},
+            "config field 'spool.ssh.client_keys' must be a string or list of strings",
         ),
     ],
 )
@@ -1713,6 +1800,304 @@ def test_remote_spooling_harness_models_ssh_codex_project_outbox(
     ]
     assert snapshot["events"][0]["event_id"] == "ssh-codex-evt-1"
     assert snapshot["events"][0]["payload"]["artifact"] == remote_artifact
+
+
+def test_pull_spool_over_loopback_sftp_server(tmp_path: Path) -> None:
+    """The optional SSH transport pulls and ingests remote SFTP event files."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_root = tmp_path / "remote-root"
+    remote_outbox = remote_root / "outbox"
+    remote_outbox.mkdir(parents=True)
+    partial = remote_outbox / "remote-event.json.partial"
+    partial.write_text(
+        json.dumps({"event_id": "ssh-partial", "kind": "codex.remote_spool"}),
+        encoding="utf-8",
+    )
+    remote_event = remote_outbox / "remote-event.json"
+    remote_event.write_text(
+        json.dumps(
+            {
+                "event_id": "ssh-codex-evt-1",
+                "kind": "codex.remote_spool",
+                "task_id": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with LoopbackSFTPServer(remote_root, asyncssh) as server:
+        configure_sftp_spool(config_path, server.port)
+        coord = Coordinator(load_config(config_path))
+        coord.import_tasks()
+
+        dry_run = coord.pull_spool(dry_run=True)
+        first_pull = coord.pull_spool()
+        ingest = coord.ingest_spool(actor="ssh-codex-spool")
+        repeat_pull = coord.pull_spool()
+
+    local_event = canonical / "spool" / "inbox" / "remote-event.json"
+    done_event = canonical / "spool" / "done" / "remote-event.json"
+    remote_source = f"sftp://127.0.0.1:{server.port}/outbox/remote-event.json"
+    assert dry_run["dry_run"] is True
+    assert dry_run["processed"] == 1
+    assert dry_run["copied"] == 0
+    assert dry_run["skipped"] == 1
+    assert dry_run["files"] == [
+        {
+            "source": remote_source,
+            "target": str(local_event),
+            "action": "copy",
+        }
+    ]
+    assert not local_event.exists()
+    assert first_pull["processed"] == 1
+    assert first_pull["copied"] == 1
+    assert remote_event.exists()
+    assert partial.exists()
+    assert ingest == {"processed": 1, "inserted": 1, "errors": 0}
+    assert done_event.exists()
+    assert repeat_pull["processed"] == 0
+    assert repeat_pull["copied"] == 0
+    assert repeat_pull["skipped"] == 2
+    assert repeat_pull["files"] == [
+        {
+            "source": remote_source,
+            "target": str(local_event),
+            "existing": str(done_event),
+            "action": "skip_done",
+        }
+    ]
+
+
+def test_pull_spool_over_sftp_repeats_malformed_event_as_skip_error(tmp_path: Path) -> None:
+    """SFTP pulls preserve malformed events in error and skip them on repeat."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_root = tmp_path / "remote-root"
+    remote_outbox = remote_root / "outbox"
+    remote_outbox.mkdir(parents=True)
+    remote_event = remote_outbox / "bad-event.json"
+    remote_event.write_text("not json", encoding="utf-8")
+
+    with LoopbackSFTPServer(remote_root, asyncssh) as server:
+        configure_sftp_spool(config_path, server.port)
+        coord = Coordinator(load_config(config_path))
+        coord.import_tasks()
+
+        first_pull = coord.pull_spool()
+        ingest = coord.ingest_spool(actor="ssh-codex-spool")
+        repeat_pull = coord.pull_spool()
+
+    local_event = canonical / "spool" / "inbox" / "bad-event.json"
+    error_event = canonical / "spool" / "error" / "bad-event.json"
+    remote_source = f"sftp://127.0.0.1:{server.port}/outbox/bad-event.json"
+    assert first_pull["processed"] == 1
+    assert first_pull["copied"] == 1
+    assert ingest == {"processed": 1, "inserted": 0, "errors": 1}
+    assert error_event.exists()
+    assert not local_event.exists()
+    assert repeat_pull["processed"] == 0
+    assert repeat_pull["copied"] == 0
+    assert repeat_pull["skipped"] == 1
+    assert repeat_pull["files"] == [
+        {
+            "source": remote_source,
+            "target": str(local_event),
+            "existing": str(error_event),
+            "action": "skip_error",
+        }
+    ]
+
+
+def test_pull_spool_over_sftp_reports_done_conflict(tmp_path: Path) -> None:
+    """SFTP pulls report different done files as conflicts without overwrite."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_root = tmp_path / "remote-root"
+    remote_outbox = remote_root / "outbox"
+    remote_outbox.mkdir(parents=True)
+    remote_event = remote_outbox / "event.json"
+    remote_event.write_text(
+        json.dumps({"event_id": "remote", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    done = canonical / "spool" / "done"
+    done.mkdir(parents=True)
+    done_event = done / "event.json"
+    done_event.write_text(
+        json.dumps({"event_id": "local", "kind": "sample"}),
+        encoding="utf-8",
+    )
+
+    with LoopbackSFTPServer(remote_root, asyncssh) as server:
+        configure_sftp_spool(config_path, server.port)
+        result = Coordinator(load_config(config_path)).pull_spool()
+
+    local_event = canonical / "spool" / "inbox" / "event.json"
+    assert result["processed"] == 0
+    assert result["copied"] == 0
+    assert result["conflicts"] == 1
+    assert result["files"] == [
+        {
+            "source": f"sftp://127.0.0.1:{server.port}/outbox/event.json",
+            "target": str(local_event),
+            "existing": str(done_event),
+            "action": "conflict_done",
+        }
+    ]
+    assert json.loads(done_event.read_text(encoding="utf-8"))["event_id"] == "local"
+
+
+def test_pull_spool_over_sftp_uses_atomic_publish_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SFTP pulls publish local files through the atomic write helper."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_root = tmp_path / "remote-root"
+    remote_outbox = remote_root / "outbox"
+    remote_outbox.mkdir(parents=True)
+    remote_payload = json.dumps({"event_id": "remote", "kind": "sample"}).encode()
+    (remote_outbox / "event.json").write_bytes(remote_payload)
+    writes: list[tuple[bytes, Path]] = []
+
+    def fake_write_spool_file_atomic(data: bytes, target: Path) -> None:
+        writes.append((data, target))
+        target.write_bytes(data)
+
+    monkeypatch.setattr(service_module, "_write_spool_file_atomic", fake_write_spool_file_atomic)
+
+    with LoopbackSFTPServer(remote_root, asyncssh) as server:
+        configure_sftp_spool(config_path, server.port)
+        result = Coordinator(load_config(config_path)).pull_spool()
+
+    target = canonical / "spool" / "inbox" / "event.json"
+    assert result["copied"] == 1
+    assert writes == [(remote_payload, target)]
+    assert target.read_bytes() == remote_payload
+
+
+def test_pull_spool_over_sftp_accepts_known_hosts_file(tmp_path: Path) -> None:
+    """SFTP pulls can verify the loopback host key through known_hosts."""
+    asyncssh = pytest.importorskip("asyncssh")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    config_path = write_project(canonical)
+    remote_root = tmp_path / "remote-root"
+    remote_outbox = remote_root / "outbox"
+    remote_outbox.mkdir(parents=True)
+    (remote_outbox / "event.json").write_text(
+        json.dumps({"event_id": "remote", "kind": "sample"}),
+        encoding="utf-8",
+    )
+
+    with LoopbackSFTPServer(remote_root, asyncssh) as server:
+        known_hosts = canonical / "known_hosts"
+        known_hosts.write_bytes(
+            f"[127.0.0.1]:{server.port} ".encode()
+            + server.host_key.export_public_key()
+            + b"\n"
+        )
+        configure_sftp_spool(config_path, server.port)
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+        config_payload["spool"]["ssh"]["known_hosts"] = str(known_hosts)
+        config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+        result = Coordinator(load_config(config_path)).pull_spool(dry_run=True)
+
+    assert result["processed"] == 1
+    assert result["files"][0]["action"] == "copy"
+
+
+@pytest.mark.parametrize(
+    ("remote_inbox", "expected"),
+    [
+        ("sftp:///outbox", "must include a host"),
+        ("sftp://example.internal:not-a-port/outbox", "invalid port"),
+        ("sftp://example.internal", "must include an absolute path"),
+    ],
+)
+def test_pull_spool_ssh_uri_validation_errors_are_actionable(
+    tmp_path: Path,
+    remote_inbox: str,
+    expected: str,
+) -> None:
+    """Malformed SSH remote inbox URIs fail before connecting."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = remote_inbox
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected):
+        Coordinator(load_config(config_path)).pull_spool()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../event.json", "/tmp/event.json", "nested/event.json", r"nested\\event.json"],
+)
+def test_sftp_spool_entry_names_must_be_safe_basenames(name: str) -> None:
+    """Remote SFTP names are rejected before becoming local paths."""
+    assert service_module._is_safe_spool_entry_name(name) is False
+
+
+def test_pull_spool_ssh_transport_reports_missing_optional_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSH transport errors explain how to install the optional dependency."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "sftp://example.internal/outbox"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    def missing_asyncssh() -> object:
+        raise ImportError(
+            "SSH spool transport requires the optional 'ssh' extra; "
+            "install it with `agent-tracker[ssh]` or run `uv run --extra ssh ...`"
+        )
+
+    monkeypatch.setattr(service_module, "_load_asyncssh", missing_asyncssh)
+
+    with pytest.raises(ImportError, match="optional 'ssh' extra"):
+        Coordinator(load_config(config_path)).pull_spool()
+
+
+def test_cli_pull_spool_ssh_transport_reports_missing_optional_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI missing-extra errors are concise and do not traceback."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "sftp://example.internal/outbox"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    def missing_asyncssh() -> object:
+        raise ImportError(
+            "SSH spool transport requires the optional 'ssh' extra; "
+            "install it with `agent-tracker[ssh]` or run `uv run --extra ssh ...`"
+        )
+
+    monkeypatch.setattr(service_module, "_load_asyncssh", missing_asyncssh)
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(["pull-spool", "--config", str(config_path)])
+
+    assert code == 1
+    assert "error: SSH spool transport requires the optional 'ssh' extra" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
 
 
 def test_pull_spool_uses_temporary_path_before_publishing_json(

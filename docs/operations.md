@@ -642,6 +642,33 @@ then atomically renamed to the final `*.json` path. Existing identical local
 files in `inbox`, `done`, or `error` are skipped; existing different files are
 reported as conflicts and are not overwritten.
 
+For SSH/SFTP sources, install the optional SSH extra and use an `ssh://` or
+`sftp://` remote inbox:
+
+```bash
+uv run --extra ssh agent-tracker pull-spool --config project.json --dry-run
+uv run --extra ssh agent-tracker pull-spool --config project.json
+```
+
+```json
+{
+  "spool": {
+    "inbox": "spool/inbox",
+    "done": "spool/done",
+    "error": "spool/error",
+    "remote_inbox": "sftp://agent@example.internal/var/spool/agent-tracker/outbox",
+    "ssh": {
+      "username": "agent",
+      "client_keys": "~/.ssh/agent_tracker_ed25519",
+      "known_hosts": "~/.ssh/known_hosts"
+    }
+  }
+}
+```
+
+Set `spool.ssh.known_hosts` to `"none"` only for isolated loopback tests. Keep
+passwords and private-key material out of committed project config.
+
 `pull-spool` is a bounded copy step, not a daemon. Run it from an attendant,
 cron, or supervisor when polling is needed.
 

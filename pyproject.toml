@@ -16,6 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = []
+ssh = [
+    "asyncssh>=2.14",
+]
 
 [project.scripts]
 agent-tracker = "agent_tracker.cli:main"

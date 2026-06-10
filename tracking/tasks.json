@@ -1011,6 +1011,177 @@
       }
     },
     {
+      "id": "local-ssh-server-harness-research",
+      "title": "Research local SSH server test harness",
+      "repo": "agent-tracker",
+      "status": "done",
+      "priority": 37,
+      "prompt_key": "local-ssh-server-harness-research",
+      "prompt_path": "docs/remote-spooling-ssh-codex.md",
+      "summary": "Decide how agent-tracker should run a loopback SSH/SFTP server for automated remote-spooling tests, with Twisted Conch preferred only if it is maintainable in this project.",
+      "execution": {
+        "primary_files": [
+          "docs/research/",
+          "docs/remote-spooling-ssh-codex.md",
+          "tracking/notebooks/repos/agent-tracker.md"
+        ],
+        "notes": "Compare Twisted Conch, AsyncSSH, an OpenSSH subprocess, and no in-process server. If a true local SSH server is not practical, record why, identify the missing prerequisite, and recommend the fallback test strategy rather than leaving the request implicit."
+      },
+      "validation_checks": [
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: research note states whether a loopback SSH/SFTP harness is possible in CI and why Twisted is or is not the selected dependency.",
+        "Manual check: research note distinguishes event-spool testing from remote queue-mutation command testing."
+      ],
+      "next_action": "Write a dated research note evaluating Twisted Conch and practical alternatives for a local-only SSH/SFTP server fixture, including dependency impact, CI reliability, security boundaries, and the transport changes needed for pull-spool to exercise it.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "remote-spooling-ssh-codex-test",
+          "description": "The existing filesystem-model remote-spooling harness should be understood before adding a real SSH server layer."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "architecture",
+          "docs"
+        ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "low",
+        "write_scopes": [
+          "docs/research/",
+          "docs/remote-spooling-ssh-codex.md",
+          "tracking/notebooks/repos/agent-tracker.md"
+        ],
+        "notebook_updates": [
+          "tracking/notebooks/repos/agent-tracker.md"
+        ],
+        "dogfood": true
+      }
+    },
+    {
+      "id": "ssh-spool-transport",
+      "title": "Add SSH/SFTP spool transport",
+      "repo": "agent-tracker",
+      "status": "done",
+      "priority": 38,
+      "prompt_key": "ssh-spool-transport",
+      "prompt_path": "docs/remote-spooling-ssh-codex.md",
+      "summary": "Let pull-spool read complete event files from an SSH/SFTP remote outbox while preserving the current local/shared-filesystem remote_inbox behavior.",
+      "execution": {
+        "primary_files": [
+          "src/agent_tracker/config.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "pyproject.toml",
+          "uv.lock",
+          "docs/configuration.md",
+          "docs/operations.md",
+          "docs/remote-spooling-ssh-codex.md"
+        ],
+        "notes": "Use the research recommendation for the client/server library. Keep SSH transport opt-in, local paths backward compatible, secrets out of config examples, and remote SQLite mutation out of scope."
+      },
+      "validation_checks": [
+        "uv run pytest tests/test_agent_tracker.py -k pull_spool",
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: local filesystem pull-spool behavior and JSON payloads remain compatible.",
+        "Manual check: SSH/SFTP configuration failures produce actionable errors without starting a long-running daemon."
+      ],
+      "next_action": "Implement the smallest SSH/SFTP transport path needed by pull-spool, including URI/config validation, complete-file listing, content comparison against inbox/done/error files, atomic local publish, docs, and focused regression coverage.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "local-ssh-server-harness-research",
+          "description": "The transport should follow the selected SSH/SFTP testing approach and any recorded fallback decision."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "medium",
+        "write_scopes": [
+          "src/agent_tracker/config.py",
+          "src/agent_tracker/service.py",
+          "src/agent_tracker/cli.py",
+          "tests/test_agent_tracker.py",
+          "pyproject.toml",
+          "uv.lock",
+          "docs/configuration.md",
+          "docs/operations.md",
+          "docs/remote-spooling-ssh-codex.md"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
+      "id": "local-ssh-server-spool-tests",
+      "title": "Test spool over local SSH server",
+      "repo": "agent-tracker",
+      "status": "done",
+      "priority": 39,
+      "prompt_key": "local-ssh-server-spool-tests",
+      "prompt_path": "docs/remote-spooling-ssh-codex.md",
+      "summary": "Exercise event-spool pull and ingest behavior against a loopback SSH/SFTP server so the SSH remote-spooling runbook has automated coverage.",
+      "execution": {
+        "primary_files": [
+          "tests/test_agent_tracker.py",
+          "tests/",
+          "docs/remote-spooling-ssh-codex.md",
+          "docs/task-ingest-command-contract.md"
+        ],
+        "notes": "Prefer the server library selected by local-ssh-server-harness-research. If CI cannot reliably run the server, add explicit skip conditions and documented manual verification rather than silent filesystem-only coverage."
+      },
+      "validation_checks": [
+        "uv run pytest tests/test_agent_tracker.py -k \"ssh or spool\"",
+        "uv run pytest",
+        "uv run ruff check .",
+        "Manual check: local SSH server coverage includes partial-file skip, final JSON copy, idempotent skip_existing or skip_done behavior, and ingest movement to done/error.",
+        "Manual check: task-ingest command request/response behavior is either exercised over the same SSH server if implemented, or documented as not possible until a command processor exists."
+      ],
+      "next_action": "Add a loopback SSH/SFTP server fixture and tests that publish remote outbox files through SSH, then run pull-spool dry-run, pull-spool, ingest-spool, and repeat pull against that server; record any remaining command-spool limitation in the runbook or contract docs.",
+      "requirements": [
+        {
+          "kind": "task",
+          "task": "ssh-spool-transport",
+          "description": "pull-spool needs an SSH/SFTP transport before tests can exercise a real local SSH server."
+        },
+        {
+          "kind": "task",
+          "task": "task-ingest-command-contract",
+          "description": "The tests should preserve the distinction between event spool files and queue-mutation command files."
+        }
+      ],
+      "metadata": {
+        "roles": [
+          "maintainer",
+          "python"
+        ],
+        "lane": "coordination/plumbing",
+        "conflict_risk": "medium",
+        "write_scopes": [
+          "tests/test_agent_tracker.py",
+          "tests/",
+          "docs/remote-spooling-ssh-codex.md",
+          "docs/task-ingest-command-contract.md"
+        ],
+        "completion_policy": {
+          "default": "pr_or_review_required",
+          "direct_merge_override": true
+        },
+        "dogfood": true
+      }
+    },
+    {
       "id": "repository-boundary-inmemory-tests",
       "title": "Add repository boundary for in-memory tests",
       "repo": "agent-tracker",

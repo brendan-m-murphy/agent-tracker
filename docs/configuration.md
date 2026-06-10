@@ -245,8 +245,32 @@ If `done` or `error` is omitted, defaults are created below the inbox:
 }
 ```
 
-`pull-spool` copies between configured filesystem paths. It does not provide a
-network protocol or run as a daemon.
+`pull-spool` copies between configured filesystem paths by default. It also
+accepts `ssh://` or `sftp://` `spool.remote_inbox` values when the optional
+`ssh` extra is installed:
+
+```json
+{
+  "spool": {
+    "inbox": "spool/inbox",
+    "done": "spool/done",
+    "error": "spool/error",
+    "remote_inbox": "sftp://agent@example.internal/var/spool/agent-tracker/outbox",
+    "ssh": {
+      "username": "agent",
+      "client_keys": "~/.ssh/agent_tracker_ed25519",
+      "known_hosts": "~/.ssh/known_hosts"
+    }
+  }
+}
+```
+
+Use `uv run --extra ssh agent-tracker pull-spool ...` when operating from a
+source checkout. `spool.ssh.known_hosts` may be set to `"none"` for isolated
+loopback tests only. Production SSH/SFTP pulls should use host-key verification
+and should not store secrets in committed config files.
+
+`pull-spool` is a bounded copy step. It does not run as a daemon.
 
 ## Current Validation Behavior
 

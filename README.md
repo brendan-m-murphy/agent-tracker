@@ -335,10 +335,11 @@ normalized move to `error`.
 
 When another process writes events to a shared filesystem, configure
 `spool.remote_inbox` and run `pull-spool` before `ingest-spool`. `pull-spool`
-copies complete `*.json` files into the local inbox, skips `.partial`, `.part`,
-and `.tmp` names, leaves remote files in place, skips identical files already
-present in the local inbox/done/error paths, and reports conflicts instead of
-overwriting different local files.
+also supports opt-in `ssh://` and `sftp://` remote inboxes when the optional
+`ssh` extra is installed. It copies complete `*.json` files into the local
+inbox, skips `.partial`, `.part`, and `.tmp` names, leaves remote files in
+place, skips identical files already present in the local inbox/done/error
+paths, and reports conflicts instead of overwriting different local files.
 
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,
 `pr:https://github.com/org/repo/pull/123`, or `artifact:s3://bucket/key`.

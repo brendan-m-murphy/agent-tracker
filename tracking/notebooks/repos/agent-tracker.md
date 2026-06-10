@@ -1,12 +1,13 @@
 # Agent Tracker Repo Notebook
 
-- Last reviewed: 2026-06-09
+- Last reviewed: 2026-06-10
 - Owner: maintainer
 - Sources:
   - tracking/README.md
   - docs/operations.md
   - docs/task-plans.md
   - docs/notebooks.md
+  - docs/research/2026-06-10-local-ssh-server-harness.md
 
 ## Repo Workflow
 
@@ -34,6 +35,7 @@ Common focused checks:
 
 - `uv run pytest tests/test_prompt_path_rendering.py`
 - `uv run pytest tests/test_agent_tracker.py -k init_project`
+- `uv run --extra ssh pytest tests/test_agent_tracker.py -k "sftp or pull_spool"`
 - `uv run ty check src/agent_tracker/cli.py`
 - `uv run --group docs sphinx-build -b html docs /tmp/agent-tracker-docs-build`
 
@@ -56,3 +58,13 @@ notebook root and `docs/research/` as raw source material.
   for source alignment or no command exists.
 - Local validation evidence alone is not sufficient closeout for tasks that
   changed tracked files.
+
+## SSH Spool Testing
+
+The optional `ssh` extra installs AsyncSSH for SSH/SFTP spool transport and
+loopback tests. Keep AsyncSSH optional unless the dependency and license are
+accepted for default installs. Use `known_hosts: "none"` only for loopback tests
+or deliberately isolated environments; real hosts should use a known_hosts file.
+
+Event-spool SSH coverage is separate from queue-mutation command-spool coverage.
+Remote queue mutation still belongs to the task-ingest command contract.

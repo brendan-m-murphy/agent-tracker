@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import posixpath
 import shutil
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from agent_tracker.config import ProjectConfig
 from agent_tracker.db import Store, intake_to_dict, proposed_task_to_dict, state_to_dict
@@ -26,6 +30,9 @@ from agent_tracker.models import (
 )
 from agent_tracker.plugins import load_plugin
 from agent_tracker.rendering import DefaultPromptRenderer
+
+_SSH_SPOOL_SCHEMES = {"ssh", "sftp"}
+_DISABLED_KNOWN_HOSTS = {"none", "off", "false", "disabled"}
 
 
 class Coordinator:
@@ -585,8 +592,28 @@ class Coordinator:
         spool = self.config.raw.get("spool", {})
         if not isinstance(spool, dict):
             spool = {}
-        remote_inbox = _spool_path(self.config, spool.get("remote_inbox"))
+        remote_inbox_value = spool.get("remote_inbox")
         local_inbox, done, error = _local_spool_paths(self.config)
+        if _is_ssh_spool_value(remote_inbox_value):
+            if local_inbox is None:
+                raise ValueError("spool.inbox or spool_inbox is required for pull-spool")
+            if done is None:
+                done = local_inbox / "done"
+            if error is None:
+                error = local_inbox / "error"
+            if not dry_run:
+                local_inbox.mkdir(parents=True, exist_ok=True)
+            return asyncio.run(
+                _pull_spool_sftp(
+                    self.config,
+                    str(remote_inbox_value),
+                    local_inbox,
+                    done,
+                    error,
+                    dry_run=dry_run,
+                )
+            )
+        remote_inbox = _spool_path(self.config, remote_inbox_value)
         if remote_inbox is None:
             raise ValueError("spool.remote_inbox is required for pull-spool")
         if local_inbox is None:
@@ -881,7 +908,7 @@ def _local_spool_paths(
 
 
 def _pull_spool_result(
-    remote_inbox: Path,
+    remote_inbox: str | Path,
     local_inbox: Path,
     *,
     dry_run: bool,
@@ -899,12 +926,31 @@ def _pull_spool_result(
     }
 
 
+@dataclass(frozen=True)
+class _SftpSpoolConfig:
+    """Connection details for an SSH/SFTP remote spool."""
+
+    host: str
+    port: int
+    remote_path: str
+    display_inbox: str
+    username: str
+    password: str | None
+    known_hosts: str | None
+    client_keys: list[str] | None
+
+
 def _is_spool_event_file(path: Path) -> bool:
     """Return whether a remote spool path is a complete JSON event file."""
+    return _is_spool_event_name(path.name)
+
+
+def _is_spool_event_name(name: str) -> bool:
+    """Return whether a remote spool filename is a complete JSON event file."""
     partial_suffixes = {".partial", ".part", ".tmp"}
-    if any(path.name.endswith(suffix) for suffix in partial_suffixes):
+    if any(name.endswith(suffix) for suffix in partial_suffixes):
         return False
-    return path.suffix == ".json"
+    return Path(name).suffix == ".json"
 
 
 def _copy_spool_file_atomic(source: Path, target: Path) -> None:
@@ -915,3 +961,223 @@ def _copy_spool_file_atomic(source: Path, target: Path) -> None:
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_spool_file_atomic(data: bytes, target: Path) -> None:
+    """Write bytes to a temporary non-JSON name before publishing them."""
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(data)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _is_ssh_spool_value(value: Any) -> bool:
+    """Return whether a spool remote value names an SSH/SFTP transport."""
+    text = _first_text(value)
+    if not text:
+        return False
+    return urlsplit(text).scheme.lower() in _SSH_SPOOL_SCHEMES
+
+
+def _parse_sftp_spool_config(config: ProjectConfig, remote_value: str) -> _SftpSpoolConfig:
+    """Parse an SSH/SFTP remote spool config value and optional SSH settings."""
+    parsed = urlsplit(remote_value)
+    scheme = parsed.scheme.lower()
+    if scheme not in _SSH_SPOOL_SCHEMES:
+        raise ValueError("spool.remote_inbox must start with ssh:// or sftp://")
+    if not parsed.hostname:
+        raise ValueError("spool.remote_inbox SSH URI must include a host")
+    try:
+        port = parsed.port or 22
+    except ValueError as exc:
+        raise ValueError("spool.remote_inbox SSH URI has an invalid port") from exc
+    remote_path = unquote(parsed.path or "")
+    if not remote_path:
+        raise ValueError("spool.remote_inbox SSH URI must include an absolute path")
+    if not remote_path.startswith("/"):
+        raise ValueError("spool.remote_inbox SSH URI path must be absolute")
+
+    spool = config.raw.get("spool", {})
+    ssh_options = spool.get("ssh", {}) if isinstance(spool, dict) else {}
+    if not isinstance(ssh_options, dict):
+        ssh_options = {}
+
+    username = unquote(parsed.username or "") or _first_text(ssh_options.get("username"))
+    password = unquote(parsed.password or "") or _first_text(ssh_options.get("password")) or None
+    known_hosts = _known_hosts_option(config, ssh_options.get("known_hosts"))
+    client_keys = _client_key_options(config, ssh_options.get("client_keys"))
+    return _SftpSpoolConfig(
+        host=parsed.hostname,
+        port=port,
+        remote_path=remote_path,
+        display_inbox=_redacted_uri(parsed),
+        username=username,
+        password=password,
+        known_hosts=known_hosts,
+        client_keys=client_keys,
+    )
+
+
+def _known_hosts_option(config: ProjectConfig, value: Any) -> str | None:
+    """Return an AsyncSSH known_hosts option from config."""
+    text = _first_text(value)
+    if not text:
+        return ""
+    if text.lower() in _DISABLED_KNOWN_HOSTS:
+        return None
+    return str(_resolve_config_path(config, text))
+
+
+def _client_key_options(config: ProjectConfig, value: Any) -> list[str] | None:
+    """Return AsyncSSH client key paths from config."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        return None
+    paths = [str(_resolve_config_path(config, item)) for item in values if _first_text(item)]
+    return paths or None
+
+
+def _resolve_config_path(config: ProjectConfig, value: str) -> Path:
+    """Resolve a path-like SSH option relative to the config directory."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else config.root / path
+
+
+def _redacted_uri(parsed: Any) -> str:
+    """Return a URI suitable for result payloads without leaking passwords."""
+    username = unquote(parsed.username or "")
+    netloc = parsed.hostname or ""
+    if username:
+        netloc = f"{quote(username)}@{netloc}"
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _join_sftp_display(base: str, name: str) -> str:
+    """Join an SFTP display URI and filename."""
+    parsed = urlsplit(base)
+    joined = posixpath.join(parsed.path, name)
+    return urlunsplit((parsed.scheme, parsed.netloc, joined, "", ""))
+
+
+async def _pull_spool_sftp(
+    config: ProjectConfig,
+    remote_value: str,
+    local_inbox: Path,
+    done: Path,
+    error: Path,
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Copy complete remote spool files from an SSH/SFTP source."""
+    asyncssh = _load_asyncssh()
+    sftp_config = _parse_sftp_spool_config(config, remote_value)
+    result = _pull_spool_result(sftp_config.display_inbox, local_inbox, dry_run=dry_run)
+    connect_kwargs: dict[str, Any] = {}
+    if sftp_config.username:
+        connect_kwargs["username"] = sftp_config.username
+    if sftp_config.password is not None:
+        connect_kwargs["password"] = sftp_config.password
+    if sftp_config.known_hosts is None or sftp_config.known_hosts:
+        connect_kwargs["known_hosts"] = sftp_config.known_hosts
+    if sftp_config.client_keys is not None:
+        connect_kwargs["client_keys"] = sftp_config.client_keys
+    async with asyncssh.connect(
+        sftp_config.host,
+        port=sftp_config.port,
+        **connect_kwargs,
+    ) as conn:
+        async with conn.start_sftp_client() as sftp:
+            try:
+                if not await sftp.isdir(sftp_config.remote_path):
+                    raise ValueError(
+                        f"spool.remote_inbox is not a directory: {sftp_config.display_inbox}"
+                    )
+            except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPNoSuchPath):
+                return result
+
+            for name in sorted(await sftp.listdir(sftp_config.remote_path)):
+                if name in {".", ".."}:
+                    continue
+                if not _is_safe_spool_entry_name(name):
+                    result["skipped"] += 1
+                    continue
+                remote_path = posixpath.join(sftp_config.remote_path, name)
+                if await sftp.isdir(remote_path) or not _is_spool_event_name(name):
+                    result["skipped"] += 1
+                    continue
+                target = local_inbox / name
+                item = {
+                    "source": _join_sftp_display(sftp_config.display_inbox, name),
+                    "target": str(target),
+                }
+                remote_bytes: bytes | None = None
+                existing_candidates = [
+                    (target, "skip_existing", "conflict"),
+                    (done / name, "skip_done", "conflict_done"),
+                    (error / name, "skip_error", "conflict_error"),
+                ]
+                handled = False
+                for existing, skip_action, conflict_action in existing_candidates:
+                    if not existing.exists():
+                        continue
+                    remote_bytes = await _read_sftp_file(sftp, remote_path)
+                    if existing.is_file() and existing.read_bytes() == remote_bytes:
+                        result["skipped"] += 1
+                        result["files"].append(
+                            {**item, "existing": str(existing), "action": skip_action}
+                        )
+                    else:
+                        result["conflicts"] += 1
+                        result["files"].append(
+                            {**item, "existing": str(existing), "action": conflict_action}
+                        )
+                    handled = True
+                    break
+                if handled:
+                    continue
+                result["processed"] += 1
+                result["files"].append({**item, "action": "copy"})
+                if not dry_run:
+                    if remote_bytes is None:
+                        remote_bytes = await _read_sftp_file(sftp, remote_path)
+                    _write_spool_file_atomic(remote_bytes, target)
+                    result["copied"] += 1
+    return result
+
+
+async def _read_sftp_file(sftp: Any, remote_path: str) -> bytes:
+    """Read one remote SFTP file as bytes."""
+    async with sftp.open(remote_path, "rb") as remote_file:
+        return await remote_file.read()
+
+
+def _is_safe_spool_entry_name(name: str) -> bool:
+    """Return whether a remote entry name is safe as a local filename."""
+    if not name or name in {".", ".."}:
+        return False
+    if "/" in name or "\\" in name:
+        return False
+    if posixpath.isabs(name) or Path(name).is_absolute():
+        return False
+    return posixpath.basename(name) == name
+
+
+def _load_asyncssh() -> Any:
+    """Import AsyncSSH lazily for optional SSH spool support."""
+    try:
+        import asyncssh  # type: ignore[import-not-found]
+    except ModuleNotFoundError as exc:
+        raise ImportError(
+            "SSH spool transport requires the optional 'ssh' extra; "
+            "install it with `agent-tracker[ssh]` or run `uv run --extra ssh ...`"
+        ) from exc
+    return asyncssh

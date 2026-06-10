@@ -36,10 +36,35 @@ the local machine. For a mounted SSH filesystem or shared path:
 }
 ```
 
-For an SSH-only host, use an explicit sync step such as `rsync` or `scp` to copy
-complete remote files into the configured `remote_inbox`, then run
-`pull-spool`. Keep that sync outside `agent-tracker` until a dedicated transport
-adapter exists.
+For an SSH-only host, install the optional SSH extra and point
+`spool.remote_inbox` at an `ssh://` or `sftp://` URI:
+
+```json
+{
+  "spool": {
+    "inbox": "spool/inbox",
+    "done": "spool/done",
+    "error": "spool/error",
+    "remote_inbox": "sftp://agent@example.internal/home/agent/project/.agent-tracker/spool/outbox",
+    "ssh": {
+      "username": "agent",
+      "client_keys": "~/.ssh/agent_tracker_ed25519",
+      "known_hosts": "~/.ssh/known_hosts"
+    }
+  }
+}
+```
+
+From a source checkout, run `pull-spool` with the optional extra:
+
+```bash
+uv run --extra ssh agent-tracker pull-spool --config tracking/project.json --dry-run
+uv run --extra ssh agent-tracker pull-spool --config tracking/project.json
+```
+
+Use `known_hosts: "none"` only for loopback tests or deliberately isolated
+throwaway hosts. For real SSH hosts, keep host-key verification enabled and keep
+passwords or private-key material out of committed config.
 
 ## Remote Agent Publication
 
@@ -102,4 +127,3 @@ should cover event-spool pull/ingest behavior and manually inspect command
 request/response examples against the contract. That keeps remote evidence
 collection usable without pretending remote queue mutation is already
 implemented.
-

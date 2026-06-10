@@ -35,6 +35,7 @@ _TEXT_FIELDS = {
     "spool_error",
 }
 _SPOOL_PATH_FIELDS = {"inbox", "done", "error", "remote_inbox"}
+_SPOOL_SSH_TEXT_FIELDS = {"username", "password", "known_hosts"}
 
 
 @dataclass(frozen=True)
@@ -226,3 +227,20 @@ def _validate_spool(data: dict[str, Any]) -> None:
             continue
         if not isinstance(spool[key], str):
             raise ValueError(f"config field 'spool.{key}' must be a string")
+    if "ssh" in spool and spool["ssh"] is not None:
+        ssh = spool["ssh"]
+        if not isinstance(ssh, dict):
+            raise ValueError("config field 'spool.ssh' must be an object")
+        for key in _SPOOL_SSH_TEXT_FIELDS:
+            if key in ssh and ssh[key] is not None and not isinstance(ssh[key], str):
+                raise ValueError(f"config field 'spool.ssh.{key}' must be a string")
+        if "client_keys" in ssh and ssh["client_keys"] is not None:
+            client_keys = ssh["client_keys"]
+            if isinstance(client_keys, str):
+                pass
+            elif not isinstance(client_keys, list) or not all(
+                isinstance(item, str) for item in client_keys
+            ):
+                raise ValueError(
+                    "config field 'spool.ssh.client_keys' must be a string or list of strings"
+                )
