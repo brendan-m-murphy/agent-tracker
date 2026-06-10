@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from agent_tracker import cli  # noqa: E402
 from agent_tracker import service as service_module  # noqa: E402
+from agent_tracker import skill_bootstrap as skill_bootstrap_module  # noqa: E402
 from agent_tracker.config import (  # noqa: E402
     PROJECT_CONFIG_ENV_VAR,
     PROJECT_DB_ENV_VAR,
@@ -28,7 +29,12 @@ from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
 from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
-from agent_tracker.skill_bootstrap import install_skill, vendored_skill_path  # noqa: E402
+from agent_tracker.skill_bootstrap import (  # noqa: E402
+    available_skill_names,
+    install_skill,
+    install_skills,
+    vendored_skill_path,
+)
 
 
 def assert_no_box_drawing(text: str) -> None:
@@ -4444,6 +4450,53 @@ def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
     assert "Do not run `next` to select your own work." in skill_text
     assert "claim that exact task" in skill_text
     assert "triage intake" in skill_text
+
+
+def test_available_skill_names_lists_vendored_skills() -> None:
+    """Vendored skill discovery lists the installable skill directories."""
+    assert available_skill_names() == [
+        "agent-coordinator",
+        "project-manager",
+        "task-worker",
+    ]
+
+
+def test_install_skills_can_install_all_vendored_skills(tmp_path: Path) -> None:
+    """The bootstrap API can install every vendored skill in one call."""
+    installed = install_skills(destination_root=tmp_path, all_skills=True)
+
+    assert [path.name for path in installed] == available_skill_names()
+    for skill_name in available_skill_names():
+        assert (tmp_path / skill_name / "SKILL.md").exists()
+
+
+def test_install_skills_can_install_a_subset(tmp_path: Path) -> None:
+    """The bootstrap API can install an explicit subset of vendored skills."""
+    installed = install_skills(
+        names=["agent-coordinator", "task-worker"],
+        destination_root=tmp_path,
+    )
+
+    assert [path.name for path in installed] == ["agent-coordinator", "task-worker"]
+    assert (tmp_path / "agent-coordinator" / "SKILL.md").exists()
+    assert (tmp_path / "task-worker" / "SKILL.md").exists()
+    assert not (tmp_path / "project-manager").exists()
+
+
+def test_skill_bootstrap_cli_can_dry_run_all_skills(tmp_path: Path) -> None:
+    """The bootstrap CLI can target every vendored skill without copying files."""
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = skill_bootstrap_module.main(
+            ["--all", "--destination-root", str(tmp_path), "--dry-run"]
+        )
+
+    assert code == 0
+    output = stdout.getvalue()
+    for skill_name in available_skill_names():
+        assert f"Would install {skill_name} skill at {tmp_path / skill_name}" in output
+        assert not (tmp_path / skill_name).exists()
 
 
 def test_project_manager_skill_has_no_project_specific_terms() -> None:

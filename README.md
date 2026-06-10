@@ -483,18 +483,22 @@ The package vendors reusable Codex skills:
 - `task-worker`: implement exactly one claimed task with scoped edits, focused
   checks, and handoff or closeout evidence.
 
-After installing `agent-tracker`, install a skill with:
+After installing `agent-tracker`, install or refresh all vendored skills with:
 
 ```bash
-agent-tracker-install-skill --name project-manager
-agent-tracker-install-skill --name agent-coordinator
-agent-tracker-install-skill --name task-worker
+agent-tracker-install-skill --all --overwrite
 ```
 
-By default, this copies the skill into `$CODEX_HOME/skills` or
-`~/.codex/skills`. Use `--destination-root`, `--overwrite`, or `--dry-run` when
-needed. To refresh an installed skill after updating `agent-tracker`, rerun the
-same command with `--overwrite`.
+Install a subset by passing `--name` more than once:
+
+```bash
+agent-tracker-install-skill --name agent-coordinator --name task-worker
+```
+
+By default, this copies skills into `$CODEX_HOME/skills` or `~/.codex/skills`.
+For backward compatibility, running the command with no `--name` or `--all`
+installs `project-manager`. Use `--destination-root`, `--overwrite`, or
+`--dry-run` when needed.
 
 Project-specific trackers should consume these skills as generic workflows and
 put local policy in project-owned files: `tracking/README.md`, project or repo

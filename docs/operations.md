@@ -983,10 +983,13 @@ Use distinct roles around the same tracker state:
 Install or refresh the vendored skills after installing `agent-tracker`:
 
 ```bash
-agent-tracker-install-skill --name agent-coordinator --overwrite
-agent-tracker-install-skill --name project-manager --overwrite
-agent-tracker-install-skill --name task-worker --overwrite
+agent-tracker-install-skill --all --overwrite
 ```
+
+Use repeated `--name` flags to install or refresh a subset, for example
+`agent-tracker-install-skill --name agent-coordinator --name task-worker
+--overwrite`. With no `--name` or `--all`, the command keeps the historical
+default and installs `project-manager`.
 
 ## Recommended Coordinator Flow
 
