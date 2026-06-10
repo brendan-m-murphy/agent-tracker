@@ -275,15 +275,17 @@ agent-tracker plan task --config project.json \
   --source user \
   --role maintainer \
   --write-scope src/agent_tracker/service.py \
+  --notebook-path notebooks/project.md \
   --validation-check "uv run pytest" \
   "User asked for a triage workflow"
 ```
 
 `plan task` records the positional text as intake and creates the proposed task
 contract in one audited operation. Use `--intake-metadata KEY=VALUE` for source
-context, and use `--metadata-json` only for task metadata. Existing scripts can
-still call `propose-task --config project.json <intake-id> ...` when they
-already have an intake record.
+context, use repeatable `--notebook-path` for prompt-included notebook
+references, and use `--metadata-json` only for other task metadata. Existing
+scripts can still call `propose-task --config project.json <intake-id> ...`
+when they already have an intake record.
 
 Use `plan list --json`, `list-proposals --json`, or exported snapshots to review
 proposed tasks. A reviewed proposal can be promoted without editing the task
@@ -369,9 +371,15 @@ readable UTF-8 regular files under that config directory and renders a clear
 note for missing, directory, unreadable, absolute, home-relative, or parent-path
 values that resolve outside it.
 
-`metadata.notebook_paths` accepts a string or list of strings and follows the
-same config-directory-relative safety rules. Use it when a task needs project or
-repo notebooks in addition to its primary `prompt_path`.
+`metadata.notebook_paths` accepts a string or list of strings. The default
+renderer checks the config directory first, then safely falls back to the
+configured task source root for `notebooks/...` paths. Use it when a task needs
+project or repo notebooks in addition to its primary `prompt_path`.
+
+For proposed tasks, prefer repeatable `--notebook-path` on `plan task`,
+`propose-task`, or `update-proposal` instead of editing proposal JSON by hand.
+The option validates relative paths below `notebooks/` and stores them in
+`metadata.notebook_paths`.
 
 For project-specific prompt assembly beyond this file include, configure a
 custom `prompt_renderer`. See [plugins.md](plugins.md).

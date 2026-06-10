@@ -69,6 +69,19 @@ class TaskRecord:
 
 
 @dataclass(frozen=True)
+class NotebookRecord:
+    """A file-backed project or repository notebook."""
+
+    notebook_id: str
+    kind: str
+    path: str
+    title: str = ""
+    exists: bool = False
+    size_bytes: int = 0
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
 class RequirementState:
     """Evaluated dependency state."""
 

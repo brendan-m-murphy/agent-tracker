@@ -750,6 +750,7 @@ agent-tracker plan task --config project.json \
   --validation-check "uv run pytest" \
   --dependency foundation:"Base queue exists." \
   --authority "local code and docs" \
+  --notebook-path notebooks/project.md \
   "User asked for a readable triage workflow"
 ```
 
@@ -757,8 +758,10 @@ agent-tracker plan task --config project.json \
 task contract in one command. It prints the proposal JSON and does not create a
 claimable live task. Use `--intake-metadata KEY=VALUE` or
 `--intake-metadata-json '{"key": "value"}'` for intake context; use
-`--metadata-json` for proposed task metadata. `--repo` applies to both the
-intake record and proposed task unless `--intake-repo` is provided.
+repeatable `--notebook-path` to store prompt-included notebook references in
+`metadata.notebook_paths`; use `--metadata-json` for other proposed task
+metadata. `--repo` applies to both the intake record and proposed task unless
+`--intake-repo` is provided.
 
 The flat compatibility flow remains available when intake already exists:
 
@@ -771,7 +774,8 @@ agent-tracker propose-task --config project.json <intake-id> \
   --write-scope src/agent_tracker/service.py \
   --validation-check "uv run pytest" \
   --dependency foundation:"Base queue exists." \
-  --authority "local code and docs"
+  --authority "local code and docs" \
+  --notebook-path notebooks/repos/agent-tracker.md
 ```
 
 List proposals:
@@ -824,6 +828,38 @@ make the importer source authoritative again.
 The flat `list-proposals` and `promote-proposal` commands remain supported for
 scripts and produce the same proposal payloads as `plan list` and
 `plan promote`.
+
+## Manage Notebooks
+
+Project and repo notebooks are Markdown files below the task source root's
+`notebooks/` directory. List discovered notebooks:
+
+```bash
+agent-tracker notebook list --config project.json
+agent-tracker notebook list --config project.json --json
+```
+
+Show a conventional notebook:
+
+```bash
+agent-tracker notebook show --config project.json project
+agent-tracker notebook show --config project.json repo agent-tracker
+```
+
+Append a short reviewed note:
+
+```bash
+agent-tracker notebook append --config project.json project \
+  "Record the durable project convention."
+agent-tracker notebook append --config project.json repo agent-tracker \
+  "Record the durable repo convention."
+```
+
+Use `notebook show path notebooks/project.md` or
+`notebook append path notebooks/project.md "..."` when a command or script
+already has the config-relative notebook path. Notebook read/write commands
+reject absolute paths, `~`, parent traversal, and paths outside `notebooks/`.
+They are for durable Markdown context only; live queue state remains in SQLite.
 
 ## Validate Preview Git Refs
 

@@ -33,6 +33,25 @@ def _write_config(root: Path) -> ProjectConfig:
     return load_config(config_path)
 
 
+def _write_config_with_task_source_root(root: Path, task_source_root: Path) -> ProjectConfig:
+    """Write and load a config whose task source root differs from the config root."""
+    root.mkdir(parents=True, exist_ok=True)
+    task_source_root.mkdir(parents=True, exist_ok=True)
+    config_path = root / "project.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project_id": "demo",
+                "name": "Demo Project",
+                "db_path": "state.sqlite",
+                "task_source_root": str(task_source_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return load_config(config_path)
+
+
 def _state(prompt_path: str, *, metadata: dict | None = None) -> TaskState:
     """Build a task state with every default renderer section populated."""
     return TaskState(
@@ -217,22 +236,56 @@ def test_default_renderer_includes_metadata_notebook_paths(tmp_path: Path) -> No
     ) in prompt
 
 
-def test_default_renderer_rejects_unsafe_metadata_notebook_paths(tmp_path: Path) -> None:
-    """Notebook includes use the same config-root boundary as prompt_path."""
-    project_root = tmp_path / "project"
-    config = _write_config(project_root)
-    secret = tmp_path / "secret.md"
-    secret.write_text("outside secret", encoding="utf-8")
+def test_default_renderer_falls_back_to_task_source_root_for_notebooks(
+    tmp_path: Path,
+) -> None:
+    """Notebook metadata paths can resolve from the configured task source root."""
+    config_root = tmp_path / "config"
+    source_root = tmp_path / "definitions"
+    config = _write_config_with_task_source_root(config_root, source_root)
+    notebooks = source_root / "notebooks"
+    notebooks.mkdir(parents=True)
+    (notebooks / "project.md").write_text("Task-source notebook.\n", encoding="utf-8")
 
     prompt = _render(
         config,
         "",
-        metadata={"notebook_paths": ["../secret.md", "notebooks/missing.md", str(secret)]},
+        metadata={"notebook_paths": ["notebooks/project.md"]},
+    )
+
+    assert "Source: notebooks/project.md" in prompt
+    assert "Task-source notebook." in prompt
+    assert not (config_root / "notebooks" / "project.md").exists()
+
+
+def test_default_renderer_rejects_unsafe_metadata_notebook_paths(tmp_path: Path) -> None:
+    """Notebook includes must stay below the notebook root."""
+    project_root = tmp_path / "project"
+    config = _write_config(project_root)
+    secret = tmp_path / "secret.md"
+    secret.write_text("outside secret", encoding="utf-8")
+    docs = project_root / "docs"
+    docs.mkdir()
+    (docs / "note.md").write_text("plain doc", encoding="utf-8")
+
+    prompt = _render(
+        config,
+        "",
+        metadata={
+            "notebook_paths": [
+                "../secret.md",
+                "docs/note.md",
+                "notebooks/missing.md",
+                str(secret),
+            ]
+        },
     )
 
     assert "outside secret" not in prompt
+    assert "plain doc" not in prompt
     assert "Source: ../secret.md" in prompt
-    assert "[notebook not included: path resolves outside the config directory]" in prompt
+    assert "Source: docs/note.md" in prompt
+    assert "[notebook not included: path must be below notebooks/]" in prompt
     assert "Source: notebooks/missing.md" in prompt
     assert "[notebook not included: file does not exist]" in prompt
     assert "[notebook not included: absolute or home-relative paths are not allowed]" in prompt

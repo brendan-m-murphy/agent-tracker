@@ -23,6 +23,7 @@ from agent_tracker.db import (
     Store,
     intake_to_dict,
     intervention_to_dict,
+    notebook_to_dict,
     notification_delivery_to_dict,
     proposed_task_to_dict,
     state_to_dict,
@@ -40,6 +41,7 @@ from agent_tracker.models import (
     EventRecord,
     IntakeRecord,
     InterventionRecord,
+    NotebookRecord,
     NotificationDeliveryRecord,
     ProposedTaskRecord,
     RequirementState,
@@ -558,6 +560,7 @@ class Coordinator:
         requirements: list[dict[str, str]] | None = None,
         authority: str = "",
         intervention_needs: list[str] | None = None,
+        notebook_paths: list[str] | None = None,
         notebook_updates: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         proposal_id: str = "",
@@ -587,6 +590,9 @@ class Coordinator:
         needs = _clean_strings(intervention_needs or [])
         if needs:
             task_metadata["intervention_needs"] = needs
+        notebook_references = _clean_notebook_paths(notebook_paths or [])
+        if notebook_references:
+            task_metadata["notebook_paths"] = notebook_references
         notebooks = _clean_strings(notebook_updates or [])
         if notebooks:
             task_metadata["notebook_updates"] = notebooks
@@ -633,6 +639,7 @@ class Coordinator:
         requirements: list[dict[str, str]] | None = None,
         authority: str = "",
         intervention_needs: list[str] | None = None,
+        notebook_paths: list[str] | None = None,
         notebook_updates: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         proposal_id: str = "",
@@ -660,6 +667,8 @@ class Coordinator:
             requirements: Optional task dependency records.
             authority: Optional authority note stored in task metadata.
             intervention_needs: Optional human-intervention notes.
+            notebook_paths: Optional config-relative notebook paths to include
+                when rendering the task prompt.
             notebook_updates: Optional notebook update notes.
             metadata: Optional proposed task metadata.
             proposal_id: Optional stable proposal identifier.
@@ -699,6 +708,9 @@ class Coordinator:
         needs = _clean_strings(intervention_needs or [])
         if needs:
             task_metadata["intervention_needs"] = needs
+        notebook_references = _clean_notebook_paths(notebook_paths or [])
+        if notebook_references:
+            task_metadata["notebook_paths"] = notebook_references
         notebooks = _clean_strings(notebook_updates or [])
         if notebooks:
             task_metadata["notebook_updates"] = notebooks
@@ -767,6 +779,7 @@ class Coordinator:
         validation_checks: list[str] | None = None,
         requirements: list[dict[str, str]] | None = None,
         authority: str | None = None,
+        notebook_paths: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         actor: str = "system",
     ) -> ProposedTaskRecord:
@@ -810,6 +823,12 @@ class Coordinator:
                 task_metadata["authority"] = cleaned_authority
             else:
                 task_metadata.pop("authority", None)
+        if notebook_paths is not None:
+            notebook_references = _clean_notebook_paths(notebook_paths)
+            if notebook_references:
+                task_metadata["notebook_paths"] = notebook_references
+            else:
+                task_metadata.pop("notebook_paths", None)
 
         task = replace(
             current.task,
@@ -842,6 +861,106 @@ class Coordinator:
             cleaned_proposal_id,
             proposal,
             actor=actor,
+        )
+
+    def notebook_records(self) -> list[NotebookRecord]:
+        """Return discovered project and repository notebooks.
+
+        Notebook discovery is file-backed and scoped to `notebooks/` below the
+        configured task source root. Returned paths are config-relative when
+        possible, which keeps them copy-paste ready for `--notebook-path` and
+        the default prompt renderer.
+
+        Returns:
+            Existing conventional notebook files, sorted with the project
+            notebook before repo notebooks.
+        """
+        notebooks_root = self.config.effective_task_source_root / "notebooks"
+        candidates: list[tuple[str, str, Path]] = [
+            ("project", "project", notebooks_root / "project.md")
+        ]
+        repos_root = notebooks_root / "repos"
+        if repos_root.exists():
+            candidates.extend(
+                ("repo", path.stem, path)
+                for path in sorted(repos_root.glob("*.md"))
+                if path.is_file()
+            )
+        records = [
+            _notebook_record(self.config, kind=kind, name=name, path=path)
+            for kind, name, path in candidates
+            if path.exists()
+        ]
+        return sorted(records, key=lambda record: (record.kind != "project", record.path))
+
+    def notebook_payload(self) -> dict[str, Any]:
+        """Return JSON-friendly discovered notebook records.
+
+        Returns:
+            A payload containing the project id and discovered notebook records.
+        """
+        return {
+            "project_id": self.config.project_id,
+            "notebooks": [notebook_to_dict(record) for record in self.notebook_records()],
+        }
+
+    def read_notebook(self, notebook_path: str) -> str:
+        """Read one notebook by safe relative path.
+
+        Args:
+            notebook_path: Path below `notebooks/`, for example
+                `notebooks/project.md`.
+
+        Returns:
+            UTF-8 notebook text.
+
+        Raises:
+            ValueError: If the path is absolute, home-relative, escapes the
+                notebook root, or points at a directory.
+            FileNotFoundError: If the notebook file does not exist.
+        """
+        path = _resolve_notebook_file(self.config, notebook_path, must_exist=True)
+        return path.read_text(encoding="utf-8")
+
+    def append_notebook(
+        self,
+        notebook_path: str,
+        text: str,
+        *,
+        actor: str = "system",
+    ) -> NotebookRecord:
+        """Append a short durable note to a notebook.
+
+        Args:
+            notebook_path: Path below `notebooks/`, for example
+                `notebooks/repos/agent-tracker.md`.
+            text: Markdown note body to append.
+            actor: Actor written in the appended entry heading.
+
+        Returns:
+            The updated notebook record.
+
+        Raises:
+            ValueError: If mutation is refused, the notebook path is unsafe, or
+                the note text is blank.
+        """
+        self._ensure_mutation_allowed()
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            raise ValueError("notebook note text is required")
+        path = _resolve_notebook_file(self.config, notebook_path, must_exist=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        separator = "\n" if existing.strip() else ""
+        timestamp = datetime.now(timezone.utc).date().isoformat()
+        cleaned_actor = _first_text(actor) or "system"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{separator}\n## {timestamp} - {cleaned_actor}\n\n{cleaned_text}\n")
+        return _notebook_record(
+            self.config,
+            kind=_notebook_kind_from_path(path),
+            name=path.stem,
+            path=path,
         )
 
     def promote_proposed_task(
@@ -1703,6 +1822,111 @@ def _clean_strings(values: list[str]) -> list[str]:
             cleaned.append(text)
             seen.add(text)
     return cleaned
+
+
+def _clean_notebook_paths(values: list[str]) -> list[str]:
+    """Normalize and validate notebook include paths for task metadata."""
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        notebook_path = _normalize_notebook_path(value)
+        if notebook_path and notebook_path not in seen:
+            cleaned.append(notebook_path)
+            seen.add(notebook_path)
+    return cleaned
+
+
+def _normalize_notebook_path(value: str) -> str:
+    """Return a safe config-relative notebook path."""
+    text = _first_text(value)
+    if not text:
+        return ""
+    requested = Path(text)
+    if text.startswith("~") or requested.is_absolute():
+        raise ValueError("notebook path must be relative and cannot start with ~")
+    normalized = Path(*requested.parts)
+    if ".." in normalized.parts:
+        raise ValueError("notebook path cannot contain parent traversal")
+    if normalized.parts[:1] != ("notebooks",):
+        raise ValueError("notebook path must be below notebooks/")
+    return normalized.as_posix()
+
+
+def _resolve_notebook_file(
+    config: ProjectConfig,
+    notebook_path: str,
+    *,
+    must_exist: bool,
+) -> Path:
+    """Resolve a notebook path below the task source notebook root."""
+    normalized = _normalize_notebook_path(notebook_path)
+    if not normalized:
+        raise ValueError("notebook path is required")
+    task_source_root = config.effective_task_source_root.resolve(strict=False)
+    path = (task_source_root / normalized).resolve(strict=False)
+    notebooks_root = (task_source_root / "notebooks").resolve(strict=False)
+    if not path.is_relative_to(notebooks_root):
+        raise ValueError("notebook path resolves outside notebooks/")
+    if must_exist and not path.exists():
+        raise FileNotFoundError(f"notebook does not exist: {normalized}")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"notebook path is not a file: {normalized}")
+    return path
+
+
+def _notebook_record(
+    config: ProjectConfig,
+    *,
+    kind: str,
+    name: str,
+    path: Path,
+) -> NotebookRecord:
+    """Build a notebook record from filesystem metadata."""
+    stat = path.stat()
+    return NotebookRecord(
+        notebook_id=name if kind == "project" else f"repo:{name}",
+        kind=kind,
+        path=_display_notebook_path(config, path),
+        title=_notebook_title(path),
+        exists=True,
+        size_bytes=stat.st_size,
+        updated_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    )
+
+
+def _display_notebook_path(config: ProjectConfig, path: Path) -> str:
+    """Return a task-source-relative notebook path when possible."""
+    resolved = path.resolve(strict=False)
+    task_source_root = config.effective_task_source_root.resolve(strict=False)
+    try:
+        return resolved.relative_to(task_source_root).as_posix()
+    except ValueError:
+        pass
+    config_root = config.root.resolve(strict=False)
+    try:
+        return resolved.relative_to(config_root).as_posix()
+    except ValueError:
+        pass
+    return str(resolved)
+
+
+def _notebook_title(path: Path) -> str:
+    """Return the first Markdown heading from a notebook file."""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if text.startswith("#"):
+                return text.lstrip("#").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return ""
+
+
+def _notebook_kind_from_path(path: Path) -> str:
+    """Infer the notebook kind from a conventional notebook path."""
+    return "repo" if path.parent.name == "repos" else "project"
 
 
 def _clean_requirements(requirements: list[dict[str, str]]) -> list[dict[str, str]]:

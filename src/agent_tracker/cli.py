@@ -23,6 +23,7 @@ from agent_tracker.config import (
 from agent_tracker.db import (
     intake_to_dict,
     intervention_to_dict,
+    notebook_to_dict,
     proposed_task_to_dict,
     state_to_dict,
 )
@@ -818,6 +819,7 @@ def command_propose_task(args: argparse.Namespace) -> int:
         requirements=[parse_dependency(value) for value in args.dependency],
         authority=args.authority,
         intervention_needs=args.intervention_need,
+        notebook_paths=args.notebook_path,
         notebook_updates=args.notebook_update,
         metadata=metadata,
         proposal_id=args.proposal_id,
@@ -854,6 +856,7 @@ def command_plan_task(args: argparse.Namespace) -> int:
         requirements=[parse_dependency(value) for value in args.dependency],
         authority=args.authority,
         intervention_needs=args.intervention_need,
+        notebook_paths=args.notebook_path,
         notebook_updates=args.notebook_update,
         metadata=metadata,
         proposal_id=args.proposal_id,
@@ -892,6 +895,7 @@ def command_update_proposal(args: argparse.Namespace) -> int:
         validation_checks=args.validation_check,
         requirements=parse_dependencies(args.dependency),
         authority=args.authority,
+        notebook_paths=args.notebook_path,
         metadata=metadata,
         actor=args.actor,
     )
@@ -918,6 +922,41 @@ def command_list_proposals(args: argparse.Namespace) -> int:
         print_json(payload)
         return 0
     human_renderer(args).proposals(payload)
+    return 0
+
+
+def command_notebook_list(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.notebook_payload()
+    if args.json:
+        print_json(payload)
+        return 0
+    notebooks = payload["notebooks"]
+    if not notebooks:
+        print("No notebooks.")
+        return 0
+    for notebook in notebooks:
+        title = f" - {notebook['title']}" if notebook.get("title") else ""
+        print(f"{notebook['id']}: {notebook['path']}{title}")
+    return 0
+
+
+def command_notebook_show(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print(coord.read_notebook(_notebook_path_arg(args)), end="")
+    return 0
+
+
+def command_notebook_append(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    notebook_path, text = _notebook_append_args(args)
+    record = coord.append_notebook(
+        notebook_path,
+        text,
+        actor=args.actor,
+    )
+    print_json(notebook_to_dict(record))
     return 0
 
 
@@ -1131,6 +1170,12 @@ def add_proposal_contract_arguments(parser: argparse.ArgumentParser) -> None:
         help="Repeatable notebook update note or config-relative path.",
     )
     parser.add_argument(
+        "--notebook-path",
+        action="append",
+        default=[],
+        help="Repeatable config-relative notebook path to include in task prompts.",
+    )
+    parser.add_argument(
         "--metadata-json",
         default="{}",
         help="JSON object for proposed task metadata.",
@@ -1197,6 +1242,69 @@ def add_list_proposals_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--status", default="")
     parser.add_argument("--intake-id", default="")
     parser.set_defaults(func=command_list_proposals)
+
+
+def add_notebook_target_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add a conventional notebook target selector."""
+    parser.add_argument(
+        "target",
+        choices=["project", "repo", "path"],
+        help="Notebook target: project, repo, or path.",
+    )
+    parser.add_argument(
+        "name",
+        nargs="?",
+        default="",
+        help=("Repo name for target repo, or a notebooks/ path for target path. Omit for project."),
+    )
+
+
+def _notebook_path_arg(args: argparse.Namespace) -> str:
+    """Return the notebook path selected by CLI target arguments."""
+    if args.target == "project":
+        if args.name:
+            raise ValueError("project notebook target does not take a name")
+        return "notebooks/project.md"
+    if args.target == "repo":
+        repo = _notebook_repo_name_arg(args.name)
+        return f"notebooks/repos/{repo}.md"
+    path = str(args.name or "").strip()
+    if not path:
+        raise ValueError("path notebook target requires a notebooks/ path")
+    return path
+
+
+def _notebook_append_args(args: argparse.Namespace) -> tuple[str, str]:
+    """Return notebook path and append text from compact target arguments."""
+    target = str(args.target)
+    name = str(getattr(args, "name", "") or "").strip()
+    text = str(getattr(args, "text", "") or "").strip()
+    if target == "project":
+        if text:
+            raise ValueError("project notebook append takes only the note text")
+        return "notebooks/project.md", name
+    if not text:
+        raise ValueError(f"{target} notebook append requires a target name and note text")
+    if not name:
+        raise ValueError(f"{target} notebook append requires a target name")
+    if target == "repo":
+        return f"notebooks/repos/{_notebook_repo_name_arg(name)}.md", text
+    if target == "path":
+        return name, text
+    raise ValueError(f"unknown notebook target: {target}")
+
+
+def _notebook_repo_name_arg(value: str) -> str:
+    """Return a safe conventional repo notebook stem."""
+    repo = str(value or "").strip()
+    if not repo:
+        raise ValueError("repo notebook target requires a repo name")
+    requested = Path(repo)
+    if repo.startswith("~") or requested.is_absolute() or len(requested.parts) != 1:
+        raise ValueError("repo notebook target must be a simple repo name")
+    if repo in {".", ".."}:
+        raise ValueError("repo notebook target must be a simple repo name")
+    return repo
 
 
 intake_typer_app = typer.Typer(
@@ -1905,6 +2013,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_proposal.add_argument("--validation-check", action="append", default=None)
     update_proposal.add_argument("--dependency", action="append", default=None)
     update_proposal.add_argument("--authority", default=None)
+    update_proposal.add_argument("--notebook-path", action="append", default=None)
     update_proposal.add_argument("--metadata-json", default=None)
     update_proposal.add_argument("--actor", default="system")
     update_proposal.set_defaults(func=command_update_proposal)
@@ -1938,6 +2047,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Promote a proposed task into live queue state.",
     )
     add_promote_proposal_arguments(plan_promote)
+
+    notebook = sub.add_parser(
+        "notebook",
+        aliases=["notebooks"],
+        help="List, show, and append project or repo notebooks.",
+    )
+    notebook_sub = notebook.add_subparsers(dest="notebook_command", required=True)
+    notebook_list = notebook_sub.add_parser("list", help="List discovered notebooks.")
+    add_common(notebook_list)
+    notebook_list.add_argument("--json", action="store_true")
+    notebook_list.set_defaults(func=command_notebook_list)
+    notebook_show = notebook_sub.add_parser("show", help="Print one notebook.")
+    add_common(notebook_show)
+    add_notebook_target_arguments(notebook_show)
+    notebook_show.set_defaults(func=command_notebook_show)
+    notebook_append = notebook_sub.add_parser("append", help="Append a note to one notebook.")
+    add_common(notebook_append)
+    add_notebook_target_arguments(notebook_append)
+    notebook_append.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Markdown note text to append.",
+    )
+    notebook_append.add_argument("--actor", default="system")
+    notebook_append.set_defaults(func=command_notebook_append)
 
     export = sub.add_parser("export", help="Export project audit snapshot.")
     add_common(export)

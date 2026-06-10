@@ -51,13 +51,50 @@ For multiple notebooks, use opt-in task metadata:
 ```
 
 The default prompt renderer includes `prompt_path` first and then
-`metadata.notebook_paths`. It uses the same safety rules for both: only readable
-UTF-8 regular files below the config directory are included. Missing, absolute,
-home-relative, directory, non-UTF-8, unreadable, or parent-traversal paths render
-a stable note instead of raising.
+`metadata.notebook_paths`. `prompt_path` is config-directory relative only.
+Notebook metadata paths are resolved from the config directory first, then
+`notebooks/...` paths can fall back to the configured task source root. Both
+forms only include readable UTF-8 regular files below their allowed root.
+Missing, absolute, home-relative, directory, non-UTF-8, unreadable, or unsafe
+parent-traversal paths render a stable note instead of raising.
 
 Project-specific renderers can add richer selection rules, but they should keep
 prompt context deterministic and bounded.
+
+## Commands
+
+Use the first-class notebook commands instead of ad hoc shell reads or raw task
+plan edits:
+
+```bash
+agent-tracker notebook list --config tracking/project.json
+agent-tracker notebook show --config tracking/project.json project
+agent-tracker notebook show --config tracking/project.json repo agent-tracker
+agent-tracker notebook append --config tracking/project.json project \
+  "Record a reviewed project-level convention."
+agent-tracker notebook append --config tracking/project.json repo agent-tracker \
+  "Record a reviewed repo-specific convention."
+```
+
+`notebooks` is an alias for `notebook`. The `show` and `append` commands also
+accept `path notebooks/project.md` when you need to name the config-relative
+file directly. Notebook paths must be relative, must stay below `notebooks/`,
+and cannot use `~`, absolute paths, or parent traversal.
+
+When creating proposed tasks, use repeatable `--notebook-path` to populate
+`metadata.notebook_paths` without editing SQLite or `tasks.json`:
+
+```bash
+agent-tracker plan task --config tracking/project.json \
+  --task-id update-renderer \
+  --title "Update prompt renderer" \
+  --notebook-path notebooks/project.md \
+  --notebook-path notebooks/repos/agent-tracker.md \
+  "Rendered prompts need durable notebook context."
+```
+
+`--notebook-update` remains available for notes about notebooks that should be
+reviewed or changed by the worker. `--notebook-path` is for prompt inclusion.
 
 ## Content
 

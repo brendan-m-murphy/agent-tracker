@@ -163,12 +163,13 @@ Default: `agent_tracker.rendering:DefaultPromptRenderer`
 
 The default renderer includes the stored summary, execution fields, dependency
 requirements, validation checks, next action, optional `task.prompt_path`
-content, and optional `metadata.notebook_paths` content. `prompt_path` and
-`metadata.notebook_paths` are treated as config-directory-relative UTF-8 text
-file includes. The default renderer only reads regular files that stay under the
-config directory; absolute paths, home-relative paths, parent traversal outside
-that directory, directories, missing files, and unreadable files render a stable
-note in the prompt instead of raising.
+content, and optional `metadata.notebook_paths` content. `prompt_path` is a
+config-directory-relative UTF-8 text include. `metadata.notebook_paths` checks
+the config directory first, then safely falls back to the configured task source
+root for `notebooks/...` paths. The default renderer only reads regular files
+that stay under their allowed root; absolute paths, home-relative paths, unsafe
+parent traversal, directories, missing files, and unreadable files render a
+stable note in the prompt instead of raising.
 
 Protocol:
 
