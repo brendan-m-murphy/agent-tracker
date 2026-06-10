@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import pytest
 
@@ -49,6 +50,16 @@ from agent_tracker.skill_bootstrap import (  # noqa: E402
 def assert_no_box_drawing(text: str) -> None:
     """Assert text output is free of Rich-style box-drawing characters."""
     assert not any(0x2500 <= ord(char) <= 0x257F for char in text)
+
+
+def assert_no_ansi(text: str) -> None:
+    """Assert text output does not contain ANSI escape sequences."""
+    assert not re.search(r"\x1b\[[0-?]*[ -/]*[@-~]", text)
+
+
+def assert_has_ansi(text: str) -> None:
+    """Assert text output contains ANSI escape sequences."""
+    assert re.search(r"\x1b\[[0-?]*[ -/]*[@-~]", text)
 
 
 def render_overview_payload(payload: dict[str, Any], *, width: int) -> str:
@@ -898,6 +909,173 @@ def test_cli_overview_plain_outputs_line_oriented_key_values(tmp_path: Path) -> 
     assert "ATTENTION" not in output
     assert "blocker:" not in output
     assert_no_box_drawing(output)
+    assert_no_ansi(output)
+
+
+def test_human_renderer_can_add_restrained_colour_without_changing_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced colour adds ANSI while preserving readable overview text labels."""
+    _, coord = prepare_overview_state(tmp_path)
+    payload = coord.overview_payload(limit=10)
+    plain = render_overview_payload(payload, width=80)
+    stdout = StringIO()
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    HumanOutputRenderer(output=stdout, width=80, color=True).overview(payload)
+    coloured = stdout.getvalue()
+
+    assert_has_ansi(coloured)
+    assert "ATTENTION" in coloured
+    assert "  ACTIVE" in coloured
+    assert "BLOCKED (1)" in coloured
+    assert "READY (1)" in coloured
+    assert re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", coloured) == plain
+    assert_no_box_drawing(coloured)
+
+
+def test_human_renderer_respects_no_color_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NO_COLOR disables ANSI even when colour is otherwise forced."""
+    _, coord = prepare_overview_state(tmp_path)
+    stdout = StringIO()
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    HumanOutputRenderer(output=stdout, width=80, color=True).overview(coord.overview_payload())
+    output = stdout.getvalue()
+
+    assert "READY (1)" in output
+    assert_no_ansi(output)
+    assert_no_box_drawing(output)
+
+
+def test_cli_human_output_stays_plain_when_redirected_with_force_color(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redirected human output avoids ANSI even when FORCE_COLOR is ambient."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["status", "--config", str(config_path)])
+    output = stdout.getvalue()
+
+    assert code == 0
+    assert "Toy Project (toy)" in output
+    assert "Queue" in output
+    assert_no_ansi(output)
+    assert_no_box_drawing(output)
+
+
+def test_cli_no_color_disables_human_renderer_colour(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--no-color passes a disabled colour policy only for human rendering."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    policies: list[bool | None] = []
+
+    class SpyRenderer(HumanOutputRenderer):
+        """Renderer test double that records requested colour policy."""
+
+        def __init__(
+            self,
+            output: TextIO | None = None,
+            *,
+            width: int | None = None,
+            color: bool | None = None,
+        ) -> None:
+            policies.append(color)
+            super().__init__(output, width=width, color=color)
+
+    monkeypatch.setattr(cli, "HumanOutputRenderer", SpyRenderer)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--no-color"])
+    output = stdout.getvalue()
+
+    assert code == 0
+    assert policies == [False]
+    assert "READY (1)" in output
+    assert_no_ansi(output)
+    assert_no_box_drawing(output)
+
+
+def test_cli_grouped_intake_no_color_can_be_set_before_or_after_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grouped Typer intake list propagates --no-color from group or command."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    coord.record_intake("Check grouped intake colour policy.", kind="feature")
+    policies: list[bool | None] = []
+
+    class SpyRenderer(HumanOutputRenderer):
+        """Renderer test double that records requested colour policy."""
+
+        def __init__(
+            self,
+            output: TextIO | None = None,
+            *,
+            width: int | None = None,
+            color: bool | None = None,
+        ) -> None:
+            policies.append(color)
+            super().__init__(output, width=width, color=color)
+
+    monkeypatch.setattr(cli, "HumanOutputRenderer", SpyRenderer)
+    invocations = [
+        ["intake", "--config", str(config_path), "--no-color", "list", "--limit", "1"],
+        ["intake", "--config", str(config_path), "list", "--no-color", "--limit", "1"],
+    ]
+
+    for invocation in invocations:
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            code = cli.main(invocation)
+        output = stdout.getvalue()
+
+        assert code == 0
+        assert "Check grouped intake colour policy." in output
+        assert_no_ansi(output)
+
+    assert policies == [False, False]
+
+
+def test_cli_no_color_does_not_affect_json_or_plain_modes(tmp_path: Path) -> None:
+    """--no-color leaves structured and grep-friendly overview output unchanged."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    plain_stdout = StringIO()
+    json_stdout = StringIO()
+
+    with redirect_stdout(plain_stdout):
+        plain_code = cli.main(
+            ["overview", "--config", str(config_path), "--plain", "--no-color", "--limit", "10"]
+        )
+    with redirect_stdout(json_stdout):
+        json_code = cli.main(
+            ["overview", "--config", str(config_path), "--json", "--no-color", "--limit", "1"]
+        )
+
+    assert plain_code == 0
+    assert json_code == 0
+    assert plain_stdout.getvalue().splitlines()[1] == (
+        "counts open=5 ready=1 active=1 review=1 integration=1 blocked=1 recent=2"
+    )
+    assert_no_ansi(plain_stdout.getvalue())
+    payload = json.loads(json_stdout.getvalue())
+    assert payload["counts"]["ready"] == 1
+    assert payload["groups"]["recently_completed"][0]["id"] == "done-b"
 
 
 def test_cli_overview_mode_flags_conflict_cleanly(tmp_path: Path) -> None:

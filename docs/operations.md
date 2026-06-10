@@ -175,9 +175,12 @@ agent-tracker status --config project.json
 Human `status` output is rendered with Rich and grouped into `Paths` and
 `Queue` sections with aligned labels. It avoids Rich panels or box-drawing
 characters by default so output can be copied into logs and plain-text handoffs.
-Line-oriented human output for `status`, `overview`, `next`, intake listings,
-and proposal listings flows through the built-in `HumanOutputRenderer` boundary.
-Task prompt output remains on the separate prompt-renderer plugin path.
+Line-oriented human output for `status`, `overview`, `next`, `show`, intake
+listings, and proposal listings flows through the built-in `HumanOutputRenderer`
+boundary. That renderer may use restrained colour for headings, statuses, and
+muted metadata when the terminal supports it; pass `--no-color` or set
+`NO_COLOR` to force unstyled human output. Task prompt output remains on the
+separate prompt-renderer plugin path.
 
 Print full JSON task state:
 
@@ -323,7 +326,8 @@ agent-tracker overview --config project.json --json
 
 `--plain` prints deterministic line-oriented key/value fragments without Rich
 layout, styling, wrapping, or box drawing. It is intended for grep, awk, shell
-history, and copy/paste into logs. `--wide` keeps the human grouped layout but
+history, and copy/paste into logs, and is unaffected by `--no-color`.
+`--wide` keeps the human grouped layout but
 uses the detected terminal width and adds only targeted context: ready and
 attention rows can show `next`, blocked rows show `blocker`, and recent rows can
 show completion evidence, time, and action. It wraps cleanly at narrow widths
