@@ -1022,6 +1022,34 @@ def test_completion_policy_accepts_git_with_integration_evidence(
     )
 
     assert coord.get_task("ready").state == "done"
+    assert coord.completion_integrity_payload() == {
+        "project_id": "toy",
+        "ok": True,
+        "issue_count": 0,
+        "issues": [],
+    }
+
+
+def test_completion_policy_complete_uses_recorded_and_new_evidence(
+    tmp_path: Path,
+) -> None:
+    """Direct completion counts evidence recorded before the final command."""
+    config = load_config(write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.record_evidence("ready", "git:branch-abc123", actor="agent-1")
+
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["pr:https://example.invalid/pr/1"],
+    )
+
+    state = coord.get_task("ready")
+    assert state.state == "done"
+    assert state.evidence == ["git:branch-abc123", "pr:https://example.invalid/pr/1"]
 
 
 def test_completion_policy_direct_merge_requires_permission_and_git_evidence(
@@ -1145,6 +1173,83 @@ def test_completion_policy_malformed_or_unknown_metadata_is_legacy(
     )
 
     assert coord.get_task("ready").state == "done"
+
+
+def test_completion_integrity_check_flags_corruption_and_ignores_legacy_metadata(
+    tmp_path: Path,
+) -> None:
+    """Integrity check flags corrupted policy tasks but preserves legacy metadata."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'done', lease_agent_id = '', lease_token = '', lease_expires_at = ''
+            WHERE project_id = ? AND task_id = ?
+            """,
+            (config.project_id, "ready"),
+        )
+        conn.execute(
+            """
+            UPDATE tasks
+            SET metadata_json = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            (
+                json.dumps({"completion_policy": {"default": "unknown"}}),
+                config.project_id,
+                "foundation",
+            ),
+        )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["check-completion-integrity", "--config", str(config_path), "--json"])
+    payload = json.loads(stdout.getvalue())
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["issue_count"] == 1
+    assert payload["issues"][0]["task_id"] == "ready"
+    assert payload["issues"][0]["reason"] == (
+        "completion requires git: and pr:/review:/integration: evidence"
+    )
+    assert payload["issues"][0]["direct_merge"] is False
+
+
+def test_completion_integrity_check_reports_direct_merge_git_only_completion(
+    tmp_path: Path,
+) -> None:
+    """Integrity check reports direct-merge completions without integrated evidence."""
+    config_path = write_project_with_completion_policy(tmp_path, PR_OR_REVIEW_POLICY)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["git:main-abc123"],
+        direct_merge=True,
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["check-completion-integrity", "--config", str(config_path), "--json"])
+    payload = json.loads(stdout.getvalue())
+    tool_payload = AgentTrackerTools(config_path).check_completion_integrity()
+
+    assert code == 1
+    assert payload["issues"][0]["task_id"] == "ready"
+    assert payload["issues"][0]["direct_merge"] is True
+    assert payload["issues"][0]["completion_action"] == "task.complete"
+    assert payload["issues"][0]["evidence"] == ["git:main-abc123"]
+    assert "pr:/review:/integration:" in payload["issues"][0]["reason"]
+    assert tool_payload == payload
 
 
 def test_submit_review_clears_lease_records_evidence_and_preserves_blocking(
@@ -2999,6 +3104,184 @@ def test_promote_proposed_task_creates_claimable_live_task(tmp_path: Path) -> No
     )
 
 
+def test_update_proposed_task_edits_contract_before_promotion(tmp_path: Path) -> None:
+    """Proposed task contracts can be corrected before they become live tasks."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        repo="agent-tracker",
+        summary="Promote reviewed intake into live task state.",
+        next_action="Draft the change.",
+        validation_checks=["uv run pytest"],
+        metadata={"lane": "planning"},
+        actor="pm",
+    )
+
+    updated = coord.update_proposed_task(
+        proposal.proposal_id,
+        task_id="add-triage-v2",
+        title="Add proposal edit workflow",
+        repo="agent-tracker",
+        summary="Allow proposals to be corrected before promotion.",
+        next_action="Implement update and withdraw commands.",
+        role="maintainer",
+        write_scopes=["src/agent_tracker/service.py", "tests/test_agent_tracker.py"],
+        validation_checks=[".venv/bin/pytest tests/test_agent_tracker.py"],
+        requirements=[{"task": "foundation", "description": "Base queue exists."}],
+        authority="local code and tests",
+        metadata={"lane": "triage"},
+        actor="pm",
+    )
+    listed = coord.proposed_task_records()
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert updated.status == "proposed"
+    assert updated.created_at == proposal.created_at
+    assert updated.task.task_id == "add-triage-v2"
+    assert updated.task.title == "Add proposal edit workflow"
+    assert updated.task.next_action == "Implement update and withdraw commands."
+    assert updated.task.validation_checks == [".venv/bin/pytest tests/test_agent_tracker.py"]
+    assert updated.task.execution["primary_files"] == [
+        "src/agent_tracker/service.py",
+        "tests/test_agent_tracker.py",
+    ]
+    assert updated.task.metadata == {
+        "lane": "triage",
+        "roles": ["maintainer"],
+        "write_scopes": [
+            "src/agent_tracker/service.py",
+            "tests/test_agent_tracker.py",
+        ],
+        "authority": "local code and tests",
+    }
+    assert updated.requirements == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+    assert listed == [updated]
+    update_audit = next(
+        audit for audit in snapshot["audit"] if audit["action"] == "proposal.update"
+    )
+    assert update_audit["actor"] == "pm"
+    assert update_audit["payload"]["proposal_id"] == proposal.proposal_id
+    assert update_audit["payload"]["previous_task_id"] == "add-triage"
+    assert update_audit["payload"]["task_id"] == "add-triage-v2"
+    assert update_audit["payload"]["changed_fields"] == [
+        "task.id",
+        "task.title",
+        "task.summary",
+        "task.next_action",
+        "task.execution",
+        "task.validation_checks",
+        "task.metadata",
+        "requirements",
+    ]
+    assert update_audit["payload"]["changes"]["task.title"] == {
+        "previous": "Add triage workflow",
+        "updated": "Add proposal edit workflow",
+    }
+    with pytest.raises(ValueError, match="task already exists"):
+        coord.update_proposed_task(proposal.proposal_id, task_id="ready")
+
+    other_intake = coord.record_intake("Add another proposal.", kind="feature")
+    other = coord.propose_task_from_intake(
+        other_intake.intake_id,
+        task_id="other-triage",
+        title="Other triage workflow",
+    )
+    with pytest.raises(ValueError, match="proposal task id already exists"):
+        coord.update_proposed_task(proposal.proposal_id, task_id=other.task.task_id)
+
+    promoted = coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+    state = coord.get_task("add-triage-v2")
+
+    assert promoted.task.task_id == "add-triage-v2"
+    assert state.task.title == "Add proposal edit workflow"
+    assert state.task.next_action == "Implement update and withdraw commands."
+    assert state.task.validation_checks == [".venv/bin/pytest tests/test_agent_tracker.py"]
+    assert state.task.execution["primary_files"] == [
+        "src/agent_tracker/service.py",
+        "tests/test_agent_tracker.py",
+    ]
+    assert state.task.metadata == {
+        "lane": "triage",
+        "roles": ["maintainer"],
+        "write_scopes": [
+            "src/agent_tracker/service.py",
+            "tests/test_agent_tracker.py",
+        ],
+        "authority": "local code and tests",
+    }
+    assert state.requirements[0].detail == "foundation: done"
+
+
+def test_withdraw_proposed_task_prevents_promotion_and_audits(tmp_path: Path) -> None:
+    """Withdrawn proposals are retained as rejected records and cannot promote."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        actor="pm",
+    )
+
+    withdrawn = coord.withdraw_proposed_task(proposal.proposal_id, actor="pm")
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert withdrawn.status == "rejected"
+    assert coord.proposed_task_records(status="rejected") == [withdrawn]
+    with pytest.raises(ValueError, match="cannot promote proposal .* from status rejected"):
+        coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+    with pytest.raises(ValueError, match="cannot update proposal .* from status rejected"):
+        coord.update_proposed_task(proposal.proposal_id, title="Edited after withdrawal")
+    with pytest.raises(ValueError, match="cannot withdraw proposal .* from status rejected"):
+        coord.withdraw_proposed_task(proposal.proposal_id, actor="pm")
+    followup_intake = coord.record_intake("Re-propose the same ID.", kind="feature")
+    with pytest.raises(ValueError, match="existing rejected proposal"):
+        coord.propose_task_from_intake(
+            followup_intake.intake_id,
+            task_id=proposal.task.task_id,
+            title="Re-propose triage workflow",
+        )
+    assert any(
+        audit["action"] == "proposal.withdraw"
+        and audit["actor"] == "pm"
+        and audit["payload"]
+        == {
+            "proposal_id": proposal.proposal_id,
+            "intake_id": intake.intake_id,
+        }
+        for audit in snapshot["audit"]
+    )
+
+
+def test_promoted_proposal_cannot_be_updated_or_withdrawn(tmp_path: Path) -> None:
+    """Proposal edits and withdrawal stop once a task is live."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+        actor="pm",
+    )
+    coord.promote_proposed_task(proposal.proposal_id, actor="pm")
+
+    with pytest.raises(ValueError, match="cannot update proposal .* from status promoted"):
+        coord.update_proposed_task(proposal.proposal_id, title="Edited after promotion")
+    with pytest.raises(ValueError, match="cannot withdraw proposal .* from status promoted"):
+        coord.withdraw_proposed_task(proposal.proposal_id, actor="pm")
+
+
 def test_triage_rejects_missing_intake_and_existing_task_id(tmp_path: Path) -> None:
     """Proposed tasks must come from intake and not collide with live tasks."""
     config = load_config(write_project(tmp_path))
@@ -3160,6 +3443,85 @@ def test_cli_propose_and_list_proposals_json(tmp_path: Path) -> None:
     assert promoted["status"] == "promoted"
     assert state.state == "ready"
     assert state.task.task_id == "add-triage"
+
+
+def test_cli_update_and_withdraw_proposal_json(tmp_path: Path) -> None:
+    """CLI proposal edits and withdrawal return proposal JSON."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intake = coord.record_intake("Add triage.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="add-triage",
+        title="Add triage workflow",
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "update-proposal",
+                "--config",
+                str(config_path),
+                proposal.proposal_id,
+                "--title",
+                "Add proposal edit workflow",
+                "--next-action",
+                "Implement update and withdraw commands.",
+                "--validation-check",
+                ".venv/bin/pytest tests/test_agent_tracker.py",
+                "--dependency",
+                "foundation:Base queue exists.",
+                "--metadata-json",
+                '{"lane": "triage"}',
+                "--actor",
+                "pm",
+            ]
+        )
+
+    updated = json.loads(stdout.getvalue())
+    assert code == 0
+    assert updated["status"] == "proposed"
+    assert updated["task"]["title"] == "Add proposal edit workflow"
+    assert updated["task"]["next_action"] == "Implement update and withdraw commands."
+    assert updated["task"]["validation_checks"] == [".venv/bin/pytest tests/test_agent_tracker.py"]
+    assert updated["task"]["metadata"] == {"lane": "triage"}
+    assert updated["requirements"] == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "withdraw-proposal",
+                "--config",
+                str(config_path),
+                proposal.proposal_id,
+                "--actor",
+                "pm",
+            ]
+        )
+
+    withdrawn = json.loads(stdout.getvalue())
+    assert code == 0
+    assert withdrawn["status"] == "rejected"
+
+    stderr = StringIO()
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "promote-proposal",
+                "--config",
+                str(config_path),
+                proposal.proposal_id,
+            ]
+        )
+
+    assert code == 1
+    assert "from status rejected" in stderr.getvalue()
 
 
 def test_project_root_plugin_loads_from_config_directory(tmp_path: Path) -> None:
@@ -3457,6 +3819,223 @@ def test_mcp_handlers_submit_review_and_await_integration(tmp_path: Path) -> Non
     }
 
 
+def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
+    tmp_path: Path,
+) -> None:
+    """Typed MCP wrappers expose stable payloads and preserve older names."""
+    config_path = write_overview_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+
+    status = tools.status()
+    alias_status = tools.get_project_status()
+    overview = tools.overview(limit=1)
+    worker_prompt = tools.launch_worker_prompt("ready", agent_id="agent-1")
+    launch_worker = tools.launch_worker("ready", agent_id="agent-1")
+
+    claim_keys = {"project_id", "task_id", "lease_token", "lease_expires_at", "agent_id"}
+    claim = tools.claim(agent_id="agent-1", task_id="ready")
+    alias_claim = tools.claim_task(agent_id="agent-2", task_id="other-ready")
+    heartbeat = tools.heartbeat(
+        task_id="ready",
+        lease_token=claim["lease_token"],
+        agent_id="agent-1",
+    )
+    alias_heartbeat = tools.heartbeat_task(
+        task_id="other-ready",
+        lease_token=alias_claim["lease_token"],
+        agent_id="agent-2",
+    )
+
+    assert {"project_id", "name", "db_path", "tasks", "ready", "active", "blocked"} <= set(status)
+    assert alias_status["project_id"] == status["project_id"] == "toy"
+    assert list(overview["groups"]) == [
+        "ready",
+        "active",
+        "review",
+        "integration",
+        "blocked",
+        "recently_completed",
+    ]
+    assert overview["limit"] == 1
+    assert set(worker_prompt) == {
+        "project_id",
+        "task_id",
+        "agent_id",
+        "launch_mode",
+        "launched",
+        "prompt",
+        "task",
+    }
+    assert worker_prompt["project_id"] == "toy"
+    assert worker_prompt["task_id"] == "ready"
+    assert worker_prompt["agent_id"] == "agent-1"
+    assert worker_prompt["launch_mode"] == "prompt_only"
+    assert worker_prompt["launched"] is False
+    assert launch_worker["launch_mode"] == "prompt_only"
+    assert launch_worker["launched"] is False
+    assert worker_prompt["task"]["id"] == "ready"
+    assert "# Ready" in worker_prompt["prompt"]
+    assert set(claim) == claim_keys
+    assert set(alias_claim) == claim_keys
+    assert set(heartbeat) == claim_keys
+    assert set(alias_heartbeat) == claim_keys
+    assert heartbeat["task_id"] == "ready"
+    assert alias_heartbeat["task_id"] == "other-ready"
+    assert tools.complete(
+        task_id="ready",
+        lease_token=heartbeat["lease_token"],
+        evidence=["evidence://typed-ready"],
+        agent_id="agent-1",
+    ) == {"ok": True}
+    assert tools.complete_task(
+        task_id="other-ready",
+        lease_token=alias_heartbeat["lease_token"],
+        evidence=["evidence://alias-ready"],
+        agent_id="agent-2",
+    ) == {"ok": True}
+
+
+def test_mcp_typed_wrappers_preserve_lease_enforcement(tmp_path: Path) -> None:
+    """Typed mutating wrappers still enforce lease token and owner checks."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="different agent"):
+        tools.heartbeat(
+            task_id="ready",
+            lease_token=claim["lease_token"],
+            agent_id="agent-2",
+        )
+    with pytest.raises(ValueError, match="lease token is invalid"):
+        tools.complete(
+            task_id="ready",
+            lease_token="wrong-token",
+            evidence=["evidence://ready"],
+            agent_id="agent-1",
+        )
+
+    assert coord.get_task("ready").state == "claimed"
+
+
+def test_mcp_typed_status_and_overview_keep_stale_lease_recovery_explicit(
+    tmp_path: Path,
+) -> None:
+    """Typed read wrappers inspect stale leases without mutating unless asked."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET lease_expires_at = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            ("2000-01-01T00:00:00+00:00", config.project_id, "ready"),
+        )
+    tools = AgentTrackerTools(config_path)
+
+    status = tools.status()
+    overview = tools.overview()
+    with coord.store.transaction() as conn:
+        inspected = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+
+    assert "ready" in status["ready"]
+    assert overview["groups"]["ready"][0]["id"] == "ready"
+    assert inspected["status"] == "claimed"
+    assert inspected["lease_token"] == claim.lease_token
+
+    recovered_status = tools.status(recover_stale_leases=True)
+    with coord.store.transaction() as conn:
+        recovered = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+    assert "ready" in recovered_status["ready"]
+    assert recovered["status"] == "pending"
+    assert recovered["lease_token"] == ""
+
+
+def test_mcp_typed_mutations_preserve_canonical_config_refusal(tmp_path: Path) -> None:
+    """Typed mutating wrappers cannot bypass canonical config authority."""
+    canonical_root = tmp_path / "canonical"
+    canonical_root.mkdir()
+    config_path = write_project(canonical_root)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["canonical_config_path"] = str(config_path)
+    data["state_root"] = str(canonical_root)
+    data["task_source_root"] = str(canonical_root)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    copied_root = tmp_path / "copied"
+    copied_root.mkdir()
+    copied_config = copied_root / "project.json"
+    copied_config.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    tools = AgentTrackerTools(copied_config)
+
+    assert tools.status()["project_id"] == "toy"
+    with pytest.raises(ValueError, match="canonical config"):
+        tools.claim(agent_id="agent-1", role="worker")
+    assert not (copied_root / "state.sqlite").exists()
+
+
+def test_mcp_typed_spool_wrappers_expose_payload_shapes(tmp_path: Path) -> None:
+    """Typed MCP wrappers expose pull-spool and ingest-spool payloads."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    local = tmp_path / "spool" / "inbox"
+    remote.mkdir()
+    (remote / "event.json").write_text(
+        json.dumps({"event_id": "evt-typed", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+
+    dry_run = tools.pull_spool(dry_run=True)
+    pulled = tools.pull_spool()
+    ingested = tools.ingest_spool(actor="mcp")
+
+    assert set(dry_run) == {
+        "dry_run",
+        "remote_inbox",
+        "local_inbox",
+        "processed",
+        "copied",
+        "skipped",
+        "conflicts",
+        "files",
+    }
+    assert dry_run["dry_run"] is True
+    assert dry_run["processed"] == 1
+    assert dry_run["copied"] == 0
+    assert dry_run["files"] == [
+        {
+            "source": str(remote / "event.json"),
+            "target": str(local / "event.json"),
+            "action": "copy",
+        }
+    ]
+    assert pulled["dry_run"] is False
+    assert pulled["processed"] == 1
+    assert pulled["copied"] == 1
+    assert ingested == {"processed": 1, "inserted": 1, "errors": 0}
+
+
 def test_mcp_ready_task_limit_rejects_negative_values(tmp_path: Path) -> None:
     """MCP handlers expose service validation for invalid limits."""
     config_path = write_project(tmp_path)
@@ -3467,6 +4046,53 @@ def test_mcp_ready_task_limit_rejects_negative_values(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="greater than or equal to zero"):
         tools.list_ready_tasks(limit=-1)
+
+
+def test_cli_record_evidence_appends_idempotently_and_audits(
+    tmp_path: Path,
+) -> None:
+    """CLI record-evidence appends once and audits only inserted evidence."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        first_code = cli.main(
+            [
+                "record-evidence",
+                "--config",
+                str(config_path),
+                "ready",
+                "evidence://one",
+                "--actor",
+                "agent-1",
+            ]
+        )
+        second_code = cli.main(
+            [
+                "record-evidence",
+                "--config",
+                str(config_path),
+                "ready",
+                "evidence://one",
+                "--actor",
+                "agent-1",
+            ]
+        )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert first_code == 0
+    assert second_code == 0
+    assert coord.get_task("ready").evidence == ["evidence://one"]
+    assert "Recorded for ready: evidence://one" in stdout.getvalue()
+    assert "Evidence already recorded for ready: evidence://one" in stdout.getvalue()
+    evidence_audits = [audit for audit in snapshot["audit"] if audit["action"] == "evidence.record"]
+    assert len(evidence_audits) == 1
+    assert evidence_audits[0]["task_id"] == "ready"
+    assert evidence_audits[0]["actor"] == "agent-1"
+    assert evidence_audits[0]["payload"] == {"uri": "evidence://one"}
 
 
 def test_cli_submit_review_updates_state_and_records_repeated_evidence(
@@ -3800,11 +4426,31 @@ def test_agent_coordinator_skill_is_vendored_and_installable(tmp_path: Path) -> 
     assert "name: agent-coordinator" in (installed / "SKILL.md").read_text(encoding="utf-8")
 
 
+def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
+    """The reusable task-worker skill can be bootstrapped for new installs."""
+    source = vendored_skill_path("task-worker")
+    installed = install_skill(
+        name="task-worker",
+        destination_root=tmp_path,
+        dry_run=False,
+    )
+
+    assert (source / "SKILL.md").exists()
+    assert installed == tmp_path / "task-worker"
+    assert (installed / "SKILL.md").exists()
+    assert (installed / "agents" / "openai.yaml").exists()
+    skill_text = (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: task-worker" in skill_text
+    assert "Do not run `next` to select your own work." in skill_text
+    assert "claim that exact task" in skill_text
+    assert "triage intake" in skill_text
+
+
 def test_project_manager_skill_has_no_project_specific_terms() -> None:
     """Vendored skills must stay generic across agent-tracker projects."""
     forbidden = ["hpc", "slurm", "test_inversions", "acrg"]
     offenders = []
-    for skill_name in ("project-manager", "agent-coordinator"):
+    for skill_name in ("project-manager", "agent-coordinator", "task-worker"):
         source = vendored_skill_path(skill_name)
         for path in source.rglob("*"):
             if not path.is_file():

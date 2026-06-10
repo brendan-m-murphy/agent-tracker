@@ -187,6 +187,20 @@ Environment defaults do not bypass this authority model. A config path from
 `--config`, and mutating commands still refuse copied configs or database
 overrides when `canonical_config_path` is set.
 
+Sandbox and cache settings do not change state authority either. In Codex or
+other managed runners, `uv run` may need approval to read or populate its cache
+under the user's home directory. Prefer direct virtualenv commands such as
+`.venv/bin/agent-tracker status --config tracking/project.json` for read-only
+inspection after the environment has already been synced. A writable uv cache,
+for example `uv --cache-dir /tmp/agent-tracker-uv-cache run ...`, can reduce
+cache-path friction in some runners, but it does not grant permission to write a
+canonical SQLite database or Git metadata outside the worktree.
+
+Do not use `AGENT_TRACKER_DB` or a copied config to redirect mutating commands
+to a sandbox-local database unless you are deliberately inspecting or testing a
+separate throwaway project. Production coordination should keep leases,
+evidence, and audit rows in the configured canonical database.
+
 Absolute paths and `~` are also supported:
 
 ```json
@@ -204,6 +218,62 @@ AGENT_TRACKER_CONFIG=tracking/project.json \
 AGENT_TRACKER_DB=/tmp/example-agent-tracker.sqlite \
 agent-tracker status --json
 ```
+
+## Downstream uv Preview Pins
+
+Downstream uv projects can validate in-progress `agent-tracker` work by pinning
+a temporary git ref in `pyproject.toml`. This is the recommended preview path
+for uv projects because the ref is named, lockable, and reproducible. Avoid
+adjacent-checkout path dependencies as the default workflow; reserve them for
+local package development that is not meant to produce tracker validation
+evidence.
+
+Branch preview:
+
+```toml
+[project]
+dependencies = ["agent-tracker"]
+
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "preview/<feature-or-task>" }
+```
+
+Immutable preview:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", rev = "<commit-sha>" }
+```
+
+Refresh the downstream lock and run the downstream checks:
+
+```bash
+uv lock --upgrade-package agent-tracker
+uv sync
+uv run <downstream-validation-command>
+```
+
+After validation succeeds and the feature lands on `main` or a release is
+available, replace the preview pin. For unreleased `main` validation:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "main" }
+```
+
+For a release:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", tag = "<release-tag>" }
+```
+
+If `agent-tracker` is consumed from a package index, remove the
+`tool.uv.sources.agent-tracker` entry and keep only the normal dependency
+specifier, then rerun `uv lock --upgrade-package agent-tracker`.
+
+Preview refs are temporary validation channels. They do not define release
+support, compatibility guarantees, or long-lived downstream policy.
 
 ## Plugin Specs
 

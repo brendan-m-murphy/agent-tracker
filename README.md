@@ -33,8 +33,8 @@ live coordination queue.
   logs.
 - Plugin protocols for custom importers, prompt renderers, event adapters,
   follow-up planners, and exporters.
-- A vendored Codex skill named `project-manager` for repos that want agents to
-  pull and log work through `agent-tracker`.
+- Vendored Codex skills for coordinator, project-manager, and one-task worker
+  roles in repos that use `agent-tracker`.
 
 ## Install
 
@@ -60,6 +60,47 @@ If you use `uv` tools:
 uv tool install /path/to/agent-tracker
 agent-tracker --help
 ```
+
+### Preview Refs For Downstream Validation
+
+When a downstream uv project needs an in-progress `agent-tracker` feature before
+it reaches `main`, a maintainer can publish a temporary preview branch or share
+a reachable commit SHA for validation. Use this only after the scoped change is
+reviewable and has passed the maintainer's normal local checks. Preview refs are
+temporary validation channels, not stable release policy.
+
+In the downstream project, pin the preview through uv dependency sources:
+
+```toml
+[project]
+dependencies = ["agent-tracker"]
+
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "preview/<feature-or-task>" }
+```
+
+For an immutable validation run, pin the exact commit instead:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", rev = "<commit-sha>" }
+```
+
+Then refresh and validate the downstream lock:
+
+```bash
+uv lock --upgrade-package agent-tracker
+uv sync
+uv run <downstream-validation-command>
+```
+
+Record the downstream result on the tracker task as evidence, for example
+`git:<preview-commit>`, `validation:<project>:<command-or-run-url>`, and any
+review or PR URL. After the feature lands on `main` or is released, replace the
+preview source with `branch = "main"`, `tag = "<release-tag>"`, or the normal
+published dependency, then rerun `uv lock --upgrade-package agent-tracker`.
+Avoid adjacent-checkout path dependencies as the default validation path; they
+are harder to reproduce than a named git ref.
 
 ## Quickstart
 
@@ -432,22 +473,28 @@ agent-tracker export --config demo-tracker/project.json
 
 The package vendors reusable Codex skills:
 
-- `project-manager`: pull the next task, triage intake, and manage focused
-  project-manager updates.
+- `project-manager`: triage intake, report status, tidy planning, and propose
+  or promote tasks without taking a worker lease.
 - `agent-coordinator`: run an agent-tracker project end to end, including queue
   health checks, lease checks, task planning, worker/review coordination, and
-  closeout evidence.
+  closeout evidence. When the user asks for agent coordination or subagents, it
+  normally delegates bounded implementation, review, test, or evidence work
+  while keeping queue state, leases, integration decisions, and final evidence.
+- `task-worker`: implement exactly one claimed task with scoped edits, focused
+  checks, and handoff or closeout evidence.
 
 After installing `agent-tracker`, install a skill with:
 
 ```bash
 agent-tracker-install-skill --name project-manager
 agent-tracker-install-skill --name agent-coordinator
+agent-tracker-install-skill --name task-worker
 ```
 
 By default, this copies the skill into `$CODEX_HOME/skills` or
 `~/.codex/skills`. Use `--destination-root`, `--overwrite`, or `--dry-run` when
-needed.
+needed. To refresh an installed skill after updating `agent-tracker`, rerun the
+same command with `--overwrite`.
 
 Project-specific trackers should consume these skills as generic workflows and
 put local policy in project-owned files: `tracking/README.md`, project or repo

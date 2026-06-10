@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Coordinator"
   short_description: "Coordinate agent-tracker queue execution"
-  default_prompt: "Use $agent-coordinator to coordinate this agent-tracker project through queue health checks, leases, task execution, review, and closeout."
+  default_prompt: "Use $agent-coordinator to orchestrate this agent-tracker project through queue health checks, leases, worker supervision, review, and closeout."

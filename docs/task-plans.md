@@ -64,14 +64,25 @@ raw artifacts into the task plan.
 
 `metadata.completion_policy` can opt a task into machine-checked completion
 evidence. With
-`{"default": "pr_or_review_required", "direct_merge_override": true}`, any
+`{"default": "pr_or_review_required", "direct_merge_override": true}`, a normal
 transition to `done` through `complete`, `resolve-review`, or
 `resolve-integration` requires cumulative evidence containing at least one
 `git:` URI and at least one `pr:`, `review:`, or `integration:` URI. The
 direct-merge override is never implicit: callers must pass `--direct-merge`
 or the equivalent service/MCP parameter, the task metadata must allow it, and
-`git:` evidence is still required. Missing, malformed, or unknown
-`completion_policy` metadata is treated as legacy behavior.
+`git:` evidence is still required, but the final transition may proceed before
+separate `pr:`, `review:`, or `integration:` evidence exists. Missing,
+malformed, or unknown `completion_policy` metadata is treated as legacy
+behavior.
+
+Evidence can be recorded before completion with `record-evidence`, review, or
+integration handoff commands. The completion validator evaluates cumulative
+stored evidence plus evidence supplied to the final done transition. Run
+`agent-tracker check-completion-integrity --config project.json` to find
+completed policy tasks whose stored evidence would not satisfy the current
+policy. The check is read-only, keeps legacy metadata legacy, and reports
+direct-merge completions that have only `git:` evidence when they still need an
+integrated review or merge trail.
 
 ## Statuses
 
@@ -267,6 +278,13 @@ project manager may use a direct-merge override and store `git:<main-sha>`
 evidence after merging the task branch. In all cases, SQLite remains the
 canonical live queue state; commits and PRs are evidence/review surfaces, not
 live coordination state.
+
+If evidence arrives before final closeout, append it without changing task
+state:
+
+```bash
+agent-tracker record-evidence --config project.json write-readme "git:<branch-sha>"
+```
 
 If the task plan is the authoritative source for your project, update the
 completed task's imported status to `done` in the same integrated change.

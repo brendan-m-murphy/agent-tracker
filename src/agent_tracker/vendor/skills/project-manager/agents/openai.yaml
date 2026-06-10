@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Manager"
-  short_description: "Pull the next task and manage project intake"
-  default_prompt: "Use the project-manager skill. Pull the next available task for this agent-tracker project. If pulling or claiming fails, investigate and repair the issue before reporting a blocker."
+  short_description: "Triage intake and report queue status"
+  default_prompt: "Use $project-manager to triage this agent-tracker project, report queue status, and propose or promote follow-up tasks without taking a worker lease."

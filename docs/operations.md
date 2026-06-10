@@ -53,6 +53,52 @@ schema if needed, so automation can run it as the first command in a pull
 workflow. Mutating commands print the resolved config, task source, and database
 paths to stderr before changing state.
 
+## Sandboxed Codex Runs
+
+In managed Codex worktrees, the project files, Git metadata, uv cache, and
+canonical tracker state may live under different filesystem authorities. Treat
+those boundaries as part of the coordination contract instead of working around
+them with copied state.
+
+Prefer the existing virtualenv entrypoints for read-only inspection and focused
+validation when the environment has already been synced:
+
+```bash
+.venv/bin/agent-tracker overview --config tracking/project.json
+.venv/bin/agent-tracker status --config tracking/project.json --json
+.venv/bin/pytest
+.venv/bin/ruff check .
+```
+
+These commands avoid `uv run` cache discovery, which can require approval in
+sandboxed sessions even for read-only commands. Use `uv run` when dependencies
+need to be resolved, extras or groups need to be installed, or a fresh
+environment is being created. If the runner supports it, a writable uv cache
+such as `uv --cache-dir /tmp/agent-tracker-uv-cache run ...` or
+`UV_CACHE_DIR=/tmp/agent-tracker-uv-cache` can reduce home-directory cache
+friction, but it does not replace approval for commands that need network,
+system configuration, or out-of-worktree writes.
+
+Mutating tracker commands must still use the canonical config when
+`canonical_config_path` is configured:
+
+```bash
+agent-tracker claim --config /path/to/canonical/tracking/project.json \
+  --agent agent-1 \
+  --task-id write-readme
+```
+
+Those commands write the canonical SQLite database and may require approval when
+the database is outside the Codex worktree. Do not point `AGENT_TRACKER_DB`,
+`db_path`, or `state_root` at a temporary sandbox location just to avoid the
+approval; that creates a second live queue authority and can lose leases,
+evidence, and audit history.
+
+Git branch, commit, and push operations can also require approval when the
+worktree's `.git` file points to repository metadata outside the writable
+worktree. That is expected for copied Codex worktrees. Record these approvals as
+run evidence or friction only when they block normal coordinator progress.
+
 ## Initialize Storage
 
 Create the project row and database schema:
@@ -168,6 +214,61 @@ task dictionary.
 Like `status`, `overview` is read-only by default. It reports the effective
 state without mutating stale leases. Pass `--recover-stale-leases` only when
 inspection should also write stale-lease recovery to SQLite.
+
+## Typed Tool Surface
+
+`agent_tracker.mcp_tools.AgentTrackerTools` exposes a scoped, typed Python tool
+surface for Codex, app, MCP, or local wrapper hosts that should not shell out to
+the broad CLI for routine coordination operations.
+
+Create one tool object per project config:
+
+```python
+from agent_tracker.mcp_tools import AgentTrackerTools
+
+tools = AgentTrackerTools("tracking/project.json")
+```
+
+The routine wrappers mirror the coordinator operations and return JSON-friendly
+payloads:
+
+- `status(recover_stale_leases=False)`: full status payload with task state
+  lists, resolved paths, and queue groups.
+- `overview(limit=5, recover_stale_leases=False)`: grouped ready, active,
+  review, integration, blocked, and recently completed task dictionaries.
+- `claim(agent_id, task_id="", repo="", role="", lease_seconds=3600)`: claim
+  payload containing `project_id`, `task_id`, `lease_token`,
+  `lease_expires_at`, and `agent_id`.
+- `heartbeat(task_id, lease_token, lease_seconds=3600, agent_id="")`: the same
+  claim-shaped lease payload after extending the lease.
+- `complete(task_id, lease_token, evidence=None, agent_id="",
+  direct_merge=False)`: `{"ok": true}` after successful completion.
+- `record_evidence(task_id, uri, actor="system")`: idempotently append one
+  evidence URI without changing task state.
+- `check_completion_integrity()`: deterministic diagnostic for completed tasks
+  whose stored evidence no longer satisfies current completion policy.
+- `pull_spool(dry_run=False)`: pull-spool counts and per-file actions.
+- `ingest_spool(actor="system")`: processed, inserted, and error counts.
+- `launch_worker_prompt(task_id, agent_id="", markdown=True)`: prompt-only
+  worker handoff data with `launch_mode` set to `prompt_only`, `launched` set to
+  `false`, the rendered prompt, and the current task context.
+
+`launch_worker(...)` is an equivalent prompt-only alias for hosts that name the
+tool after the launch-worker operation. Neither launch helper starts Codex, an
+app server, or any external worker. Hosts that own execution can use the
+returned prompt and task context as their launch input, then report progress
+back through normal tracker state, evidence, and event APIs.
+
+Existing method names remain supported as compatibility aliases:
+`get_project_status()`, `claim_task(...)`, `heartbeat_task(...)`,
+`complete_task(...)`, `list_ready_tasks(...)`, `get_task_context(...)`, and
+`render_prompt(...)`.
+
+These wrappers are adapters over `Coordinator`, not a second queue authority.
+Canonical config and database override checks still run for mutating calls, and
+lease tokens and optional `agent_id` ownership checks still apply to heartbeat,
+completion, review, integration, and failure operations. `status` and
+`overview` remain read-only unless their `recover_stale_leases` flag is set.
 
 ## List Ready Tasks
 
@@ -422,6 +523,31 @@ Proposed task records are stored in SQLite, audited as `proposal.record`, and
 included in snapshots. They do not appear in ready-task listings and cannot be
 claimed until promoted.
 
+If a proposed contract has a typo, incomplete next action, wrong write scope, or
+bad dependency, update the proposal before promotion instead of editing SQLite:
+
+```bash
+agent-tracker update-proposal --config project.json <proposal-id> \
+  --title "Add triage workflow" \
+  --next-action "Implement reviewed triage promotion." \
+  --write-scope src/agent_tracker/service.py \
+  --validation-check "uv run pytest"
+```
+
+If the intake should not become a task, withdraw the proposed contract before it
+is promoted:
+
+```bash
+agent-tracker withdraw-proposal --config project.json <proposal-id> --actor pm
+```
+
+Updating or withdrawing a proposal is audited and only applies while the
+proposal is still in the `proposed` state. Promoted proposals are live queue
+history; fix them with normal task follow-up work instead of rewriting the
+proposal record. Withdrawn proposals are retained with `rejected` status as
+audit history, and their task IDs remain reserved; create a new proposal with a
+new task ID if later work should replace the withdrawn contract.
+
 After review, promote a proposal into live queue state:
 
 ```bash
@@ -433,6 +559,64 @@ Promotion audits `proposal.promote`, changes the proposal status to
 the task-plan JSON untouched. Normal definition imports preserve promoted
 runtime tasks; use destructive runtime reconciliation only when you intend to
 make the importer source authoritative again.
+
+## Validate Preview Git Refs
+
+Publish a preview git ref only when a downstream uv project is blocked on an
+in-progress `agent-tracker` feature and needs to validate it before it reaches
+`main` or a release. The ref should point at scoped, reviewable work that has
+already passed the maintainer's normal local checks. Do not use preview refs as
+a long-lived compatibility promise or as a substitute for review, merge, or
+release policy.
+
+Maintainer checklist:
+
+- create or update a named preview branch such as `preview/<feature-or-task>`;
+- keep the branch narrow enough that downstream results map to one tracker
+  task or task group;
+- record upstream evidence such as `git:<preview-commit>` and `pr:<url>` or an
+  equivalent review surface;
+- tell downstream validators which branch or commit SHA to pin and which checks
+  to run.
+
+Downstream uv projects should pin the preview in dependency config rather than
+depending on an adjacent checkout:
+
+```toml
+[project]
+dependencies = ["agent-tracker"]
+
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "preview/<feature-or-task>" }
+```
+
+For a repeatable result, pin the exact preview commit:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", rev = "<commit-sha>" }
+```
+
+Validate from the downstream project:
+
+```bash
+uv lock --upgrade-package agent-tracker
+uv sync
+uv run <downstream-validation-command>
+```
+
+While validating, collect tracker evidence that another maintainer can inspect:
+
+- `git:<preview-commit>` for the preview being tested;
+- `validation:<project>:<command-or-run-url>` for the downstream check;
+- `file:<path>` for a concise log, report, or config diff;
+- `pr:<url>` or `review:<summary>` when validation happens through review.
+
+When validation succeeds and the feature lands, remove the temporary preview
+pin. If the downstream project intentionally tracks unreleased main, switch the
+uv source to `branch = "main"`. Prefer `tag = "<release-tag>"` or the normal
+published dependency for long-lived downstream configuration. Rerun
+`uv lock --upgrade-package agent-tracker` after replacing the source.
 
 ## Complete Work
 
@@ -473,12 +657,20 @@ For tasks with `completion_policy.default` set to
 `pr_or_review_required`, any transition to `done` requires cumulative evidence
 with at least one `git:` URI and at least one `pr:`, `review:`, or
 `integration:` URI. Evidence recorded before the final command, such as during
-`submit-review`, counts alongside evidence supplied to `complete`,
-`resolve-review`, or `resolve-integration`.
+`record-evidence` or `submit-review`, counts alongside evidence supplied to
+`complete`, `resolve-review`, or `resolve-integration`.
 
 SQLite remains the canonical live queue state. Git commits and GitHub PRs are
 evidence and review surfaces for closeout; do not use them as live coordination
 state in place of leases, task status, evidence rows, or audit events.
+
+Append evidence without changing task state:
+
+```bash
+agent-tracker record-evidence --config project.json write-readme \
+  "git:<branch-or-main-commit>" \
+  --actor agent-1
+```
 
 Mark the task done and attach evidence:
 
@@ -496,6 +688,18 @@ or bounded summaries over large raw outputs.
 
 Completing a task clears its lease. Downstream pending tasks become ready after
 their dependencies are done.
+
+Check completed tasks for evidence that no longer satisfies the current policy:
+
+```bash
+agent-tracker check-completion-integrity --config project.json
+agent-tracker check-completion-integrity --config project.json --json
+```
+
+The check is read-only and uses the same completion-policy validator as the
+state transitions. It exits non-zero when it finds issues. Missing, malformed,
+or unknown `completion_policy` metadata remains legacy behavior and is not
+reported as a policy issue.
 
 ## Await Review Or Integration
 
@@ -576,7 +780,10 @@ completion.
 `--direct-merge` is explicit and metadata-gated. It is accepted only when the
 task allows `"direct_merge_override": true`, and it still requires `git:`
 evidence. Without this flag, `git:` evidence alone is not enough for
-`pr_or_review_required` tasks.
+`pr_or_review_required` tasks. The integrity check also reports direct-merge
+completions whose cumulative evidence is only `git:` evidence and lacks
+`pr:`, `review:`, or `integration:` evidence, so managers can find work that
+still needs an integrated review or merge trail.
 
 When the committed task plan is the authoritative source, include the terminal
 task-plan status update in the integrated branch and use
@@ -758,9 +965,33 @@ Snapshots include:
 Treat SQLite as live state and snapshots as derived audit artifacts that can be
 checked into git or shared with reviewers.
 
-## Recommended Agent Flow
+## Agent Roles
 
-Agents should use this sequence:
+Use distinct roles around the same tracker state:
+
+- `agent-coordinator` owns project-wide orchestration: queue health, leases,
+  task planning, worker supervision, review or integration evidence, and final
+  tracker closeout. When the user asks for agent coordination or subagents, it
+  normally delegates bounded implementation, review, test, or evidence work
+  while keeping queue state, leases, integration decisions, and final evidence.
+- `project-manager` owns planning and triage: intake, status reports, queue
+  tidying, proposed tasks, promotions, and notebooks. It does not take a worker
+  lease for one-task implementation.
+- `task-worker` owns exactly one claimed task: scoped edits, focused checks,
+  evidence, and handoff or closeout for that task only.
+
+Install or refresh the vendored skills after installing `agent-tracker`:
+
+```bash
+agent-tracker-install-skill --name agent-coordinator --overwrite
+agent-tracker-install-skill --name project-manager --overwrite
+agent-tracker-install-skill --name task-worker --overwrite
+```
+
+## Recommended Coordinator Flow
+
+Coordinators or generic project agents that are allowed to choose work can use
+this sequence:
 
 ```bash
 agent-tracker import --config project.json
@@ -769,7 +1000,18 @@ agent-tracker claim --config project.json --agent <agent-id> --role maintainer -
 agent-tracker task --config project.json <task-id> --markdown
 ```
 
-Then, while working:
+Do not use this as `task-worker` guidance. A task worker should receive a
+specific task ID or rendered prompt and may only claim that exact task when
+project policy allows it. A project manager should report status, triage intake,
+and propose or promote tasks without taking an implementation lease.
+
+If the user requested agent coordination or subagents, the coordinator should
+normally dispatch bounded implementation, review, test, or evidence work to
+subagents after claiming/rendering the task. Tiny coordination mutations and
+sessions where subagents are unavailable can stay local, but local work should
+be explicit rather than silently replacing requested agent coordination.
+
+Then, while a claimed task is active:
 
 ```bash
 agent-tracker heartbeat --config project.json <task-id> --lease-token <lease-token> --agent <agent-id>
