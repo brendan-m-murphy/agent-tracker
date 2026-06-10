@@ -36,6 +36,16 @@ _TEXT_FIELDS = {
 }
 _SPOOL_PATH_FIELDS = {"inbox", "done", "error", "remote_inbox"}
 _SPOOL_SSH_TEXT_FIELDS = {"username", "password", "known_hosts"}
+_WORKSPACE_TEXT_FIELDS = {
+    "kind",
+    "path",
+    "config_path",
+    "spool_outbox",
+    "artifacts_path",
+    "host",
+    "remote_path",
+}
+_WORKSPACE_LIST_FIELDS = {"roles", "capabilities", "worker_command"}
 
 
 @dataclass(frozen=True)
@@ -139,6 +149,7 @@ def load_config(path: str | Path) -> ProjectConfig:
     config_schema_version = _config_schema_version(data)
     _validate_text_fields(data)
     _validate_spool(data)
+    _validate_workspaces(data)
     raw = dict(data)
     raw["config_schema_version"] = config_schema_version
     root = config_path.parent
@@ -243,4 +254,42 @@ def _validate_spool(data: dict[str, Any]) -> None:
             ):
                 raise ValueError(
                     "config field 'spool.ssh.client_keys' must be a string or list of strings"
+                )
+
+
+def _validate_workspaces(data: dict[str, Any]) -> None:
+    """Validate the optional cross-project workspace registry."""
+    if "workspaces" not in data or data["workspaces"] is None:
+        return
+    workspaces = data["workspaces"]
+    if not isinstance(workspaces, dict):
+        raise ValueError("config field 'workspaces' must be an object")
+    for name, value in workspaces.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("workspace names must be non-empty strings")
+        if not isinstance(value, dict):
+            raise ValueError(f"config field 'workspaces.{name}' must be an object")
+        kind = value.get("kind", "local")
+        if not isinstance(kind, str) or kind.strip() not in {"local", "ssh"}:
+            raise ValueError(f"config field 'workspaces.{name}.kind' must be 'local' or 'ssh'")
+        if kind.strip() == "local" and not _optional_text(value, "path"):
+            raise ValueError(f"config field 'workspaces.{name}.path' is required")
+        if kind.strip() == "ssh":
+            if not _optional_text(value, "host"):
+                raise ValueError(f"config field 'workspaces.{name}.host' is required")
+            if not _optional_text(value, "remote_path"):
+                raise ValueError(f"config field 'workspaces.{name}.remote_path' is required")
+        for key in _WORKSPACE_TEXT_FIELDS:
+            if key in value and value[key] is not None and not isinstance(value[key], str):
+                raise ValueError(f"config field 'workspaces.{name}.{key}' must be a string")
+        for key in _WORKSPACE_LIST_FIELDS:
+            if key not in value or value[key] is None:
+                continue
+            if isinstance(value[key], str):
+                continue
+            if not isinstance(value[key], list) or not all(
+                isinstance(item, str) for item in value[key]
+            ):
+                raise ValueError(
+                    f"config field 'workspaces.{name}.{key}' must be a string or list of strings"
                 )
