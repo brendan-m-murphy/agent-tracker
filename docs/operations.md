@@ -187,29 +187,25 @@ stable labels, no decorative panels, and readable wrapping when copied into
 logs, chat, or pull request comments. It is a coordination summary, not a full
 task dump.
 
-The human output is grouped under stable headings:
+The human output is grouped under quick-triage headings:
 
+- Attention, combining Active, Review, and Integration work that can move now;
+- Blocked, with the current blocker summary;
 - Ready;
-- Active;
-- Review;
-- Integration;
-- Blocked;
-- Recently completed.
+- Recent.
 
-Blocked entries include short blocker summaries derived from the evaluated
-`requirements` data. Ready and waiting entries show concise `next_action` and
-latest evidence summaries when available. Recently completed entries are ordered
-from completion audit records, not task priority.
+The JSON payload keeps the more detailed stable groups. Recently completed
+entries are ordered from completion audit records, not task priority.
 
-Human overview output detects the terminal width. Wide terminals use compact
-grouped tables with one task per row; the table headers carry the field names,
-so rows do not repeat labels such as `next:` or `evidence:`. Narrow terminals
-fall back to compact multi-line rows with stable labels and wrapping instead of
-cramping every column. Long task ids, titles, blockers, next actions, evidence,
-and completion notes are truncated in default human output when needed. Use
-`agent-tracker task <task-id>` for full detail. Each group reports a count and
-defaults to five visible items for readability; pass `--limit 0` to show every
-grouped task.
+Human overview output is a quick triage view, not a task detail report. It
+starts with count summaries, separates actionable Active/Review/Merge work from
+blocked work, shows ready task titles, keeps blocker text only for the separate
+`BLOCKED` section, and ends with a short recent completion tail. It
+intentionally omits full `next_action` prose, evidence paths, and completion
+evidence from the default view. Use
+`agent-tracker task <task-id>` for full detail or `overview --json` for full
+structured values. Each group reports a count and defaults to five visible
+items for readability; pass `--limit 0` to show every grouped task.
 
 Use JSON output for automation:
 
