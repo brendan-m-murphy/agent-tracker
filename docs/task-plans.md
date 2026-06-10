@@ -256,8 +256,9 @@ records rather than becoming the coordination state themselves.
 Run `check-pr-notification-setup` before adding a task dependency on PR-based
 intervention delivery. The check distinguishes missing remotes, missing PR
 association, missing `gh` authentication, and unsupported sandbox live posting.
-Future notification exporters should refuse unsafe live posting with those
-diagnostics and emit prepared payloads instead.
+Use `export-pr-notifications` to deliver or prepare open intervention
+notifications. The exporter stores delivery state in SQLite and suppresses
+unchanged repeated payloads instead of spamming PR comments.
 
 ## Proposed Task Contracts
 

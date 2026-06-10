@@ -26,6 +26,7 @@ from agent_tracker.models import (
     EventRecord,
     IntakeRecord,
     InterventionRecord,
+    NotificationDeliveryRecord,
     ProposedTaskRecord,
     RequirementState,
     TaskRecord,
@@ -232,6 +233,22 @@ class Store:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (project_id, intervention_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS notification_deliveries (
+                    project_id TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    target_json TEXT NOT NULL DEFAULT '{}',
+                    comment_id TEXT NOT NULL DEFAULT '',
+                    payload_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_posted_at TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, target_key, channel),
                     FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
                 );
 
@@ -1682,6 +1699,139 @@ class Store:
             raise ValueError(f"unknown intervention: {intervention_id}")
         return _intervention_from_row(updated)
 
+    def notification_delivery(
+        self,
+        project_id: str,
+        target_key: str,
+        *,
+        channel: str = "pull_request_comment",
+    ) -> NotificationDeliveryRecord | None:
+        """Return one notification delivery record when present."""
+        self.init_schema()
+        with self.transaction(read_only=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM notification_deliveries
+                WHERE project_id = ? AND target_key = ? AND channel = ?
+                """,
+                (project_id, target_key, channel),
+            ).fetchone()
+        return _notification_delivery_from_row(row) if row is not None else None
+
+    def upsert_notification_delivery(
+        self,
+        project_id: str,
+        *,
+        target_key: str,
+        channel: str,
+        target: dict[str, Any],
+        payload_hash: str,
+        status: str,
+        comment_id: str = "",
+        last_posted_at: str = "",
+        metadata: dict[str, Any] | None = None,
+        actor: str = "system",
+    ) -> NotificationDeliveryRecord:
+        """Create or update durable notification delivery state."""
+        self.init_schema()
+        cleaned_target_key = str(target_key).strip()
+        cleaned_channel = str(channel).strip()
+        cleaned_payload_hash = str(payload_hash).strip()
+        cleaned_status = str(status).strip()
+        if not cleaned_target_key:
+            raise ValueError("notification target key is required")
+        if not cleaned_channel:
+            raise ValueError("notification channel is required")
+        if not cleaned_payload_hash:
+            raise ValueError("notification payload hash is required")
+        if not cleaned_status:
+            raise ValueError("notification status is required")
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM notification_deliveries
+                WHERE project_id = ? AND target_key = ? AND channel = ?
+                """,
+                (project_id, cleaned_target_key, cleaned_channel),
+            ).fetchone()
+            created_at = str(row["created_at"]) if row is not None else now
+            conn.execute(
+                """
+                INSERT INTO notification_deliveries (
+                    project_id, target_key, channel, target_json, comment_id,
+                    payload_hash, status, last_posted_at, metadata_json,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, target_key, channel) DO UPDATE SET
+                    target_json = excluded.target_json,
+                    comment_id = excluded.comment_id,
+                    payload_hash = excluded.payload_hash,
+                    status = excluded.status,
+                    last_posted_at = excluded.last_posted_at,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    project_id,
+                    cleaned_target_key,
+                    cleaned_channel,
+                    dumps(target),
+                    str(comment_id).strip(),
+                    cleaned_payload_hash,
+                    cleaned_status,
+                    str(last_posted_at).strip(),
+                    dumps(metadata or {}),
+                    created_at,
+                    now,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                "",
+                "notification.delivery",
+                actor,
+                {
+                    "target_key": cleaned_target_key,
+                    "channel": cleaned_channel,
+                    "status": cleaned_status,
+                    "comment_id": str(comment_id).strip(),
+                    "payload_hash": cleaned_payload_hash,
+                },
+            )
+            updated = conn.execute(
+                """
+                SELECT *
+                FROM notification_deliveries
+                WHERE project_id = ? AND target_key = ? AND channel = ?
+                """,
+                (project_id, cleaned_target_key, cleaned_channel),
+            ).fetchone()
+        if updated is None:
+            raise ValueError(f"unknown notification target: {cleaned_target_key}")
+        return _notification_delivery_from_row(updated)
+
+    def notification_deliveries(self, project_id: str) -> list[NotificationDeliveryRecord]:
+        """Return all notification delivery records for a project."""
+        self.init_schema()
+        with self.transaction(read_only=True) as conn:
+            rows = list(
+                conn.execute(
+                    """
+                    SELECT *
+                    FROM notification_deliveries
+                    WHERE project_id = ?
+                    ORDER BY updated_at, target_key, channel
+                    """,
+                    (project_id,),
+                )
+            )
+        return [_notification_delivery_from_row(row) for row in rows]
+
     def record_evidence(
         self,
         project_id: str,
@@ -1806,6 +1956,21 @@ class Store:
                 ]
             else:
                 interventions = []
+            if _table_exists(conn, "notification_deliveries"):
+                notification_deliveries = [
+                    notification_delivery_to_dict(_notification_delivery_from_row(row))
+                    for row in conn.execute(
+                        """
+                        SELECT *
+                        FROM notification_deliveries
+                        WHERE project_id = ?
+                        ORDER BY updated_at, target_key, channel
+                        """,
+                        (project_id,),
+                    )
+                ]
+            else:
+                notification_deliveries = []
             events = [
                 {
                     "event_id": row["event_id"],
@@ -1840,6 +2005,7 @@ class Store:
             "intake": intake,
             "proposed_tasks": proposed_tasks,
             "interventions": interventions,
+            "notification_deliveries": notification_deliveries,
             "events": events,
             "audit": audit,
         }
@@ -2436,6 +2602,40 @@ def intervention_to_dict(intervention: InterventionRecord) -> dict[str, Any]:
         "updated_at": intervention.updated_at,
         "resolved_at": intervention.resolved_at,
         "resolved_by": intervention.resolved_by,
+    }
+
+
+def _notification_delivery_from_row(row: sqlite3.Row) -> NotificationDeliveryRecord:
+    """Convert a SQLite row to a notification delivery record."""
+    return NotificationDeliveryRecord(
+        target_key=str(row["target_key"]),
+        channel=str(row["channel"]),
+        target=loads(str(row["target_json"]), {}),
+        comment_id=str(row["comment_id"]),
+        payload_hash=str(row["payload_hash"]),
+        status=str(row["status"]),
+        last_posted_at=str(row["last_posted_at"]),
+        metadata=loads(str(row["metadata_json"]), {}),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
+
+
+def notification_delivery_to_dict(
+    delivery: NotificationDeliveryRecord,
+) -> dict[str, Any]:
+    """Convert notification delivery state to a JSON-friendly dictionary."""
+    return {
+        "target_key": delivery.target_key,
+        "channel": delivery.channel,
+        "target": delivery.target,
+        "comment_id": delivery.comment_id,
+        "payload_hash": delivery.payload_hash,
+        "status": delivery.status,
+        "last_posted_at": delivery.last_posted_at,
+        "metadata": delivery.metadata,
+        "created_at": delivery.created_at,
+        "updated_at": delivery.updated_at,
     }
 
 

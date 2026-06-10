@@ -311,3 +311,11 @@ def _validate_notifications(data: dict[str, Any]) -> None:
         raise ValueError("config field 'notifications.github' must be an object")
     if "allow_live" in github and not isinstance(github["allow_live"], bool):
         raise ValueError("config field 'notifications.github.allow_live' must be a boolean")
+    if (
+        "prepared_payload_path" in github
+        and github["prepared_payload_path"] is not None
+        and not isinstance(github["prepared_payload_path"], str)
+    ):
+        raise ValueError(
+            "config field 'notifications.github.prepared_payload_path' must be a string"
+        )

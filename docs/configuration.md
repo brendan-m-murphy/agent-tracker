@@ -145,7 +145,7 @@ when replacing a built-in default with project-specific behavior.
 | `exporter` | No | `agent_tracker.exporters:JsonSnapshotExporter` | Plugin that writes audit snapshots. |
 | `pr_notification_setup_checker` | No | Built-in local Git and `gh` diagnostics | Plugin that checks whether PR notification delivery is safe. |
 | `export_path` | No | `agent-tracker-snapshot.json` | Output path used by the default JSON exporter. Relative paths resolve below `state_root`. |
-| `notifications` | No | None | Optional notification settings. `notifications.github.allow_live` must be `true` before setup diagnostics report live PR comments as supported. |
+| `notifications` | No | None | Optional notification settings. `notifications.github.allow_live` must be `true` before setup diagnostics report live PR comments as supported. `notifications.github.prepared_payload_path` can override the prepared PR payload output path. |
 | `spool` | No | None | Spool paths for `pull-spool` and `ingest-spool`. Relative paths resolve below `state_root`. |
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
