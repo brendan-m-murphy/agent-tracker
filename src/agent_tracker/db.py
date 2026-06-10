@@ -26,6 +26,7 @@ from agent_tracker.models import (
     EventRecord,
     IntakeRecord,
     InterventionRecord,
+    NotebookRecord,
     NotificationDeliveryRecord,
     ProposedTaskRecord,
     RequirementState,
@@ -2761,6 +2762,19 @@ def notification_delivery_to_dict(
         "metadata": delivery.metadata,
         "created_at": delivery.created_at,
         "updated_at": delivery.updated_at,
+    }
+
+
+def notebook_to_dict(record: NotebookRecord) -> dict[str, Any]:
+    """Return a JSON-friendly notebook record."""
+    return {
+        "id": record.notebook_id,
+        "kind": record.kind,
+        "path": record.path,
+        "title": record.title,
+        "exists": record.exists,
+        "size_bytes": record.size_bytes,
+        "updated_at": record.updated_at,
     }
 
 

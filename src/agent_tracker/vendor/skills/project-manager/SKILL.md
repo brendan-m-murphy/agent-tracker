@@ -117,6 +117,7 @@ uv run agent-tracker plan task --config tracking/project.json \
   --source <source-or-thread> \
   --role maintainer \
   --write-scope docs/ \
+  --notebook-path notebooks/project.md \
   --validation-check "uv run pytest" \
   --authority "local code and docs" \
   "Raw request or idea text"
@@ -125,8 +126,11 @@ uv run agent-tracker plan list --config tracking/project.json --json
 
 Use `--intake-metadata KEY=VALUE` for intake context such as source date,
 thread, project, owner, or priority. Use `--metadata-json` for proposed task
-metadata only. The flat `propose-task` command remains available when intake
-already exists and scripts need the old JSON contract.
+metadata only. Use repeatable `--notebook-path` for durable context that should
+be included by the default prompt renderer, and keep `--notebook-update` for
+notebooks the worker should review or change. The flat `propose-task` command
+remains available when intake already exists and scripts need the old JSON
+contract.
 
 Proposals are review artifacts. When the user or project workflow approves a
 proposal, promote it into live queue state through SQLite rather than editing
@@ -174,10 +178,15 @@ When creating follow-up tasks:
 Project and repo notebooks should capture durable context that future agents
 need: operational conventions, design constraints, validation suites, known
 failure modes, sandbox/authority rules, and links to canonical config/state.
-Prefer config-root paths such as `tracking/notebooks/project.md` and
-`tracking/notebooks/repos/<repo>.md` in projects that use the default
-`agent-tracker` prompt renderer, because `prompt_path` and
-`metadata.notebook_paths` are resolved relative to the tracker config directory.
+Prefer notebook metadata paths such as `notebooks/project.md` and
+`notebooks/repos/<repo>.md` in projects that use the default `agent-tracker`
+prompt renderer. `prompt_path` is relative to the tracker config directory;
+`metadata.notebook_paths` checks the config directory first and then safely
+falls back to the configured task source root for `notebooks/...` paths.
+Use `uv run agent-tracker notebook list --config tracking/project.json` to
+discover available notebooks, `notebook show project` or
+`notebook show repo <repo>` to inspect them, and `notebook append ...` for
+concise reviewed updates.
 Keep raw research notes and large chat exports out of the notebook body; link to
 them as sources and summarize only durable decisions.
 When planning context has no clear home, create or update a notebook task

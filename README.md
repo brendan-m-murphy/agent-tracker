@@ -354,6 +354,7 @@ agent-tracker status --json
 | `propose-task` | Create a reviewed proposed task contract from an intake record without importing it as a live task. | `agent-tracker propose-task --config demo-tracker/project.json <intake-id> --task-id add-triage --title "Add triage"` |
 | `promote-proposal` | Promote a proposed task into live queue state so it appears in `next` and can be claimed. | `agent-tracker promote-proposal --config demo-tracker/project.json <proposal-id>` |
 | `list-proposals` | List proposed task contracts awaiting review or promotion. | `agent-tracker list-proposals --config demo-tracker/project.json --json` |
+| `notebook` | List, show, or append durable project and repo notebooks. | `agent-tracker notebook list --config demo-tracker/project.json` |
 | `export` | Write the configured audit snapshot through the exporter. | `agent-tracker export --config demo-tracker/project.json` |
 
 See [docs/operations.md](docs/operations.md) for lifecycle details, stale lease
@@ -492,6 +493,7 @@ instead of hand-editing `tasks.json`:
 agent-tracker plan task --config demo-tracker/project.json \
   --task-id add-triage --title "Add triage workflow" \
   --role maintainer --write-scope src/agent_tracker/service.py \
+  --notebook-path notebooks/project.md \
   --validation-check "uv run pytest" \
   "User asked for a triage workflow"
 agent-tracker plan list --config demo-tracker/project.json --json
@@ -506,6 +508,11 @@ agent-tracker plan promote --config demo-tracker/project.json <proposal-id>
 
 The flat `propose-task`, `list-proposals`, and `promote-proposal` commands
 remain available for scripts and JSON compatibility.
+
+Use `agent-tracker notebook list --config demo-tracker/project.json` to discover
+project and repo notebooks. Add repeatable `--notebook-path` to `plan task`,
+`propose-task`, or `update-proposal` when the proposed task prompt should include
+those notebooks through `metadata.notebook_paths`.
 
 Snapshots include evaluated task state, events, and audit log entries:
 

@@ -28,8 +28,15 @@ the live coordination bus.
 
 - Project context lives in `tracking/notebooks/project.md`.
 - Repo-specific context lives in `tracking/notebooks/repos/<repo>.md`.
-- Task `prompt_path` and `metadata.notebook_paths` values are relative to
-  `tracking/project.json`; use paths such as `notebooks/project.md`.
+- Task `prompt_path` values are relative to `tracking/project.json`.
+  `metadata.notebook_paths` checks that same directory first, then safely
+  falls back to the configured task source root for paths such as
+  `notebooks/project.md`.
+- Use `agent-tracker notebook list/show/append --config tracking/project.json`
+  for routine notebook discovery and concise reviewed updates.
+- Use repeatable `--notebook-path` on proposed-task commands when a future
+  worker prompt should include project or repo notebook context. Keep
+  `--notebook-update` for notebooks the worker should review or change.
 - Keep raw research notes in `docs/research/` and link to them from notebooks
   after summarizing durable decisions.
 

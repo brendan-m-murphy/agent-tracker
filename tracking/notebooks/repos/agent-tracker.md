@@ -50,6 +50,11 @@ absolute paths, home-relative paths, and parent traversal outside the config
 directory. For this repo, use `tracking/notebooks/` as the prompt-includable
 notebook root and `docs/research/` as raw source material.
 
+The CLI now exposes `agent-tracker notebook list/show/append` for project and
+repo notebooks. Proposed-task commands accept repeatable `--notebook-path`
+values, validate that they stay under `notebooks/`, and store them in
+`metadata.notebook_paths` without raw SQLite or task-plan edits.
+
 ## Known Failure Modes
 
 - `prompt_path` values like `docs/research/...` do not render in this

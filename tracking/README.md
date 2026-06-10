@@ -119,11 +119,27 @@ Durable coordination context for this self-dogfood project lives under
 - `tracking/notebooks/repos/agent-tracker.md` records repo-specific validation,
   known failure modes, and local workflow conventions.
 
-Task `prompt_path` values and `metadata.notebook_paths` are relative to
-`tracking/project.json`, so use paths like `notebooks/project.md` rather than
-`docs/...` when the default renderer should include notebook content.
+Task `prompt_path` values are relative to `tracking/project.json`.
+`metadata.notebook_paths` checks the config directory first, then safely falls
+back to the configured task source root for paths like `notebooks/project.md`.
+Use notebook paths rather than `docs/...` when the default renderer should
+include durable notebook content.
 Exploratory material can stay in `docs/research/`, but durable context should
 be summarized or linked from a notebook with a review date and source list.
+
+Use first-class notebook commands for routine reads and updates:
+
+```bash
+uv run agent-tracker notebook list --config tracking/project.json
+uv run agent-tracker notebook show --config tracking/project.json project
+uv run agent-tracker notebook append --config tracking/project.json repo agent-tracker \
+  "Record a concise reviewed convention."
+```
+
+When proposing work that should render notebook context, add repeatable
+`--notebook-path` values such as `notebooks/project.md` or
+`notebooks/repos/agent-tracker.md`. Keep `--notebook-update` for tasks that
+should review or change notebook content.
 
 ## Complete A Task
 

@@ -36,6 +36,7 @@ from agent_tracker.models import (  # noqa: E402
     INTEGRATION_STATES,
     REVIEW_STATES,
     InterventionRecord,
+    TaskState,
 )
 from agent_tracker.rendering import HumanOutputRenderer  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
@@ -5825,6 +5826,8 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     list_code, list_help, list_stderr = run_cli_captured(["intake", "list", "--help"])
     plan_help = parser_help_for(parser, "plan")
     plan_task_help = parser_help_for(parser, "plan", "task")
+    notebook_help = parser_help_for(parser, "notebook")
+    notebook_list_help = parser_help_for(parser, "notebook", "list")
     normalized_root_help = " ".join(root_help.split())
     assert code == 0
     assert record_code == 0
@@ -5836,6 +5839,7 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "capture-intake" in root_help
     assert "intake" in root_help
     assert "plan" in root_help
+    assert "notebook" in root_help
     assert "Return active owned work to pending; not for finished handoffs." in normalized_root_help
     assert "Mark finished leased work awaiting review; clears the lease." in normalized_root_help
     assert "Mark finished leased work awaiting PR, merge, or integration." in normalized_root_help
@@ -5856,7 +5860,20 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "--intake-metadata" in plan_task_help
     assert "--metadata-json" in plan_task_help
     assert "--write-scope" in plan_task_help
-    for help_output in (root_help, intake_help, record_help, list_help, plan_help, plan_task_help):
+    assert "--notebook-path" in plan_task_help
+    assert "show" in notebook_help
+    assert "append" in notebook_help
+    assert "--json" in notebook_list_help
+    for help_output in (
+        root_help,
+        intake_help,
+        record_help,
+        list_help,
+        plan_help,
+        plan_task_help,
+        notebook_help,
+        notebook_list_help,
+    ):
         assert "install-completion" not in help_output
         assert "show-completion" not in help_output
     assert_no_box_drawing(root_help)
@@ -5865,6 +5882,8 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert_no_box_drawing(list_help)
     assert_no_box_drawing(plan_help)
     assert_no_box_drawing(plan_task_help)
+    assert_no_box_drawing(notebook_help)
+    assert_no_box_drawing(notebook_list_help)
 
 
 @pytest.mark.parametrize(
@@ -5909,6 +5928,232 @@ def test_cli_root_contract_hides_completion_helpers_and_preserves_aliases() -> N
     assert "release-lease" in root_help
     assert release_args.func is cli.command_release
     assert alias_args.func is cli.command_release
+
+
+def test_cli_notebook_list_show_and_append(tmp_path: Path) -> None:
+    """Notebook commands list, read, and append conventional Markdown notebooks."""
+    config_path = write_project(tmp_path)
+    notebooks = tmp_path / "notebooks"
+    repo_notebooks = notebooks / "repos"
+    repo_notebooks.mkdir(parents=True)
+    (notebooks / "project.md").write_text(
+        "# Project Notebook\n\nProject context.\n",
+        encoding="utf-8",
+    )
+    (repo_notebooks / "agent-tracker.md").write_text(
+        "# Repo Notebook\n\nRepo context.\n",
+        encoding="utf-8",
+    )
+
+    list_code, list_stdout, list_stderr = run_cli_captured(
+        ["notebook", "list", "--config", str(config_path)]
+    )
+    show_code, show_stdout, show_stderr = run_cli_captured(
+        ["notebook", "show", "--config", str(config_path), "repo", "agent-tracker"]
+    )
+    append_code, append_stdout, append_stderr = run_cli_captured(
+        [
+            "notebook",
+            "append",
+            "--config",
+            str(config_path),
+            "project",
+            "Remember the reviewed notebook workflow.",
+            "--actor",
+            "pm",
+        ]
+    )
+
+    appended = json.loads(append_stdout)
+    project_text = (notebooks / "project.md").read_text(encoding="utf-8")
+
+    assert list_code == 0
+    assert "project: notebooks/project.md - Project Notebook" in list_stdout
+    assert "repo:agent-tracker: notebooks/repos/agent-tracker.md - Repo Notebook" in list_stdout
+    assert list_stderr == ""
+    assert show_code == 0
+    assert show_stdout == "# Repo Notebook\n\nRepo context.\n"
+    assert show_stderr == ""
+    assert append_code == 0
+    assert "agent-tracker paths:" in append_stderr
+    assert appended["path"] == "notebooks/project.md"
+    assert "## " in project_text
+    assert " - pm" in project_text
+    assert "Remember the reviewed notebook workflow." in project_text
+    assert_no_box_drawing(list_stdout)
+
+
+def test_notebook_commands_reject_unsafe_paths(tmp_path: Path) -> None:
+    """Notebook path commands reject absolute and parent-traversal paths."""
+    config_path = write_project(tmp_path)
+    outside = tmp_path.parent / "outside-notebook.md"
+    outside.write_text("outside", encoding="utf-8")
+
+    parent_code, parent_stdout, parent_stderr = run_cli_captured(
+        ["notebook", "show", "--config", str(config_path), "path", "../outside-notebook.md"]
+    )
+    absolute_code, absolute_stdout, absolute_stderr = run_cli_captured(
+        [
+            "notebook",
+            "append",
+            "--config",
+            str(config_path),
+            "path",
+            str(outside),
+            "bad note",
+        ]
+    )
+
+    assert parent_code == 1
+    assert parent_stdout == ""
+    assert "notebook path cannot contain parent traversal" in parent_stderr
+    assert absolute_code == 1
+    assert absolute_stdout == ""
+    assert "notebook path must be relative" in absolute_stderr
+
+
+@pytest.mark.parametrize("repo_name", ["nested/name", "/absolute", "~/repo"])
+def test_notebook_repo_targets_require_simple_names(
+    tmp_path: Path,
+    repo_name: str,
+) -> None:
+    """Repo notebook targets reject path-like names; use path targets for paths."""
+    config_path = write_project(tmp_path)
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "notebook",
+            "append",
+            "--config",
+            str(config_path),
+            "repo",
+            repo_name,
+            "bad repo target",
+        ]
+    )
+
+    assert code == 1
+    assert stdout == ""
+    assert "repo notebook target must be a simple repo name" in stderr
+
+
+def test_notebook_commands_and_prompt_rendering_share_task_source_root(
+    tmp_path: Path,
+) -> None:
+    """Notebook commands and renderer agree when task_source_root differs."""
+    config_root = tmp_path / "config"
+    task_source_root = tmp_path / "definitions"
+    config_root.mkdir()
+    task_source_root.mkdir()
+    config_path = write_project(config_root)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["task_source_root"] = str(task_source_root)
+    (task_source_root / "tasks.json").write_text(
+        (config_root / "tasks.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    task_source_notebooks = task_source_root / "notebooks"
+    task_source_notebooks.mkdir()
+    (task_source_notebooks / "project.md").write_text(
+        "# Task Source Notebook\n\nTask-source context.\n",
+        encoding="utf-8",
+    )
+
+    list_code, list_stdout, _list_stderr = run_cli_captured(
+        ["notebook", "list", "--config", str(config_path), "--json"]
+    )
+    plan_code, plan_stdout, _plan_stderr = run_cli_captured(
+        [
+            "plan",
+            "task",
+            "--config",
+            str(config_path),
+            "--proposal-id",
+            "task-source-notebook-proposal",
+            "--task-id",
+            "task-source-notebook-task",
+            "--title",
+            "Task source notebook task",
+            "--notebook-path",
+            "notebooks/project.md",
+            "Use task-source notebook context.",
+        ]
+    )
+    proposal = json.loads(plan_stdout)
+    promoted = Coordinator(load_config(config_path)).promote_proposed_task(proposal["id"])
+    prompt = service_module.DefaultPromptRenderer().render_prompt(
+        load_config(config_path),
+        TaskState(task=promoted.task, state="ready"),
+        markdown=True,
+    )
+
+    assert list_code == 0
+    assert [item["path"] for item in json.loads(list_stdout)["notebooks"]] == [
+        "notebooks/project.md"
+    ]
+    assert plan_code == 0
+    assert proposal["task"]["metadata"]["notebook_paths"] == ["notebooks/project.md"]
+    assert "Source: notebooks/project.md" in prompt
+    assert "Task-source context." in prompt
+    assert not (config_root / "notebooks" / "project.md").exists()
+
+
+def test_notebook_listing_prefers_task_source_relative_paths(
+    tmp_path: Path,
+) -> None:
+    """Notebook discovery paths stay usable when task_source_root is nested."""
+    config_root = tmp_path / "repo"
+    task_source_root = config_root / "tracking"
+    task_source_root.mkdir(parents=True)
+    config_path = write_project(config_root)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["task_source_root"] = str(task_source_root)
+    (task_source_root / "tasks.json").write_text(
+        (config_root / "tasks.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    notebooks = task_source_root / "notebooks"
+    notebooks.mkdir()
+    (notebooks / "project.md").write_text(
+        "# Nested Task Source Notebook\n\nNested context.\n",
+        encoding="utf-8",
+    )
+
+    list_code, list_stdout, _list_stderr = run_cli_captured(
+        ["notebook", "list", "--config", str(config_path), "--json"]
+    )
+    listed_path = json.loads(list_stdout)["notebooks"][0]["path"]
+    show_code, show_stdout, _show_stderr = run_cli_captured(
+        ["notebook", "show", "--config", str(config_path), "path", listed_path]
+    )
+    plan_code, plan_stdout, _plan_stderr = run_cli_captured(
+        [
+            "plan",
+            "task",
+            "--config",
+            str(config_path),
+            "--proposal-id",
+            "nested-notebook-proposal",
+            "--task-id",
+            "nested-notebook-task",
+            "--title",
+            "Nested notebook task",
+            "--notebook-path",
+            listed_path,
+            "Use nested notebook context.",
+        ]
+    )
+
+    assert list_code == 0
+    assert listed_path == "notebooks/project.md"
+    assert show_code == 0
+    assert "Nested context." in show_stdout
+    assert plan_code == 0
+    assert json.loads(plan_stdout)["task"]["metadata"]["notebook_paths"] == [listed_path]
 
 
 def test_cli_plan_task_creates_proposal_without_live_task(tmp_path: Path) -> None:
@@ -5960,6 +6205,10 @@ def test_cli_plan_task_creates_proposal_without_live_task(tmp_path: Path) -> Non
             "approval if scope widens",
             "--notebook-update",
             "notebooks/project.md",
+            "--notebook-path",
+            "notebooks/project.md",
+            "--notebook-path",
+            "notebooks/repos/agent-tracker.md",
             "--metadata-json",
             '{"lane": "planning/intake"}',
             "--actor",
@@ -5991,6 +6240,10 @@ def test_cli_plan_task_creates_proposal_without_live_task(tmp_path: Path) -> Non
         "write_scopes": ["src/agent_tracker/cli.py"],
         "authority": "local code and docs",
         "intervention_needs": ["approval if scope widens"],
+        "notebook_paths": [
+            "notebooks/project.md",
+            "notebooks/repos/agent-tracker.md",
+        ],
         "notebook_updates": ["notebooks/project.md"],
     }
     assert proposed["requirements"] == [
@@ -6051,6 +6304,60 @@ def test_plan_task_from_text_rolls_back_partial_intake_on_proposal_failure(
 
     assert [record.intake_id for record in coord.intake_records()] == ["intake-one"]
     assert coord.proposed_task_records() == [proposal]
+
+
+def test_plan_task_notebook_path_renders_after_promotion(tmp_path: Path) -> None:
+    """Proposed notebook references populate metadata that the renderer includes."""
+    config_path = write_project(tmp_path)
+    notebooks = tmp_path / "notebooks"
+    repo_notebooks = notebooks / "repos"
+    repo_notebooks.mkdir(parents=True)
+    (notebooks / "project.md").write_text("Project prompt context.\n", encoding="utf-8")
+    (repo_notebooks / "agent-tracker.md").write_text("Repo prompt context.\n", encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    code, stdout, _stderr = run_cli_captured(
+        [
+            "plan",
+            "task",
+            "--config",
+            str(config_path),
+            "--proposal-id",
+            "proposal-notebook-path",
+            "--task-id",
+            "notebook-path-task",
+            "--title",
+            "Use notebook path",
+            "--dependency",
+            "foundation",
+            "--notebook-path",
+            "notebooks/project.md",
+            "--notebook-path",
+            "notebooks/repos/agent-tracker.md",
+            "Use notebooks in the rendered prompt.",
+        ]
+    )
+
+    proposal = json.loads(stdout)
+    coord = Coordinator(load_config(config_path))
+    promoted = coord.promote_proposed_task(proposal["id"])
+    prompt = service_module.DefaultPromptRenderer().render_prompt(
+        load_config(config_path),
+        TaskState(task=promoted.task, state="ready"),
+        markdown=True,
+    )
+
+    assert code == 0
+    assert proposal["task"]["metadata"]["notebook_paths"] == [
+        "notebooks/project.md",
+        "notebooks/repos/agent-tracker.md",
+    ]
+    assert "## Notebooks" in prompt
+    assert "Source: notebooks/project.md" in prompt
+    assert "Project prompt context." in prompt
+    assert "Source: notebooks/repos/agent-tracker.md" in prompt
+    assert "Repo prompt context." in prompt
 
 
 def test_cli_plan_task_intake_metadata_json_error_uses_option_name(tmp_path: Path) -> None:
@@ -6545,12 +6852,15 @@ def test_cli_propose_and_list_proposals_json(tmp_path: Path) -> None:
                 "foundation:Base queue exists.",
                 "--authority",
                 "local code and docs",
+                "--notebook-path",
+                "notebooks/project.md",
             ]
         )
 
     proposed = json.loads(stdout.getvalue())
     assert code == 0
     assert proposed["task"]["id"] == "add-triage"
+    assert proposed["task"]["metadata"]["notebook_paths"] == ["notebooks/project.md"]
     assert proposed["requirements"] == [
         {"kind": "task", "task": "foundation", "description": "Base queue exists."}
     ]

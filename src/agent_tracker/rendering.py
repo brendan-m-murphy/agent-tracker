@@ -811,7 +811,14 @@ class DefaultPromptRenderer:
         if notebook_paths:
             lines.extend(["", "## Notebooks"])
             for notebook_path in notebook_paths:
-                lines.extend(_render_text_include(config, notebook_path, label="notebook"))
+                lines.extend(
+                    _render_text_include(
+                        config,
+                        notebook_path,
+                        label="notebook",
+                        allow_task_source_root=True,
+                    )
+                )
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -832,13 +839,24 @@ def _detail_value(value: Any) -> str:
     return str(value)
 
 
-def _render_text_include(config: ProjectConfig, source_path: str, *, label: str) -> list[str]:
+def _render_text_include(
+    config: ProjectConfig,
+    source_path: str,
+    *,
+    label: str,
+    allow_task_source_root: bool = False,
+) -> list[str]:
     """Return config-relative text content or a deterministic unreadable note."""
     source = source_path.strip()
     lines = [f"Source: {source}", ""]
     requested_path = Path(source)
     if source.startswith("~") or requested_path.is_absolute():
         lines.append(f"[{label} not included: absolute or home-relative paths are not allowed]")
+        return lines
+    if allow_task_source_root and (
+        requested_path.parts[:1] != ("notebooks",) or ".." in requested_path.parts
+    ):
+        lines.append(f"[{label} not included: path must be below notebooks/]")
         return lines
 
     try:
@@ -850,6 +868,10 @@ def _render_text_include(config: ProjectConfig, source_path: str, *, label: str)
     if not path.is_relative_to(config_root):
         lines.append(f"[{label} not included: path resolves outside the config directory]")
         return lines
+    if allow_task_source_root and not path.exists():
+        fallback = _task_source_notebook_path(config, requested_path)
+        if fallback is not None:
+            path = fallback
 
     try:
         if not path.exists():
@@ -864,3 +886,14 @@ def _render_text_include(config: ProjectConfig, source_path: str, *, label: str)
     except UnicodeDecodeError:
         lines.append(f"[{label} not included: file is not valid UTF-8 text]")
     return lines
+
+
+def _task_source_notebook_path(config: ProjectConfig, requested_path: Path) -> Path | None:
+    """Return a safe task-source-root notebook include fallback path."""
+    try:
+        task_source_root = config.effective_task_source_root.resolve()
+        path = (task_source_root / requested_path).resolve(strict=False)
+        notebooks_root = (task_source_root / "notebooks").resolve(strict=False)
+    except OSError:
+        return None
+    return path if path.is_relative_to(notebooks_root) else None
