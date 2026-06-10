@@ -63,7 +63,7 @@ class HumanOutputRenderer:
                     break_long_words=break_long_words,
                     break_on_hyphens=False,
                 ),
-                style=style,
+                style=style or "",
             )
         )
 
