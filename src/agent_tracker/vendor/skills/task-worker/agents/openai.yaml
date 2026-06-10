@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Worker"
+  short_description: "Implement one claimed tracker task"
+  default_prompt: "Use $task-worker to implement this claimed agent-tracker task with scoped edits, focused checks, and evidence."

@@ -1,14 +1,15 @@
 ---
 name: agent-coordinator
-description: Coordinate an agent-tracker-backed project end to end. Use when Codex is asked to act as project manager, work through a queue, plan and add tasks before execution, supervise implementation/review agents, check lease health, diagnose workflow friction, or close out code-changing work with commit, review, PR, merge, and tracker evidence.
+description: Coordinate an agent-tracker-backed project end to end. Use when Codex is asked to orchestrate queue state, plan and add tasks before execution, supervise implementation/review agents, check lease health, diagnose workflow friction, or close out code-changing work with commit, review, PR, merge, and tracker evidence.
 ---
 
 # Agent Coordinator
 
-Use this skill to run an `agent-tracker` project as the coordinator, not just as
-one worker. Keep SQLite as live queue state, use task-plan or intake files only
-as source definitions, and make friction visible instead of turning it into
-hidden manual work.
+Use this skill to run an `agent-tracker` project as the coordinator, not as a
+single task worker. Keep SQLite as live queue state, use task-plan or intake
+files only as source definitions, and make friction visible instead of turning
+it into hidden manual work. Use `task-worker` for one claimed implementation
+task and `project-manager` for intake, status, and planning triage.
 
 ## Locate The Project
 
@@ -81,8 +82,9 @@ untracked side notes, and state that this is remaining product friction.
 ## Delegating Work
 
 Use subagents only when the current session and user request allow it. Give each
-agent one bounded job and an explicit write scope. Tell workers they are not
-alone in the codebase and must not revert unrelated changes.
+agent one bounded job and an explicit write scope. Prefer `task-worker` for a
+claimed implementation task. Tell workers they are not alone in the codebase and
+must not revert unrelated changes.
 
 Useful patterns:
 

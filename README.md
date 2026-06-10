@@ -33,8 +33,8 @@ live coordination queue.
   logs.
 - Plugin protocols for custom importers, prompt renderers, event adapters,
   follow-up planners, and exporters.
-- A vendored Codex skill named `project-manager` for repos that want agents to
-  pull and log work through `agent-tracker`.
+- Vendored Codex skills for coordinator, project-manager, and one-task worker
+  roles in repos that use `agent-tracker`.
 
 ## Install
 
@@ -388,22 +388,26 @@ agent-tracker export --config demo-tracker/project.json
 
 The package vendors reusable Codex skills:
 
-- `project-manager`: pull the next task, triage intake, and manage focused
-  project-manager updates.
+- `project-manager`: triage intake, report status, tidy planning, and propose
+  or promote tasks without taking a worker lease.
 - `agent-coordinator`: run an agent-tracker project end to end, including queue
   health checks, lease checks, task planning, worker/review coordination, and
   closeout evidence.
+- `task-worker`: implement exactly one claimed task with scoped edits, focused
+  checks, and handoff or closeout evidence.
 
 After installing `agent-tracker`, install a skill with:
 
 ```bash
 agent-tracker-install-skill --name project-manager
 agent-tracker-install-skill --name agent-coordinator
+agent-tracker-install-skill --name task-worker
 ```
 
 By default, this copies the skill into `$CODEX_HOME/skills` or
 `~/.codex/skills`. Use `--destination-root`, `--overwrite`, or `--dry-run` when
-needed.
+needed. To refresh an installed skill after updating `agent-tracker`, rerun the
+same command with `--overwrite`.
 
 Project-specific trackers should consume these skills as generic workflows and
 put local policy in project-owned files: `tracking/README.md`, project or repo

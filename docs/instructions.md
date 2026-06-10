@@ -23,3 +23,10 @@ browsing the project documentation on GitHub Pages.
 :relative-docs: docs/
 :relative-images:
 ```
+
+## Task Worker Skill
+
+```{include} ../src/agent_tracker/vendor/skills/task-worker/SKILL.md
+:relative-docs: docs/
+:relative-images:
+```

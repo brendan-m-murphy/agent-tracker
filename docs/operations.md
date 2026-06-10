@@ -764,9 +764,31 @@ Snapshots include:
 Treat SQLite as live state and snapshots as derived audit artifacts that can be
 checked into git or shared with reviewers.
 
-## Recommended Agent Flow
+## Agent Roles
 
-Agents should use this sequence:
+Use distinct roles around the same tracker state:
+
+- `agent-coordinator` owns project-wide orchestration: queue health, leases,
+  task planning, worker supervision, review or integration evidence, and final
+  tracker closeout.
+- `project-manager` owns planning and triage: intake, status reports, queue
+  tidying, proposed tasks, promotions, and notebooks. It does not take a worker
+  lease for one-task implementation.
+- `task-worker` owns exactly one claimed task: scoped edits, focused checks,
+  evidence, and handoff or closeout for that task only.
+
+Install or refresh the vendored skills after installing `agent-tracker`:
+
+```bash
+agent-tracker-install-skill --name agent-coordinator --overwrite
+agent-tracker-install-skill --name project-manager --overwrite
+agent-tracker-install-skill --name task-worker --overwrite
+```
+
+## Recommended Coordinator Flow
+
+Coordinators or generic project agents that are allowed to choose work can use
+this sequence:
 
 ```bash
 agent-tracker import --config project.json
@@ -775,7 +797,12 @@ agent-tracker claim --config project.json --agent <agent-id> --role maintainer -
 agent-tracker task --config project.json <task-id> --markdown
 ```
 
-Then, while working:
+Do not use this as `task-worker` guidance. A task worker should receive a
+specific task ID or rendered prompt and may only claim that exact task when
+project policy allows it. A project manager should report status, triage intake,
+and propose or promote tasks without taking an implementation lease.
+
+Then, while a claimed task is active:
 
 ```bash
 agent-tracker heartbeat --config project.json <task-id> --lease-token <lease-token> --agent <agent-id>

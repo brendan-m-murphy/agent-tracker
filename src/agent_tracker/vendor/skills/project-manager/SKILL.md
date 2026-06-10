@@ -1,12 +1,14 @@
 ---
 name: project-manager
-description: Manage an agent-tracker-backed project. Use when the user asks to pull the next task, triage ideas/features/checks, organize follow-up work, review project status, update notebooks, or coordinate agents without manually scanning task files.
+description: Manage planning and triage for an agent-tracker-backed project. Use when the user asks to triage ideas/features/checks, report queue status, tidy planning or queue metadata, organize follow-up work, propose or promote tasks, update notebooks, or summarize coordination state without taking a worker lease.
 ---
 
 # Project Manager
 
-Use this skill for project-manager work in repositories coordinated by
-`agent-tracker` or by a repo-local wrapper around it.
+Use this skill for planning, status, and triage work in repositories coordinated
+by `agent-tracker` or by a repo-local wrapper around it. Do not use it as the
+one-task implementation worker. Use `task-worker` for one claimed task and
+`agent-coordinator` for project-wide orchestration.
 
 ## Locate The Queue
 
@@ -14,40 +16,43 @@ Prefer repo-local wrappers when they exist:
 
 - If `tracking/README.md`, a project notebook, or another repo-local guide
   documents a tracker wrapper, use that wrapper's documented commands for
-  listing, claiming, rendering, and logging work.
+  status, listing, task rendering, intake, proposals, and promotions.
 - Otherwise, look for `tracking/project.json`.
 - If neither exists, look for `agent-tracker.config.json`.
 - If no config is discoverable, ask for the tracker config path.
 
-## Pull The Next Task
+## Report Queue Status
 
-When the user asks to pull the next task:
+When the user asks what should happen next, report the queue without claiming
+work:
 
-1. Import/sync the task plan into live state.
-2. List the next ready task with the requested role or the role implied by the
-   project docs.
-3. Claim the task with a clear `agent_id`.
-4. Render the task prompt/context.
-5. Keep the `lease_token` for heartbeat, complete, or fail.
+1. Import or sync the task plan only when the project guide says that is part
+   of normal status reporting.
+2. List ready, active, review, integration, blocked, and recently completed
+   work.
+3. Identify candidate next tasks by role, dependency state, write scope, and
+   risk.
+4. Summarize blockers, stale leases, missing task definitions, and follow-up
+   planning needs.
+5. Hand implementation to `task-worker` or project-wide execution to
+   `agent-coordinator`.
 
 For a plain `agent-tracker` project:
 
 ```bash
 uv run agent-tracker import --config tracking/project.json
+uv run agent-tracker overview --config tracking/project.json --limit 10
 uv run agent-tracker next --config tracking/project.json --role maintainer --limit 1
-uv run agent-tracker claim --config tracking/project.json --agent <agent-id> --role maintainer --lease-seconds 7200
 uv run agent-tracker task --config tracking/project.json <task-id> --markdown
 ```
 
-Before implementation, read the rendered task prompt and repo-local tracker
-guide for write scope, validation, closeout, and authority rules. For tasks that
-change tracked code, docs, config, tests, or task plans, expect to work on a
-task branch, commit the scoped changes, and leave a PR or equivalent review
-state before completing the tracker task. Only use a direct merge into `main`
-when the repo-local policy or trusted manager explicitly authorizes that
-override, and record the merged commit as evidence.
+Render a task prompt only to inspect readiness, write scope, validation,
+closeout, and authority rules. Do not take the lease or make implementation
+edits as project-manager unless the user explicitly switches you into a
+different role.
 
-If claim fails, investigate before reporting a blocker:
+If the queue does not show expected ready work, investigate before reporting a
+blocker:
 
 - status JSON and ready/blocked counts;
 - whether the task plan has been imported;

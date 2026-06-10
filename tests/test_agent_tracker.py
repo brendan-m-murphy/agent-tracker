@@ -3696,11 +3696,31 @@ def test_agent_coordinator_skill_is_vendored_and_installable(tmp_path: Path) -> 
     assert "name: agent-coordinator" in (installed / "SKILL.md").read_text(encoding="utf-8")
 
 
+def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
+    """The reusable task-worker skill can be bootstrapped for new installs."""
+    source = vendored_skill_path("task-worker")
+    installed = install_skill(
+        name="task-worker",
+        destination_root=tmp_path,
+        dry_run=False,
+    )
+
+    assert (source / "SKILL.md").exists()
+    assert installed == tmp_path / "task-worker"
+    assert (installed / "SKILL.md").exists()
+    assert (installed / "agents" / "openai.yaml").exists()
+    skill_text = (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: task-worker" in skill_text
+    assert "Do not run `next` to select your own work." in skill_text
+    assert "claim that exact task" in skill_text
+    assert "triage intake" in skill_text
+
+
 def test_project_manager_skill_has_no_project_specific_terms() -> None:
     """Vendored skills must stay generic across agent-tracker projects."""
     forbidden = ["hpc", "slurm", "test_inversions", "acrg"]
     offenders = []
-    for skill_name in ("project-manager", "agent-coordinator"):
+    for skill_name in ("project-manager", "agent-coordinator", "task-worker"):
         source = vendored_skill_path(skill_name)
         for path in source.rglob("*"):
             if not path.is_file():
