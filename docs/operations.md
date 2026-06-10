@@ -393,7 +393,10 @@ Prepare a worker launch for a task without executing a command:
 ```bash
 agent-tracker launch-worker --config project.json \
   --workspace hpc \
-  --task-id write-readme
+  --task-id write-readme \
+  --branch codex/write-readme \
+  --base-ref main \
+  --worktree-path /path/to/worktrees/write-readme
 ```
 
 This writes a rendered prompt, a placeholder report, and a launch JSON artifact
@@ -409,7 +412,9 @@ For implementation workers, choose the workspace and prompt context according
 to `coordination_policy` before launch. A worker prompt should name the assigned
 task branch, worktree path, base ref, write scope, and whether the closeout is a
 single-task PR or an explicitly batched PR. Parallel implementation workers
-must receive separate writable worktrees.
+must receive separate writable worktrees. For task launches, `launch-worker`
+refuses a workspace that contains the canonical tracker config; use an isolated
+task worktree or another explicit non-canonical workspace.
 
 Run the configured local worker command with `--execute`:
 

@@ -654,6 +654,9 @@ def command_launch_worker(args: argparse.Namespace) -> int:
         command=command or None,
         dry_run=args.dry_run,
         timeout_seconds=args.timeout_seconds,
+        branch=args.branch,
+        base_ref=args.base_ref,
+        worktree_path=args.worktree_path,
     )
     if args.json:
         print_json(result)
@@ -664,6 +667,8 @@ def command_launch_worker(args: argparse.Namespace) -> int:
             ("status", result["status"]),
             ("workspace", result["workspace"]["name"]),
             ("task", result.get("task_id") or "(prompt only)"),
+            ("branch", result["coordination"]["assignment"].get("branch") or "(none)"),
+            ("worktree", result["coordination"]["assignment"].get("worktree_path") or "(none)"),
             ("prompt", result["artifacts"]["prompt"]),
             ("report", result["artifacts"]["report"]),
             ("launch", result["artifacts"]["launch"]),
@@ -1294,6 +1299,15 @@ def build_parser() -> argparse.ArgumentParser:
     launch_worker.add_argument("--execute", action="store_true")
     launch_worker.add_argument("--dry-run", action="store_true")
     launch_worker.add_argument("--timeout-seconds", type=int, default=0)
+    launch_worker.add_argument(
+        "--branch", default="", help="Assigned task branch for worker context."
+    )
+    launch_worker.add_argument("--base-ref", default="", help="Base ref for worker context.")
+    launch_worker.add_argument(
+        "--worktree-path",
+        default="",
+        help="Assigned non-canonical worktree path for worker context.",
+    )
     launch_worker.add_argument("--command-string", default="")
     launch_worker.add_argument("--command", nargs=argparse.REMAINDER, default=[])
     launch_worker.add_argument("--json", action="store_true")

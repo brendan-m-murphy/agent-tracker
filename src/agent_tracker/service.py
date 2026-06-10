@@ -820,6 +820,9 @@ class Coordinator:
         command: list[str] | None = None,
         dry_run: bool = False,
         timeout_seconds: int = 0,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
     ) -> dict[str, Any]:
         """Prepare or run a one-shot local worker in a configured workspace."""
         self._ensure_mutation_allowed()
@@ -838,6 +841,12 @@ class Coordinator:
             raise ValueError(f"workspace path is not a directory: {workspace.path}")
         if dry_run and claim_task:
             raise ValueError("claim_task cannot be used with dry_run")
+        cleaned_task_id = _first_text(task_id)
+        if cleaned_task_id and _workspace_contains_config(workspace.path, self.config):
+            raise ValueError(
+                "launch-worker task workspaces must not contain the canonical tracker "
+                "config; use an isolated task worktree or explicit non-canonical workspace"
+            )
 
         launch_id = (
             f"{_launch_id_component(self.config.project_id, fallback='project')}-"
@@ -846,7 +855,6 @@ class Coordinator:
         )
         actor = _first_text(agent_id, f"worker-launch:{workspace.name}")
         claim: Claim | None = None
-        cleaned_task_id = _first_text(task_id)
         if claim_task:
             if not cleaned_task_id:
                 raise ValueError("task_id is required when claim_task is true")
@@ -862,6 +870,15 @@ class Coordinator:
             prompt = prompt_text.strip()
         if not prompt:
             raise ValueError("prompt text or task_id is required")
+        coordination = _worker_coordination_context(
+            self.config,
+            workspace=workspace,
+            task_id=cleaned_task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
+        prompt = _append_worker_coordination_prompt(prompt, coordination)
 
         launch_dir = workspace.artifacts_path / launch_id
         prompt_path = launch_dir / "prompt.md"
@@ -869,8 +886,11 @@ class Coordinator:
         stdout_path = launch_dir / "stdout.txt"
         stderr_path = launch_dir / "stderr.txt"
         launch_path = launch_dir / "launch.json"
+        assignment = coordination["assignment"]
         placeholders = {
             "agent_id": actor,
+            "base_ref": assignment["base_ref"],
+            "branch": assignment["branch"],
             "launch_id": launch_id,
             "project_id": self.config.project_id,
             "prompt_path": str(prompt_path),
@@ -878,6 +898,7 @@ class Coordinator:
             "task_id": cleaned_task_id,
             "workspace": workspace.name,
             "workspace_path": str(workspace.path),
+            "worktree_path": assignment["worktree_path"],
         }
         command_argv = _worker_command_argv(workspace, command, placeholders) if execute else []
         result: dict[str, Any] = {
@@ -891,6 +912,7 @@ class Coordinator:
             "agent_id": actor,
             "role": _first_text(role),
             "lease": claim.__dict__ if claim else None,
+            "coordination": coordination,
             "artifacts": {
                 "directory": str(launch_dir),
                 "prompt": str(prompt_path),
@@ -957,6 +979,16 @@ class Coordinator:
         if renderer is None:
             renderer = DefaultPromptRenderer()
         return renderer.render_prompt(self.config, state, markdown=markdown)
+
+    def worker_coordination_context(self, *, task_id: str = "") -> dict[str, Any]:
+        """Return default worker coordination policy context for a task."""
+        return _worker_coordination_context(self.config, task_id=task_id)
+
+    def render_worker_prompt(self, task_id: str, *, markdown: bool = False) -> str:
+        """Render a task prompt with worker coordination context appended."""
+        prompt = self.render_prompt(task_id, markdown=markdown)
+        coordination = self.worker_coordination_context(task_id=task_id)
+        return _append_worker_coordination_prompt(prompt, coordination)
 
     def export(self) -> list[str]:
         """Export an audit snapshot through the configured exporter."""
@@ -1370,6 +1402,71 @@ def _workspace_to_dict(workspace: _WorkerWorkspace) -> dict[str, Any]:
     return payload
 
 
+def _worker_coordination_context(
+    config: ProjectConfig,
+    *,
+    workspace: _WorkerWorkspace | None = None,
+    task_id: str = "",
+    branch: str = "",
+    base_ref: str = "",
+    worktree_path: str = "",
+) -> dict[str, Any]:
+    """Return worker launch context for task worktree and PR policy."""
+    cleaned_task_id = _first_text(task_id)
+    assignment: dict[str, str] = {
+        "branch": _first_text(branch) or (f"codex/{cleaned_task_id}" if cleaned_task_id else ""),
+        "base_ref": _first_text(base_ref) or ("main" if cleaned_task_id else ""),
+        "worktree_path": _first_text(worktree_path)
+        or (str(workspace.path) if workspace is not None else ""),
+    }
+    return {
+        "policy": dict(config.coordination_policy),
+        "assignment": assignment,
+        "notes": [
+            "Use the assigned non-canonical worktree for implementation.",
+            "Parallel implementation agents must not write to the same worktree.",
+            "Reviewers should inspect this branch, worktree, or explicit patch content.",
+        ],
+    }
+
+
+def _append_worker_coordination_prompt(prompt: str, coordination: dict[str, Any]) -> str:
+    """Append worker coordination policy to a rendered task prompt."""
+    policy = coordination["policy"]
+    assignment = coordination["assignment"]
+    lines = [
+        "",
+        "## Coordination Context",
+        "",
+        f"- Worktree policy: `{policy['worktree_mode']}`",
+        f"- PR policy: `{policy['pr_mode']}`",
+    ]
+    if assignment["branch"]:
+        lines.append(f"- Assigned branch: `{assignment['branch']}`")
+    if assignment["base_ref"]:
+        lines.append(f"- Base ref: `{assignment['base_ref']}`")
+    if assignment["worktree_path"]:
+        lines.append(f"- Assigned worktree: `{assignment['worktree_path']}`")
+    lines.extend(
+        [
+            "- Use the assigned non-canonical worktree for implementation.",
+            "- Parallel implementation agents must not write to the same worktree.",
+            "- Reviewers should inspect this branch, worktree, or explicit patch content.",
+        ]
+    )
+    return prompt.rstrip() + "\n" + "\n".join(lines) + "\n"
+
+
+def _workspace_contains_config(workspace_path: Path, config: ProjectConfig) -> bool:
+    """Return true when a workspace contains the canonical/effective config file."""
+    config_path = config.canonical_config_path or config.effective_config_path
+    try:
+        config_path.resolve().relative_to(workspace_path.resolve())
+    except ValueError:
+        return False
+    return True
+
+
 def _worker_command_argv(
     workspace: _WorkerWorkspace,
     command: list[str] | None,
@@ -1418,11 +1515,14 @@ def _run_worker_command(
     """Run a worker command in a local workspace."""
     process_env = {
         "AGENT_TRACKER_WORKER_AGENT_ID": env["agent_id"],
+        "AGENT_TRACKER_WORKER_BASE_REF": env["base_ref"],
+        "AGENT_TRACKER_WORKER_BRANCH": env["branch"],
         "AGENT_TRACKER_WORKER_LAUNCH_ID": env["launch_id"],
         "AGENT_TRACKER_WORKER_PROMPT": env["prompt_path"],
         "AGENT_TRACKER_WORKER_REPORT": env["report_path"],
         "AGENT_TRACKER_WORKER_TASK_ID": env["task_id"],
         "AGENT_TRACKER_WORKER_WORKSPACE": env["workspace"],
+        "AGENT_TRACKER_WORKER_WORKTREE": env["worktree_path"],
     }
     try:
         completed = subprocess.run(

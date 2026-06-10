@@ -1868,7 +1868,29 @@ def test_launch_worker_dry_run_does_not_create_artifacts(tmp_path: Path) -> None
     assert result["status"] == "dry_run"
     assert result["workspace"]["name"] == "hpc"
     assert result["command"] == []
+    assert result["coordination"]["policy"] == DEFAULT_COORDINATION_POLICY
+    assert result["coordination"]["assignment"]["worktree_path"] == str(workspace)
     assert not Path(result["artifacts"]["directory"]).exists()
+
+
+def test_launch_worker_rejects_canonical_config_workspace_for_task(
+    tmp_path: Path,
+) -> None:
+    """Task launches must target an isolated/non-canonical implementation workspace."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "canonical": {
+            "kind": "local",
+            "path": str(tmp_path),
+        }
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="must not contain the canonical tracker config"):
+        coord.launch_worker("canonical", task_id="ready", agent_id="agent-1")
 
 
 def test_launch_worker_dry_run_rejects_claim_without_mutation(tmp_path: Path) -> None:
@@ -1910,6 +1932,17 @@ def test_launch_worker_prepares_prompt_report_spool_and_task_evidence(
 
     assert result["status"] == "prepared"
     assert Path(artifacts["prompt"]).read_text(encoding="utf-8").startswith("# Ready")
+    prompt_text = Path(artifacts["prompt"]).read_text(encoding="utf-8")
+    assert "## Coordination Context" in prompt_text
+    assert "Worktree policy: `one_task_per_worktree`" in prompt_text
+    assert "Assigned branch: `codex/ready`" in prompt_text
+    launch_payload = json.loads(Path(artifacts["launch"]).read_text(encoding="utf-8"))
+    assert launch_payload["coordination"]["policy"] == DEFAULT_COORDINATION_POLICY
+    assert launch_payload["coordination"]["assignment"] == {
+        "branch": "codex/ready",
+        "base_ref": "main",
+        "worktree_path": str(workspace),
+    }
     assert Path(artifacts["report"]).read_text(encoding="utf-8") == (
         "Worker launch prepared; no command was executed.\n"
     )
@@ -1968,6 +2001,46 @@ def test_cli_launch_worker_executes_local_command_and_writes_report(
     )
     assert Path(result["artifacts"]["stdout"]).read_text(encoding="utf-8") == ""
     assert Path(result["artifacts"]["stderr"]).read_text(encoding="utf-8") == ""
+
+
+def test_cli_launch_worker_records_explicit_coordination_assignment(
+    tmp_path: Path,
+) -> None:
+    """CLI launch-worker flags can pass branch/base/worktree context to workers."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--task-id",
+                "ready",
+                "--branch",
+                "codex/ready-custom",
+                "--base-ref",
+                "origin/main",
+                "--worktree-path",
+                str(assigned_worktree),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    result = json.loads(stdout.getvalue())
+    assert result["coordination"]["assignment"] == {
+        "branch": "codex/ready-custom",
+        "base_ref": "origin/main",
+        "worktree_path": str(assigned_worktree),
+    }
 
 
 def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
@@ -3916,6 +3989,8 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
         "agent_id",
         "launch_mode",
         "launched",
+        "coordination_policy",
+        "coordination",
         "prompt",
         "task",
     }
@@ -3924,10 +3999,13 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     assert worker_prompt["agent_id"] == "agent-1"
     assert worker_prompt["launch_mode"] == "prompt_only"
     assert worker_prompt["launched"] is False
+    assert worker_prompt["coordination_policy"] == DEFAULT_COORDINATION_POLICY
+    assert worker_prompt["coordination"]["assignment"]["branch"] == "codex/ready"
     assert launch_worker["launch_mode"] == "prompt_only"
     assert launch_worker["launched"] is False
     assert worker_prompt["task"]["id"] == "ready"
     assert "# Ready" in worker_prompt["prompt"]
+    assert "## Coordination Context" in worker_prompt["prompt"]
     assert set(claim) == claim_keys
     assert set(alias_claim) == claim_keys
     assert set(heartbeat) == claim_keys

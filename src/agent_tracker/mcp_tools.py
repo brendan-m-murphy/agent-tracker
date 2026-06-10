@@ -148,6 +148,8 @@ class WorkerPromptPayload(TypedDict):
     agent_id: str
     launch_mode: str
     launched: bool
+    coordination_policy: dict[str, str]
+    coordination: dict[str, Any]
     prompt: str
     task: dict[str, Any]
 
@@ -269,13 +271,16 @@ class AgentTrackerTools:
         their own execution adapter while the tracker remains the queue authority.
         """
         task = self.get_task_context(task_id)
-        prompt = self.coordinator.render_prompt(task_id, markdown=markdown)
+        coordination = self.coordinator.worker_coordination_context(task_id=task_id)
+        prompt = self.coordinator.render_worker_prompt(task_id, markdown=markdown)
         return {
             "project_id": self.coordinator.config.project_id,
             "task_id": task_id,
             "agent_id": agent_id,
             "launch_mode": "prompt_only",
             "launched": False,
+            "coordination_policy": coordination["policy"],
+            "coordination": coordination,
             "prompt": prompt,
             "task": task,
         }
