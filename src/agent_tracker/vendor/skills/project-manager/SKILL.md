@@ -35,7 +35,8 @@ work:
 4. Summarize blockers, stale leases, missing task definitions, and follow-up
    planning needs.
 5. Hand implementation to `task-worker` or project-wide execution to
-   `agent-coordinator`.
+   `agent-coordinator`, including any configured `coordination_policy` that
+   controls task worktrees and PR mapping.
 
 For a plain `agent-tracker` project:
 
@@ -50,6 +51,13 @@ Render a task prompt only to inspect readiness, write scope, validation,
 closeout, and authority rules. Do not take the lease or make implementation
 edits as project-manager unless the user explicitly switches you into a
 different role.
+
+When proposing or handing off implementation, preserve the project's worktree
+and PR policy. The conservative default is one non-canonical worktree per task
+and one PR per task. Only plan a shared worktree for serially related,
+non-conflicting tasks when project policy allows `shared_worktree_serial`.
+Only plan a batch or epic PR when policy allows `batch_pr_allowed`; the PR must
+list task IDs, batching rationale, and closeout evidence for each task.
 
 If the queue does not show expected ready work, investigate before reporting a
 blocker:
@@ -71,17 +79,29 @@ When the user gives an idea, feature request, check, concern, or planning note:
 3. Convert it into proposed task contracts only after project-manager review.
 4. Include repo, role, authority, dependencies, validation checks, intervention
    needs, and notebook updates in each proposed task.
-5. If the current project has no intake feature yet, add a planning task or a
+5. Include branch/worktree and PR expectations when they differ from the
+   project default.
+6. If the current project has no intake feature yet, add a planning task or a
    repo-local note rather than silently changing active work.
 
 For a plain `agent-tracker` project with intake support:
 
 ```bash
-uv run agent-tracker record-intake --config tracking/project.json \
-  --kind feature --source user --tag triage \
+uv run agent-tracker intake --config tracking/project.json capture \
+  --kind feature --source user --repo <repo-or-component> --tag triage \
+  --metadata source_date=<YYYY-MM-DD> \
+  --metadata thread=<thread-or-context> \
   "Raw request or idea text"
-uv run agent-tracker list-intake --config tracking/project.json --json
+uv run agent-tracker intake --config tracking/project.json list --json
 ```
+
+Use `--metadata KEY=VALUE` for small structured context such as source date,
+thread, project, owner, or priority. `intake capture` requires kind, source, and
+repo, accepts guided kinds `idea`, `feature`, `check`, `concern`, and `note`,
+and preserves the user's raw wording as the positional intake text, not as
+metadata. Use `--metadata-json` only when the metadata is already a JSON object.
+The flat `capture-intake` alias is available for scripts, while looser
+`record-intake` remains compatibility-only for intake that lacks full context.
 
 After reviewing an intake item, create a proposed task contract rather than a
 claimable task. Creating a proposal marks open intake as triaged:

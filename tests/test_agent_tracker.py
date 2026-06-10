@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
@@ -20,6 +21,9 @@ from agent_tracker import cli  # noqa: E402
 from agent_tracker import service as service_module  # noqa: E402
 from agent_tracker import skill_bootstrap as skill_bootstrap_module  # noqa: E402
 from agent_tracker.config import (  # noqa: E402
+    COORDINATION_PR_MODES,
+    COORDINATION_WORKTREE_MODES,
+    DEFAULT_COORDINATION_POLICY,
     PROJECT_CONFIG_ENV_VAR,
     PROJECT_DB_ENV_VAR,
     SUPPORTED_CONFIG_SCHEMA_VERSION,
@@ -27,7 +31,11 @@ from agent_tracker.config import (  # noqa: E402
 )
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
-from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
+from agent_tracker.models import (  # noqa: E402
+    INTEGRATION_STATES,
+    REVIEW_STATES,
+    InterventionRecord,
+)
 from agent_tracker.rendering import HumanOutputRenderer  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import (  # noqa: E402
@@ -329,6 +337,33 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
     assert config.raw["config_schema_version"] == SUPPORTED_CONFIG_SCHEMA_VERSION
 
 
+def test_coordination_policy_defaults_to_conservative_modes(tmp_path: Path) -> None:
+    """Projects default to isolated task worktrees and one PR per task."""
+    config = load_config(write_project(tmp_path))
+
+    assert config.coordination_policy == DEFAULT_COORDINATION_POLICY
+
+
+def test_coordination_policy_accepts_configured_modes(tmp_path: Path) -> None:
+    """Projects can loosen task worktree and PR mapping policy explicitly."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["coordination_policy"] = {
+        "worktree_mode": "shared_worktree_serial",
+        "pr_mode": "batch_pr_allowed",
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.coordination_policy == {
+        "worktree_mode": "shared_worktree_serial",
+        "pr_mode": "batch_pr_allowed",
+    }
+    assert config.coordination_policy["worktree_mode"] in COORDINATION_WORKTREE_MODES
+    assert config.coordination_policy["pr_mode"] in COORDINATION_PR_MODES
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -394,6 +429,40 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
                 "workspaces": {"hpc": {"path": ".", "capabilities": [1]}},
             },
             "config field 'workspaces.hpc.capabilities' must be a string or list of strings",
+        ),
+        (
+            {"project_id": "toy", "coordination_policy": []},
+            "config field 'coordination_policy' must be an object",
+        ),
+        (
+            {"project_id": "toy", "pr_notification_setup_checker": []},
+            "config field 'pr_notification_setup_checker' must be a string",
+        ),
+        (
+            {"project_id": "toy", "notifications": []},
+            "config field 'notifications' must be an object",
+        ),
+        (
+            {"project_id": "toy", "notifications": {"github": {"allow_live": "yes"}}},
+            "config field 'notifications.github.allow_live' must be a boolean",
+        ),
+        (
+            {
+                "project_id": "toy",
+                "coordination_policy": {"worktree_mode": "canonical_repo"},
+            },
+            "config field 'coordination_policy.worktree_mode' must be one of",
+        ),
+        (
+            {"project_id": "toy", "coordination_policy": {"pr_mode": "batch_by_default"}},
+            "config field 'coordination_policy.pr_mode' must be one of",
+        ),
+        (
+            {
+                "project_id": "toy",
+                "notifications": {"github": {"prepared_payload_path": []}},
+            },
+            "config field 'notifications.github.prepared_payload_path' must be a string",
         ),
     ],
 )
@@ -1435,6 +1504,145 @@ def test_completion_integrity_check_reports_direct_merge_git_only_completion(
     assert tool_payload == payload
 
 
+def test_completion_integrity_check_reports_file_evidence_git_hygiene(
+    tmp_path: Path,
+) -> None:
+    """Integrity check reports completed file evidence with dirty Git hygiene."""
+    config_path = write_project(tmp_path)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    git("init")
+    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / "staged.txt").write_text("ready\n", encoding="utf-8")
+    (tmp_path / "unstaged.txt").write_text("ready\n", encoding="utf-8")
+    (tmp_path / "deleted.txt").write_text("ready\n", encoding="utf-8")
+    git("add", ".gitignore", "staged.txt", "unstaged.txt", "deleted.txt")
+    (tmp_path / "unstaged.txt").write_text("changed\n", encoding="utf-8")
+    (tmp_path / "deleted.txt").unlink()
+    (tmp_path / "untracked.txt").write_text("local only\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("ignored local only\n", encoding="utf-8")
+
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["file:staged.txt", "file:unstaged.txt", "file:untracked.txt"],
+    )
+    coord.record_evidence("ready", "file:deleted.txt")
+    coord.record_evidence("ready", "file:ignored.txt")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["check-completion-integrity", "--config", str(config_path), "--json"])
+    payload = json.loads(stdout.getvalue())
+    tool_payload = AgentTrackerTools(config_path).check_completion_integrity()
+
+    issues_by_evidence = {issue["evidence"][0]: issue for issue in payload["issues"]}
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["issue_count"] == 4
+    assert "file:staged.txt" not in issues_by_evidence
+    assert issues_by_evidence["file:unstaged.txt"]["kind"] == "file_evidence_unstaged"
+    assert issues_by_evidence["file:deleted.txt"]["kind"] == "file_evidence_unstaged"
+    assert issues_by_evidence["file:untracked.txt"]["kind"] == "file_evidence_untracked"
+    assert issues_by_evidence["file:ignored.txt"]["kind"] == "file_evidence_untracked"
+    assert tool_payload == payload
+
+
+def test_release_returns_active_lease_to_pending_and_audits(tmp_path: Path) -> None:
+    """Lease owners can release active work without terminally failing it."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    heartbeat = coord.heartbeat("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    payload = coord.release(
+        "ready",
+        lease_token=heartbeat.lease_token,
+        agent_id="agent-1",
+        reason="  switching tasks  ",
+    )
+    states = {state.task.task_id: state for state in coord.task_states()}
+    status_payload = coord.status_payload()
+    snapshot = coord.store.snapshot(config.project_id)
+    release_audit = next(audit for audit in snapshot["audit"] if audit["action"] == "task.release")
+
+    assert payload == {
+        "project_id": "toy",
+        "task_id": "ready",
+        "from_status": "in_progress",
+        "status": "pending",
+        "agent_id": "agent-1",
+        "reason": "switching tasks",
+    }
+    assert states["ready"].task.status == "pending"
+    assert states["ready"].state == "ready"
+    assert states["ready"].lease_token == ""
+    assert states["ready"].lease_agent_id == ""
+    assert states["ready"].lease_expires_at == ""
+    assert states["blocked"].state == "blocked"
+    assert status_payload["ready"] == ["ready"]
+    assert "ready" not in status_payload["active"]
+    assert release_audit["actor"] == "agent-1"
+    assert release_audit["payload"] == {
+        "from_status": "in_progress",
+        "reason": "switching tasks",
+        "status": "pending",
+    }
+    with pytest.raises(ValueError, match="not active"):
+        coord.heartbeat("ready", lease_token=heartbeat.lease_token, agent_id="agent-1")
+
+
+def test_release_requires_reason_owner_and_active_lease(tmp_path: Path) -> None:
+    """Release is distinct from privileged recovery and awaiting handoffs."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="release reason is required"):
+        coord.release("ready", lease_token=claim.lease_token, agent_id="agent-1", reason=" ")
+    with pytest.raises(ValueError, match="different agent"):
+        coord.release(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-2",
+            reason="return to queue",
+        )
+    with pytest.raises(ValueError, match="release status must be pending"):
+        coord.release(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            reason="return to queue",
+            status="awaiting_review",
+        )
+
+    coord.submit_review("ready", lease_token=claim.lease_token, agent_id="agent-1")
+
+    with pytest.raises(ValueError, match="not active"):
+        coord.release(
+            "ready",
+            lease_token=claim.lease_token,
+            agent_id="agent-1",
+            reason="return to queue",
+        )
+    assert coord.get_task("ready").state == "awaiting_review"
+
+
 def test_submit_review_clears_lease_records_evidence_and_preserves_blocking(
     tmp_path: Path,
 ) -> None:
@@ -2000,7 +2208,75 @@ def test_launch_worker_dry_run_does_not_create_artifacts(tmp_path: Path) -> None
     assert result["status"] == "dry_run"
     assert result["workspace"]["name"] == "hpc"
     assert result["command"] == []
+    assert result["coordination"]["policy"] == DEFAULT_COORDINATION_POLICY
+    assert result["coordination"]["assignment"]["worktree_path"] == str(workspace)
     assert not Path(result["artifacts"]["directory"]).exists()
+
+
+def test_launch_worker_default_command_targets_assigned_worktree(
+    tmp_path: Path,
+) -> None:
+    """The default executed worker command uses the assigned task worktree."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    result = coord.launch_worker(
+        "hpc",
+        task_id="ready",
+        execute=True,
+        dry_run=True,
+        worktree_path=str(assigned_worktree),
+    )
+
+    assert result["command"][0:4] == ["codex", "exec", "--cd", str(assigned_worktree)]
+
+
+def test_launch_worker_rejects_canonical_config_workspace_for_task(
+    tmp_path: Path,
+) -> None:
+    """Task launches must target an isolated/non-canonical implementation workspace."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "canonical": {
+            "kind": "local",
+            "path": str(tmp_path),
+        }
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="must not contain the canonical tracker config"):
+        coord.launch_worker("canonical", task_id="ready", agent_id="agent-1")
+
+
+def test_launch_worker_rejects_canonical_assigned_worktree_before_claim(
+    tmp_path: Path,
+) -> None:
+    """Explicit worker assignments cannot point back at the canonical checkout."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="assigned worktree must not contain"):
+        coord.launch_worker(
+            "hpc",
+            task_id="ready",
+            agent_id="agent-1",
+            claim_task=True,
+            worktree_path=str(config_path.parent),
+        )
+
+    state = coord.get_task("ready")
+    assert state.task.status == "pending"
+    assert state.lease_token == ""
+    assert state.lease_agent_id == ""
+    assert not (workspace / "results" / "worker-launches").exists()
 
 
 def test_launch_worker_dry_run_rejects_claim_without_mutation(tmp_path: Path) -> None:
@@ -2042,6 +2318,17 @@ def test_launch_worker_prepares_prompt_report_spool_and_task_evidence(
 
     assert result["status"] == "prepared"
     assert Path(artifacts["prompt"]).read_text(encoding="utf-8").startswith("# Ready")
+    prompt_text = Path(artifacts["prompt"]).read_text(encoding="utf-8")
+    assert "## Coordination Context" in prompt_text
+    assert "Worktree policy: `one_task_per_worktree`" in prompt_text
+    assert "Assigned branch: `codex/ready`" in prompt_text
+    launch_payload = json.loads(Path(artifacts["launch"]).read_text(encoding="utf-8"))
+    assert launch_payload["coordination"]["policy"] == DEFAULT_COORDINATION_POLICY
+    assert launch_payload["coordination"]["assignment"] == {
+        "branch": "codex/ready",
+        "base_ref": "main",
+        "worktree_path": str(workspace),
+    }
     assert Path(artifacts["report"]).read_text(encoding="utf-8") == (
         "Worker launch prepared; no command was executed.\n"
     )
@@ -2100,6 +2387,85 @@ def test_cli_launch_worker_executes_local_command_and_writes_report(
     )
     assert Path(result["artifacts"]["stdout"]).read_text(encoding="utf-8") == ""
     assert Path(result["artifacts"]["stderr"]).read_text(encoding="utf-8") == ""
+
+
+def test_cli_launch_worker_records_explicit_coordination_assignment(
+    tmp_path: Path,
+) -> None:
+    """CLI launch-worker flags can pass branch/base/worktree context to workers."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--task-id",
+                "ready",
+                "--branch",
+                "codex/ready-custom",
+                "--base-ref",
+                "origin/main",
+                "--worktree-path",
+                str(assigned_worktree),
+                "--dry-run",
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    result = json.loads(stdout.getvalue())
+    assert result["coordination"]["assignment"] == {
+        "branch": "codex/ready-custom",
+        "base_ref": "origin/main",
+        "worktree_path": str(assigned_worktree),
+    }
+
+
+def test_cli_launch_worker_human_output_includes_coordination_assignment(
+    tmp_path: Path,
+) -> None:
+    """Human launch-worker output includes assigned branch and worktree context."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--task-id",
+                "ready",
+                "--branch",
+                "codex/ready-custom",
+                "--base-ref",
+                "origin/main",
+                "--worktree-path",
+                str(assigned_worktree),
+                "--dry-run",
+            ]
+        )
+
+    output = stdout.getvalue()
+    unwrapped_output = output.replace("\n", "")
+    assert code == 0
+    assert "Worker launch " in output
+    assert "  branch    codex/ready-custom" in output
+    assert f"  worktree  {assigned_worktree}" in unwrapped_output
+    assert_no_box_drawing(output)
 
 
 def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
@@ -2934,6 +3300,46 @@ def test_intake_requires_text_and_object_metadata(tmp_path: Path) -> None:
         coord.record_intake("Valid text", metadata=json.loads("[]"))
 
 
+def test_structured_intake_helper_requires_context_and_preserves_text(
+    tmp_path: Path,
+) -> None:
+    """The guided intake helper validates context and preserves raw text."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    raw_text = "  Preserve exact raw intake.\nSecond line.  "
+
+    intake = coord.record_structured_intake(
+        raw_text,
+        kind="feature",
+        source="user:thread-123",
+        repo="agent-tracker",
+        tags=["triage", "triage", "structured"],
+        metadata={"priority": "soon"},
+        actor="pm",
+    )
+    ready_ids = {state.task.task_id for state in coord.ready_tasks()}
+
+    assert intake.text == raw_text
+    assert intake.kind == "feature"
+    assert intake.source == "user:thread-123"
+    assert intake.repo == "agent-tracker"
+    assert intake.tags == ["triage", "structured"]
+    assert intake.metadata == {"priority": "soon"}
+    assert intake.status == "open"
+    assert intake.intake_id not in ready_ids
+    with pytest.raises(ValueError, match="no matching ready task"):
+        coord.claim(agent_id="agent-1", task_id=intake.intake_id)
+    with pytest.raises(ValueError, match="intake kind is required"):
+        coord.record_structured_intake("Raw text", kind="", source="user", repo="agent-tracker")
+    with pytest.raises(ValueError, match="intake kind must be one of"):
+        coord.record_structured_intake("Raw text", kind="task", source="user", repo="agent-tracker")
+    with pytest.raises(ValueError, match="intake source is required"):
+        coord.record_structured_intake("Raw text", kind="idea", source="", repo="agent-tracker")
+    with pytest.raises(ValueError, match="intake repo is required"):
+        coord.record_structured_intake("Raw text", kind="idea", source="user", repo="")
+
+
 def test_intake_status_can_be_updated_after_triage(tmp_path: Path) -> None:
     """Project managers can close or defer intake without editing SQLite."""
     config = load_config(write_project(tmp_path))
@@ -3003,6 +3409,10 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
                 "agent-tracker",
                 "--tag",
                 "triage",
+                "--metadata",
+                "source_date=2026-06-10",
+                "--metadata",
+                "thread=friction",
                 "--metadata-json",
                 '{"needs": "planning"}',
                 "Check whether intake is visible.",
@@ -3014,7 +3424,11 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     assert recorded["kind"] == "check"
     assert recorded["repo"] == "agent-tracker"
     assert recorded["tags"] == ["triage"]
-    assert recorded["metadata"] == {"needs": "planning"}
+    assert recorded["metadata"] == {
+        "needs": "planning",
+        "source_date": "2026-06-10",
+        "thread": "friction",
+    }
 
     stdout = StringIO()
     with redirect_stdout(stdout):
@@ -3036,6 +3450,50 @@ def test_cli_record_and_list_intake_json(tmp_path: Path) -> None:
     assert listed["intake"][0]["text"] == "Check whether intake is visible."
 
 
+def test_cli_capture_intake_records_structured_metadata(tmp_path: Path) -> None:
+    """The guided capture command records explicit context and metadata."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    raw_text = "  Keep raw user wording.\nFollow-up detail.  "
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "capture-intake",
+                "--config",
+                str(config_path),
+                "--kind",
+                "concern",
+                "--source",
+                "user:thread-123",
+                "--repo",
+                "agent-tracker",
+                "--tag",
+                "triage",
+                "--metadata",
+                "requester=bm13805",
+                "--metadata-json",
+                '{"priority": "soon"}',
+                raw_text,
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    ready_ids = {
+        state.task.task_id for state in Coordinator(load_config(config_path)).ready_tasks()
+    }
+    assert code == 0
+    assert recorded["kind"] == "concern"
+    assert recorded["source"] == "user:thread-123"
+    assert recorded["repo"] == "agent-tracker"
+    assert recorded["tags"] == ["triage"]
+    assert recorded["metadata"] == {"priority": "soon", "requester": "bm13805"}
+    assert recorded["text"] == raw_text
+    assert recorded["status"] == "open"
+    assert recorded["id"] not in ready_ids
+
+
 def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) -> None:
     """Grouped intake commands preserve the flat command JSON contracts."""
     config_path = write_project(tmp_path)
@@ -3055,6 +3513,10 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
                 "agent-tracker",
                 "--tag",
                 "ux",
+                "--metadata",
+                "source_date=2026-06-10",
+                "--metadata",
+                "project=agent-tracker-self",
                 "Group intake commands.",
             ]
         )
@@ -3064,6 +3526,10 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
     assert recorded["kind"] == "feature"
     assert recorded["repo"] == "agent-tracker"
     assert recorded["tags"] == ["ux"]
+    assert recorded["metadata"] == {
+        "project": "agent-tracker-self",
+        "source_date": "2026-06-10",
+    }
     assert recorded["text"] == "Group intake commands."
 
     stdout = StringIO()
@@ -3104,6 +3570,66 @@ def test_cli_grouped_intake_commands_match_flat_json_behavior(tmp_path: Path) ->
     assert code == 0
     assert updated["id"] == recorded["id"]
     assert updated["status"] == "closed"
+
+
+def test_cli_grouped_intake_capture_matches_flat_json_behavior(tmp_path: Path) -> None:
+    """Grouped guided capture uses the same JSON contract as the flat alias."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "intake",
+                "--config",
+                str(config_path),
+                "capture",
+                "--kind",
+                "check",
+                "--source",
+                "project-manager",
+                "--repo",
+                "agent-tracker",
+                "--tag",
+                "validation",
+                "--metadata",
+                "lane=planning/intake",
+                "Verify grouped intake capture.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["kind"] == "check"
+    assert recorded["source"] == "project-manager"
+    assert recorded["repo"] == "agent-tracker"
+    assert recorded["tags"] == ["validation"]
+    assert recorded["metadata"] == {"lane": "planning/intake"}
+    assert recorded["text"] == "Verify grouped intake capture."
+
+
+def test_cli_record_intake_rejects_malformed_metadata_pair(tmp_path: Path) -> None:
+    """Structured intake metadata pairs fail concisely when malformed."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "record-intake",
+                "--config",
+                str(config_path),
+                "--metadata",
+                "missing-separator",
+                "Record raw intake.",
+            ]
+        )
+
+    assert code == 1
+    assert "metadata entries must use KEY=VALUE" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
 
 
 def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
@@ -3203,6 +3729,1026 @@ def test_cli_task_human_output_stays_prompt_renderer(tmp_path: Path) -> None:
     assert_no_box_drawing(output)
 
 
+def test_interventions_are_recorded_resolved_audited_and_exported(tmp_path: Path) -> None:
+    """Interventions are durable state separate from notification delivery."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    intervention = coord.record_intervention(
+        reason="setup_missing",
+        task_id="ready",
+        summary="PR notification setup is missing.",
+        metadata={"target": "pull-request"},
+        actor="coordinator",
+    )
+    listed = coord.intervention_records(
+        status="open",
+        reason="setup_missing",
+        task_id="ready",
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert intervention.intervention_id
+    assert intervention.status == "open"
+    assert listed == [intervention]
+    assert snapshot["interventions"][0]["id"] == intervention.intervention_id
+    assert snapshot["interventions"][0]["reason"] == "setup_missing"
+    assert snapshot["interventions"][0]["metadata"] == {"target": "pull-request"}
+    assert any(
+        audit["action"] == "intervention.record"
+        and audit["actor"] == "coordinator"
+        and audit["task_id"] == "ready"
+        and audit["payload"]["intervention_id"] == intervention.intervention_id
+        for audit in snapshot["audit"]
+    )
+
+    with pytest.raises(ValueError, match="resolution requires evidence or reason"):
+        coord.resolve_intervention(intervention.intervention_id, actor="pm")
+
+    resolved = coord.resolve_intervention(
+        intervention.intervention_id,
+        evidence=["evidence://setup-check"],
+        actor="pm",
+    )
+    resolved_snapshot = coord.store.snapshot(config.project_id)
+
+    assert resolved.status == "resolved"
+    assert resolved.evidence == ["evidence://setup-check"]
+    assert resolved.resolved_by == "pm"
+    assert coord.intervention_records(status="open") == []
+    assert coord.intervention_records(status="resolved") == [resolved]
+    assert any(
+        audit["action"] == "intervention.resolve"
+        and audit["actor"] == "pm"
+        and audit["payload"]["evidence"] == ["evidence://setup-check"]
+        for audit in resolved_snapshot["audit"]
+    )
+    with pytest.raises(ValueError, match="already resolved"):
+        coord.resolve_intervention(
+            intervention.intervention_id,
+            resolution="Already handled.",
+            actor="pm",
+        )
+
+
+def test_interventions_validate_reason_task_and_reason_only_resolution(
+    tmp_path: Path,
+) -> None:
+    """Intervention records use the documented reason set and resolution rules."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="intervention reason"):
+        coord.record_intervention(reason="unknown", summary="Bad reason.")
+    with pytest.raises(ValueError, match="unknown task"):
+        coord.record_intervention(
+            reason="setup_missing",
+            task_id="missing",
+            summary="Missing task.",
+        )
+    with pytest.raises(ValueError, match="resolution state"):
+        coord.store.record_intervention(
+            config.project_id,
+            InterventionRecord(
+                intervention_id="prefilled",
+                reason="setup_missing",
+                resolution="Already done.",
+            ),
+        )
+
+    intervention = coord.record_intervention(
+        reason="approval_required",
+        summary="Need a human decision.",
+    )
+    resolved = coord.resolve_intervention(
+        intervention.intervention_id,
+        resolution="Approved by project owner.",
+        actor="pm",
+    )
+
+    assert resolved.status == "resolved"
+    assert resolved.resolution == "Approved by project owner."
+    assert resolved.evidence == []
+
+
+def test_interventions_are_compatible_with_pre_intervention_database(
+    tmp_path: Path,
+) -> None:
+    """Old databases without intervention tables stay readable and self-upgrade."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute("DROP TABLE interventions")
+
+    assert coord.intervention_records() == []
+    assert coord.store.snapshot(config.project_id)["interventions"] == []
+
+    intervention = coord.record_intervention(
+        reason="missing_evidence",
+        summary="Need final evidence.",
+    )
+
+    assert coord.intervention_records() == [intervention]
+
+
+def test_cli_record_list_and_resolve_interventions(tmp_path: Path) -> None:
+    """CLI commands expose intervention state as JSON and readable text."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "record-intervention",
+                "--config",
+                str(config_path),
+                "--task-id",
+                "ready",
+                "--reason",
+                "pr_review_needed",
+                "--metadata-json",
+                '{"surface": "pull-request"}',
+                "--actor",
+                "coordinator",
+                "PR review is needed.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["task_id"] == "ready"
+    assert recorded["reason"] == "pr_review_needed"
+    assert recorded["metadata"] == {"surface": "pull-request"}
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-interventions", "--config", str(config_path), "--json"])
+
+    listed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert [item["id"] for item in listed["interventions"]] == [recorded["id"]]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "resolve-intervention",
+                "--config",
+                str(config_path),
+                recorded["id"],
+                "--reason",
+                "Review completed.",
+                "--actor",
+                "pm",
+            ]
+        )
+
+    resolved = json.loads(stdout.getvalue())
+    assert code == 0
+    assert resolved["status"] == "resolved"
+    assert resolved["resolution"] == "Review completed."
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-interventions", "--config", str(config_path)])
+
+    output = stdout.getvalue()
+    assert code == 0
+    assert "PR review is needed." in output
+    assert "  status     resolved" in output
+    assert "  reason     pr_review_needed" in output
+    assert "  task       ready" in output
+    assert "  resolution Review completed." in output
+    assert_no_box_drawing(output)
+
+
+def _setup_command_key(command: list[str]) -> tuple[str, ...]:
+    """Normalize setup-check commands for test stubs."""
+    if len(command) >= 4 and command[0] == "git" and command[1] == "-C":
+        return ("git", *command[3:])
+    return tuple(command)
+
+
+def _completed_process(
+    command: list[str],
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> Any:
+    """Return a subprocess result for setup-check tests."""
+    return service_module.subprocess.CompletedProcess(
+        command,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _stub_setup_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: dict[tuple[str, ...], tuple[int, str, str]],
+) -> list[tuple[str, ...]]:
+    """Stub service setup commands and record normalized invocations."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if key not in responses:
+            raise AssertionError(f"unexpected setup command: {key}")
+        returncode, stdout, stderr = responses[key]
+        return _completed_process(command, returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+    return calls
+
+
+def test_pr_notification_setup_flags_missing_remote_without_gh_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing Git remotes stop setup checks before any GitHub CLI probe."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intervention = coord.record_intervention(
+        reason="setup_missing",
+        task_id="ready",
+        summary="Need notification setup.",
+    )
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                2,
+                "",
+                "error: No such remote 'origin'\n",
+            ),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_remote"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_remote"]
+    assert payload["posting"]["live_supported"] is False
+    assert payload["posting"]["prepared_payload_supported"] is True
+    assert payload["prepared_payload"]["intervention_ids"] == [intervention.intervention_id]
+    assert calls == [("git", "remote", "get-url", "origin")]
+
+
+def test_pr_notification_setup_flags_missing_pr_association(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GitHub remote without an associated branch PR is reported distinctly."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (
+                0,
+                "feature/pr-notifications\n",
+                "",
+            ),
+            (
+                "gh",
+                "pr",
+                "view",
+                "feature/pr-notifications",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (1, "", "no pull requests found for branch\n"),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_pr_association"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_pr_association"]
+    assert payload["repo"]["remote"]["owner"] == "example"
+    assert payload["repo"]["remote"]["repo"] == "library"
+    assert payload["repo"]["branch"] == "feature/pr-notifications"
+    assert payload["target"] is None
+    assert ("gh", "auth", "status") not in calls
+
+
+def test_pr_notification_setup_rejects_pr_target_from_different_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selected Git remote constrains PR lookup and target validation."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "upstream"): (
+                0,
+                "https://github.com/example/selected.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "feature/setup",
+                "--repo",
+                "example/selected",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/other/selected/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path, remote="upstream")
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_pr_association"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_pr_association"]
+    assert "does not match selected remote" in payload["issues"][0]["message"]
+    assert payload["target"] is None
+    assert (
+        "gh",
+        "pr",
+        "view",
+        "feature/setup",
+        "--repo",
+        "example/selected",
+        "--json",
+        "number,url,headRefName,baseRefName,state",
+    ) in calls
+    assert ("gh", "auth", "status") not in calls
+
+
+def test_pr_notification_setup_missing_gh_is_missing_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing GitHub CLI is classified as an auth/tooling setup gap."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if command[0] == "gh":
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+        responses = {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+        }
+        returncode, stdout, stderr = responses[key]
+        return _completed_process(command, returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_auth"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_auth"]
+    assert "failed to start" in payload["issues"][0]["message"]
+    assert ("gh", "auth", "status") not in calls
+
+
+def test_pr_notification_setup_flags_missing_auth_after_pr_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live posting is refused when a PR is known but gh auth is unavailable."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "git@github.com:example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "feature/setup",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+            ("gh", "auth", "status"): (
+                1,
+                "",
+                "You are not logged into any GitHub hosts\n",
+            ),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_auth"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_auth"]
+    assert payload["target"]["number"] == 123
+    assert payload["target"]["owner"] == "example"
+    assert payload["auth"]["checked"] is True
+    assert payload["auth"]["authenticated"] is False
+    assert ("gh", "auth", "status") in calls
+
+
+def test_pr_notification_setup_uses_prepared_payload_when_live_posting_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authenticated PR checks still default to prepared payloads in safe mode."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intervention = coord.record_intervention(
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "feature/setup",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+            ("gh", "auth", "status"): (0, "Logged in to github.com\n", ""),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "unsupported_sandbox"
+    assert [issue["code"] for issue in payload["issues"]] == ["unsupported_sandbox"]
+    assert payload["issues"][0]["severity"] == "warning"
+    assert payload["posting"] == {
+        "live_supported": False,
+        "prepared_payload_supported": True,
+        "mode": "prepared_payload",
+    }
+    assert payload["prepared_payload"]["surface"] == "pull_request_comment"
+    assert payload["prepared_payload"]["intervention_ids"] == [intervention.intervention_id]
+    assert "Human review is needed." in payload["prepared_payload"]["body"]
+
+
+def test_cli_check_pr_notification_setup_outputs_json_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup-check CLI exposes the service diagnostic as JSON."""
+    config_path = write_project(tmp_path)
+    expected = {
+        "project_id": "toy",
+        "ok": False,
+        "status": "missing_remote",
+        "workspace": {"name": "", "kind": "local", "path": str(tmp_path)},
+        "repo": {"path": str(tmp_path), "remote": None, "branch": ""},
+        "target": None,
+        "auth": {"method": "gh", "checked": False, "authenticated": False, "error": ""},
+        "posting": {
+            "live_supported": False,
+            "prepared_payload_supported": True,
+            "mode": "prepared_payload",
+        },
+        "issues": [
+            {
+                "code": "missing_remote",
+                "severity": "error",
+                "message": "missing",
+                "remediation": "add remote",
+            }
+        ],
+        "prepared_payload": {
+            "surface": "pull_request_comment",
+            "body": "body",
+            "intervention_ids": [],
+            "interventions": [],
+        },
+    }
+
+    def fake_payload(self: Coordinator, **_: object) -> dict[str, Any]:
+        return expected
+
+    monkeypatch.setattr(Coordinator, "pr_notification_setup_payload", fake_payload)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "check-pr-notification-setup",
+                "--config",
+                str(config_path),
+                "--repo-path",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == expected
+
+
+def test_pr_notification_exporter_writes_prepared_payload_and_suppresses_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared PR notification exports persist delivery state without duplicates."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intervention = coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "feature/setup",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+            ("gh", "auth", "status"): (0, "Logged in to github.com\n", ""),
+        },
+    )
+
+    first = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/pr-notification.json",
+        actor="pm",
+    )
+    second = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/pr-notification.json",
+        actor="pm",
+    )
+    third = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/alternate-pr-notification.json",
+        actor="pm",
+    )
+    alternate_path = tmp_path / "exports" / "alternate-pr-notification.json"
+    fourth = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/alternate-pr-notification.json",
+        actor="pm",
+    )
+    alternate_path.unlink()
+    fifth = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/alternate-pr-notification.json",
+        actor="pm",
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert first["ok"] is True
+    assert first["action"] == "prepared"
+    assert first["target_key"] == "github:github.com/example/library#pull/123"
+    assert first["delivery"]["payload_hash"] == first["payload_hash"]
+    assert first["delivery"]["status"] == "prepared"
+    payload_path = tmp_path / "exports" / "pr-notification.json"
+    assert first["prepared_payload_path"] == str(payload_path)
+    written = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert written["payload_hash"] == first["payload_hash"]
+    assert written["payload"]["intervention_ids"] == [intervention.intervention_id]
+    assert "Human review is needed." in written["payload"]["body"]
+    assert second["ok"] is True
+    assert second["action"] == "suppressed"
+    assert second["payload_hash"] == first["payload_hash"]
+    assert third["ok"] is True
+    assert third["action"] == "prepared"
+    assert third["prepared_payload_path"] == str(alternate_path)
+    assert fourth["ok"] is True
+    assert fourth["action"] == "suppressed"
+    assert fifth["ok"] is True
+    assert fifth["action"] == "prepared"
+    assert alternate_path.exists()
+    assert len(snapshot["notification_deliveries"]) == 1
+    assert snapshot["notification_deliveries"][0]["target_key"] == first["target_key"]
+
+
+def test_pr_notification_exporter_can_promote_prepared_payload_to_live_comment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared delivery state does not suppress a later live PR comment."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if key == ("git", "remote", "get-url", "origin"):
+            return _completed_process(command, stdout="https://github.com/example/library.git\n")
+        if key == ("git", "branch", "--show-current"):
+            return _completed_process(command, stdout="feature/setup\n")
+        if key == (
+            "gh",
+            "pr",
+            "view",
+            "feature/setup",
+            "--repo",
+            "example/library",
+            "--json",
+            "number,url,headRefName,baseRefName,state",
+        ):
+            return _completed_process(
+                command,
+                stdout=json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+            )
+        if key == ("gh", "auth", "status"):
+            return _completed_process(command, stdout="Logged in to github.com\n")
+        if key[:3] == ("gh", "api", "repos/example/library/issues/123/comments"):
+            return _completed_process(command, stdout=json.dumps({"id": 456}))
+        raise AssertionError(f"unexpected command: {key}")
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+    prepared = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["notifications"] = {"github": {"allow_live": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    live_coord = Coordinator(load_config(config_path))
+
+    live = live_coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+
+    assert prepared["action"] == "prepared"
+    assert live["ok"] is True
+    assert live["action"] == "created"
+    assert live["delivery"]["comment_id"] == "456"
+    assert len([call for call in calls if call[:2] == ("gh", "api")]) == 1
+
+
+def test_pr_notification_exporter_posts_live_comment_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live PR notification exports create once, suppress, then patch changed content."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["notifications"] = {"github": {"allow_live": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if key == ("git", "remote", "get-url", "origin"):
+            return _completed_process(
+                command,
+                stdout="https://github.com/example/library.git\n",
+            )
+        if key == ("git", "branch", "--show-current"):
+            return _completed_process(command, stdout="feature/setup\n")
+        if key == (
+            "gh",
+            "pr",
+            "view",
+            "feature/setup",
+            "--repo",
+            "example/library",
+            "--json",
+            "number,url,headRefName,baseRefName,state",
+        ):
+            return _completed_process(
+                command,
+                stdout=json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+            )
+        if key == ("gh", "auth", "status"):
+            return _completed_process(command, stdout="Logged in to github.com\n")
+        if key[:3] == ("gh", "api", "repos/example/library/issues/123/comments"):
+            body_arg = key[-1]
+            assert body_arg.startswith("body=Agent tracker intervention notification")
+            return _completed_process(command, stdout=json.dumps({"id": 456}))
+        if key[:5] == (
+            "gh",
+            "api",
+            "repos/example/library/issues/comments/456",
+            "-X",
+            "PATCH",
+        ):
+            body_arg = key[-1]
+            assert "Second intervention." in body_arg
+            return _completed_process(command, stdout=json.dumps({"id": 456}))
+        raise AssertionError(f"unexpected command: {key}")
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+
+    first = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+    second = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+    coord.record_intervention(
+        intervention_id="needs-approval",
+        reason="approval_required",
+        task_id="ready",
+        summary="Second intervention.",
+    )
+    third = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+
+    assert first["ok"] is True
+    assert first["action"] == "created"
+    assert first["delivery"]["comment_id"] == "456"
+    assert first["delivery"]["last_posted_at"]
+    assert second["ok"] is True
+    assert second["action"] == "suppressed"
+    assert third["ok"] is True
+    assert third["action"] == "updated"
+    assert len([call for call in calls if call[:2] == ("gh", "api")]) == 2
+
+
+def test_pr_notification_live_create_requires_comment_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live create failures without a comment id do not persist delivery state."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["notifications"] = {"github": {"allow_live": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        if key == ("git", "remote", "get-url", "origin"):
+            return _completed_process(command, stdout="https://github.com/example/library.git\n")
+        if key == ("git", "branch", "--show-current"):
+            return _completed_process(command, stdout="feature/setup\n")
+        if key == (
+            "gh",
+            "pr",
+            "view",
+            "feature/setup",
+            "--repo",
+            "example/library",
+            "--json",
+            "number,url,headRefName,baseRefName,state",
+        ):
+            return _completed_process(
+                command,
+                stdout=json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+            )
+        if key == ("gh", "auth", "status"):
+            return _completed_process(command, stdout="Logged in to github.com\n")
+        if key[:3] == ("gh", "api", "repos/example/library/issues/123/comments"):
+            return _completed_process(command, stdout="{}")
+        raise AssertionError(f"unexpected command: {key}")
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="comment id"):
+        coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+
+    assert coord.store.notification_deliveries(config.project_id) == []
+
+
+def test_cli_export_pr_notifications_outputs_json_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The PR notification export command exposes machine-readable output."""
+    config_path = write_project(tmp_path)
+    expected = {
+        "project_id": "toy",
+        "ok": True,
+        "action": "prepared",
+        "status": "prepared",
+        "target_key": "github:github.com/example/library#pull/123",
+        "payload_hash": "abc",
+        "setup": {},
+        "prepared_payload": {"body": "body", "intervention_ids": ["i1"]},
+        "prepared_payload_path": str(tmp_path / "exports" / "pr.json"),
+        "delivery": None,
+        "issues": [],
+    }
+
+    def fake_export(self: Coordinator, **_: object) -> dict[str, Any]:
+        return expected
+
+    monkeypatch.setattr(Coordinator, "export_pr_notifications", fake_export)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "export-pr-notifications",
+                "--config",
+                str(config_path),
+                "--repo-path",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == expected
+
+
+def test_cli_export_pr_notifications_returns_nonzero_when_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Notification export refusal is visible to shell automation."""
+    config_path = write_project(tmp_path)
+    refused = {
+        "project_id": "toy",
+        "ok": False,
+        "action": "refused",
+        "status": "missing_remote",
+        "target_key": "",
+        "payload_hash": "abc",
+        "setup": {},
+        "prepared_payload": {"body": "body", "intervention_ids": ["i1"]},
+        "prepared_payload_path": "",
+        "delivery": None,
+        "issues": [
+            {
+                "code": "missing_remote",
+                "severity": "error",
+                "message": "missing",
+                "remediation": "add remote",
+            }
+        ],
+    }
+
+    def fake_export(self: Coordinator, **_: object) -> dict[str, Any]:
+        return refused
+
+    monkeypatch.setattr(Coordinator, "export_pr_notifications", fake_export)
+    json_stdout = StringIO()
+    human_stdout = StringIO()
+
+    with redirect_stdout(json_stdout):
+        json_code = cli.main(
+            [
+                "export-pr-notifications",
+                "--config",
+                str(config_path),
+                "--json",
+            ]
+        )
+    with redirect_stdout(human_stdout):
+        human_code = cli.main(["export-pr-notifications", "--config", str(config_path)])
+
+    assert json_code == 1
+    assert human_code == 1
+    assert json.loads(json_stdout.getvalue()) == refused
+    assert "PR notification export" in human_stdout.getvalue()
+    assert "missing_remote" in human_stdout.getvalue()
+
+
 def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     """Root and grouped help output stay copy-paste-safe plain text."""
     root_help = cli.build_parser().format_help()
@@ -3212,11 +4758,18 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
         code = cli.main(["intake", "--help"])
 
     intake_help = stdout.getvalue()
+    normalized_root_help = " ".join(root_help.split())
     assert code == 0
     assert "record-intake" in root_help
+    assert "capture-intake" in root_help
     assert "intake" in root_help
+    assert "Return active owned work to pending; not for finished handoffs." in normalized_root_help
+    assert "Mark finished leased work awaiting review; clears the lease." in normalized_root_help
+    assert "Mark finished leased work awaiting PR, merge, or integration." in normalized_root_help
+    assert "Terminally fail a leased task with an actionable reason." in normalized_root_help
     assert "Usage: agent-tracker intake" in intake_help
     assert "--config TEXT" in intake_help
+    assert "capture" in intake_help
     assert "record" in intake_help
     assert "list" in intake_help
     assert "update" in intake_help
@@ -4069,6 +5622,43 @@ def test_mcp_handlers_submit_review_and_await_integration(tmp_path: Path) -> Non
     }
 
 
+def test_mcp_release_task_returns_payload_and_enforces_owner(tmp_path: Path) -> None:
+    """MCP release keeps lease ownership checks and returns release details."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim_task(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="different agent"):
+        tools.release_task(
+            task_id="ready",
+            lease_token=claim["lease_token"],
+            reason="wrong owner",
+            agent_id="agent-2",
+        )
+
+    payload = tools.release_task(
+        task_id="ready",
+        lease_token=claim["lease_token"],
+        reason="return to queue",
+        agent_id="agent-1",
+    )
+    state = tools.get_task_context("ready")
+
+    assert payload == {
+        "project_id": "toy",
+        "task_id": "ready",
+        "from_status": "claimed",
+        "status": "pending",
+        "agent_id": "agent-1",
+        "reason": "return to queue",
+    }
+    assert state["manual_status"] == "pending"
+    assert state["state"] == "ready"
+    assert state["lease_agent_id"] == ""
+
+
 def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     tmp_path: Path,
 ) -> None:
@@ -4081,7 +5671,14 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     status = tools.status()
     alias_status = tools.get_project_status()
     overview = tools.overview(limit=1)
-    worker_prompt = tools.launch_worker_prompt("ready", agent_id="agent-1")
+    assigned_worktree = tmp_path / "worktrees" / "ready"
+    worker_prompt = tools.launch_worker_prompt(
+        "ready",
+        agent_id="agent-1",
+        branch="codex/ready-explicit",
+        base_ref="origin/main",
+        worktree_path=str(assigned_worktree),
+    )
     launch_worker = tools.launch_worker("ready", agent_id="agent-1")
 
     claim_keys = {"project_id", "task_id", "lease_token", "lease_expires_at", "agent_id"}
@@ -4115,6 +5712,8 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
         "agent_id",
         "launch_mode",
         "launched",
+        "coordination_policy",
+        "coordination",
         "prompt",
         "task",
     }
@@ -4123,10 +5722,19 @@ def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
     assert worker_prompt["agent_id"] == "agent-1"
     assert worker_prompt["launch_mode"] == "prompt_only"
     assert worker_prompt["launched"] is False
+    assert worker_prompt["coordination_policy"] == DEFAULT_COORDINATION_POLICY
+    assert worker_prompt["coordination"]["assignment"] == {
+        "branch": "codex/ready-explicit",
+        "base_ref": "origin/main",
+        "worktree_path": str(assigned_worktree),
+    }
     assert launch_worker["launch_mode"] == "prompt_only"
     assert launch_worker["launched"] is False
+    assert launch_worker["coordination"]["assignment"]["branch"] == "codex/ready"
     assert worker_prompt["task"]["id"] == "ready"
     assert "# Ready" in worker_prompt["prompt"]
+    assert "## Coordination Context" in worker_prompt["prompt"]
+    assert f"Assigned worktree: `{assigned_worktree}`" in worker_prompt["prompt"]
     assert set(claim) == claim_keys
     assert set(alias_claim) == claim_keys
     assert set(heartbeat) == claim_keys
@@ -4379,6 +5987,79 @@ def test_cli_submit_review_updates_state_and_records_repeated_evidence(
     assert "Submitted ready for review" in stdout.getvalue()
     assert state.state == "awaiting_review"
     assert state.evidence == ["evidence://one", "evidence://two"]
+
+
+def test_cli_release_returns_task_to_pending_with_json(tmp_path: Path) -> None:
+    """CLI release prints a JSON payload and clears the active lease."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "release",
+                "--config",
+                str(config_path),
+                "ready",
+                "--lease-token",
+                claim.lease_token,
+                "--agent",
+                "agent-1",
+                "--reason",
+                "returning scoped work",
+                "--json",
+            ]
+        )
+    payload = json.loads(stdout.getvalue())
+    state = coord.get_task("ready")
+
+    assert code == 0
+    assert payload == {
+        "project_id": "toy",
+        "task_id": "ready",
+        "from_status": "claimed",
+        "status": "pending",
+        "agent_id": "agent-1",
+        "reason": "returning scoped work",
+    }
+    assert state.task.status == "pending"
+    assert state.state == "ready"
+    assert state.lease_token == ""
+
+
+def test_cli_handoff_help_distinguishes_release_review_integration_and_fail() -> None:
+    """CLI help explains which lease closeout command fits each work state."""
+
+    def command_help(command: str) -> str:
+        stdout = StringIO()
+        with redirect_stdout(stdout), pytest.raises(SystemExit) as exc_info:
+            cli.main([command, "--help"])
+        assert exc_info.value.code == 0
+        return " ".join(stdout.getvalue().split())
+
+    release_help = command_help("release")
+    submit_review_help = command_help("submit-review")
+    await_integration_help = command_help("await-integration")
+    fail_help = command_help("fail")
+
+    assert "Return active owned work to pending" in release_help
+    assert "Finished work waiting on review" in release_help
+    assert "submit-review" in release_help
+    assert "await-" in release_help and "integration" in release_help
+    assert "Use fail only for terminal failure" in release_help
+    assert "awaiting_review" in submit_review_help
+    assert "instead of release" in submit_review_help
+    assert "should not unblock dependents" in submit_review_help
+    assert "integration wait state" in await_integration_help
+    assert "PR, merge, deployment" in await_integration_help
+    assert "instead of release" in await_integration_help
+    assert "Terminally fail" in fail_help
+    assert "pause work" in fail_help
+    assert "review/integration" in fail_help
 
 
 def test_cli_submit_review_reports_validation_errors_without_traceback(
@@ -4694,6 +6375,28 @@ def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
     assert "Do not run `next` to select your own work." in skill_text
     assert "claim that exact task" in skill_text
     assert "triage intake" in skill_text
+
+
+def test_skills_document_coordinator_worktree_isolation_policy() -> None:
+    """Vendored skills keep coordinator-managed edits out of canonical checkouts."""
+    coordinator = (
+        vendored_skill_path("agent-coordinator").joinpath("SKILL.md").read_text(encoding="utf-8")
+    )
+    worker = vendored_skill_path("task-worker").joinpath("SKILL.md").read_text(encoding="utf-8")
+    manager = (
+        vendored_skill_path("project-manager").joinpath("SKILL.md").read_text(encoding="utf-8")
+    )
+
+    assert "worktree_mode: one_task_per_worktree" in coordinator
+    assert "pr_mode: one_task_per_pr" in coordinator
+    assert "must not write to the same worktree" in coordinator
+    assert "not stale canonical `main`" in coordinator
+    assert "edit the canonical repository checkout for implementation" in worker
+    assert "assigned branch/worktree" in worker
+    assert "shared worktree policy" in worker
+    assert "configured `coordination_policy`" in manager
+    assert "batch_pr_allowed" in manager
+    assert "task IDs, batching rationale, and closeout evidence" in manager
 
 
 def test_available_skill_names_lists_vendored_skills() -> None:

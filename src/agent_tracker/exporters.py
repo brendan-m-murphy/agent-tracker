@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any
 
 from agent_tracker.config import ProjectConfig
 
@@ -16,3 +18,13 @@ class JsonSnapshotExporter:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
         return [str(path)]
+
+
+class PreparedPrNotificationExporter:
+    """Export a prepared PR notification payload as JSON."""
+
+    def export(self, path: Path, payload: dict[str, Any]) -> str:
+        """Write the prepared notification payload and return its path."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return str(path)

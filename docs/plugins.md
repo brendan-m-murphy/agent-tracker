@@ -80,7 +80,9 @@ from agent_tracker.models import DependencyRecord, EventRecord, TaskRecord, Task
 - `name`: human-readable name;
 - `root`: directory containing the config file;
 - `db_path`: resolved SQLite path;
-- `raw`: original config dictionary.
+- `coordination_policy`: validated worktree and PR policy with conservative
+  defaults filled in;
+- `raw`: loaded config dictionary for project-specific extension fields.
 
 Use the resolver that matches the kind of path:
 
@@ -305,6 +307,38 @@ Exporter responsibilities:
 - return every created or updated path;
 - link to large artifacts instead of copying raw logs into exports;
 - keep output deterministic enough for review.
+
+## PR Notification Setup Checkers
+
+Config key: `pr_notification_setup_checker`
+
+Default: built-in local Git and GitHub CLI diagnostics
+
+Protocol:
+
+```python
+class PrNotificationSetupChecker:
+    def check_pr_notification_setup(
+        self,
+        config: ProjectConfig,
+        *,
+        workspace: str = "",
+        repo_path: str | Path | None = None,
+        remote: str = "origin",
+        timeout_seconds: int = 5,
+    ) -> dict[str, object]:
+        ...
+```
+
+Custom checkers should be read-only. They return the same payload shape as
+`agent-tracker check-pr-notification-setup --json`, including `issues`,
+`posting`, `target`, and `prepared_payload`. Use them only when a project needs
+non-standard PR discovery or authentication checks; notification exporters
+should still treat SQLite intervention records as canonical state.
+
+`agent-tracker export-pr-notifications` consumes this setup payload and records
+notification delivery state in SQLite. Projects should customize setup
+discovery here rather than storing delivery state in checker plugins.
 
 ## Follow-Up Planners
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from pathlib import Path
 from typing import Any, Protocol
 
 from agent_tracker.config import ProjectConfig
@@ -45,6 +46,21 @@ class Exporter(Protocol):
 
     def export(self, config: ProjectConfig, snapshot: dict[str, Any]) -> list[str]:
         """Write an export and return created or updated paths."""
+
+
+class PrNotificationSetupChecker(Protocol):
+    """Diagnose whether a workspace can receive PR notification exports."""
+
+    def check_pr_notification_setup(
+        self,
+        config: ProjectConfig,
+        *,
+        workspace: str = "",
+        repo_path: str | Path | None = None,
+        remote: str = "origin",
+        timeout_seconds: int = 5,
+    ) -> dict[str, Any]:
+        """Return a JSON-friendly setup diagnostic payload."""
 
 
 def load_object(spec: str) -> Any:

@@ -16,6 +16,12 @@ from typing import Any
 SUPPORTED_CONFIG_SCHEMA_VERSION = 1
 PROJECT_CONFIG_ENV_VAR = "AGENT_TRACKER_CONFIG"
 PROJECT_DB_ENV_VAR = "AGENT_TRACKER_DB"
+DEFAULT_COORDINATION_POLICY = {
+    "worktree_mode": "one_task_per_worktree",
+    "pr_mode": "one_task_per_pr",
+}
+COORDINATION_WORKTREE_MODES = {"one_task_per_worktree", "shared_worktree_serial"}
+COORDINATION_PR_MODES = {"one_task_per_pr", "batch_pr_allowed"}
 
 _TEXT_FIELDS = {
     "project_id",
@@ -29,6 +35,7 @@ _TEXT_FIELDS = {
     "prompt_renderer",
     "event_adapter",
     "exporter",
+    "pr_notification_setup_checker",
     "export_path",
     "spool_inbox",
     "spool_done",
@@ -62,6 +69,9 @@ class ProjectConfig:
     task_source_root: Path | None = None
     canonical_config_path: Path | None = None
     config_schema_version: int = SUPPORTED_CONFIG_SCHEMA_VERSION
+    coordination_policy: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_COORDINATION_POLICY)
+    )
 
     def resolve_path(self, key: str, default: str = "") -> Path:
         """Resolve a path-valued config key relative to the config directory."""
@@ -150,6 +160,8 @@ def load_config(path: str | Path) -> ProjectConfig:
     _validate_text_fields(data)
     _validate_spool(data)
     _validate_workspaces(data)
+    _validate_notifications(data)
+    coordination_policy = _coordination_policy(data)
     raw = dict(data)
     raw["config_schema_version"] = config_schema_version
     root = config_path.parent
@@ -183,6 +195,7 @@ def load_config(path: str | Path) -> ProjectConfig:
         state_root=state_root,
         task_source_root=task_source_root,
         canonical_config_path=canonical_config_path,
+        coordination_policy=coordination_policy,
     )
 
 
@@ -293,3 +306,70 @@ def _validate_workspaces(data: dict[str, Any]) -> None:
                 raise ValueError(
                     f"config field 'workspaces.{name}.{key}' must be a string or list of strings"
                 )
+
+
+def _coordination_policy(data: dict[str, Any]) -> dict[str, str]:
+    """Return validated coordinator workflow policy with conservative defaults."""
+    if "coordination_policy" not in data or data["coordination_policy"] is None:
+        return dict(DEFAULT_COORDINATION_POLICY)
+    policy = data["coordination_policy"]
+    if not isinstance(policy, dict):
+        raise ValueError("config field 'coordination_policy' must be an object")
+    unknown = sorted(set(policy) - {"worktree_mode", "pr_mode"})
+    if unknown:
+        joined = ", ".join(unknown)
+        raise ValueError(f"unknown coordination_policy field: {joined}")
+    result = dict(DEFAULT_COORDINATION_POLICY)
+    if "worktree_mode" in policy:
+        result["worktree_mode"] = _coordination_policy_choice(
+            policy["worktree_mode"],
+            field_name="coordination_policy.worktree_mode",
+            choices=COORDINATION_WORKTREE_MODES,
+        )
+    if "pr_mode" in policy:
+        result["pr_mode"] = _coordination_policy_choice(
+            policy["pr_mode"],
+            field_name="coordination_policy.pr_mode",
+            choices=COORDINATION_PR_MODES,
+        )
+    return result
+
+
+def _coordination_policy_choice(
+    value: Any,
+    *,
+    field_name: str,
+    choices: set[str],
+) -> str:
+    """Return one validated coordination policy choice."""
+    if not isinstance(value, str):
+        raise ValueError(f"config field '{field_name}' must be a string")
+    cleaned = value.strip()
+    if cleaned not in choices:
+        joined = ", ".join(sorted(choices))
+        raise ValueError(f"config field '{field_name}' must be one of: {joined}")
+    return cleaned
+
+
+def _validate_notifications(data: dict[str, Any]) -> None:
+    """Validate optional notification settings."""
+    if "notifications" not in data or data["notifications"] is None:
+        return
+    notifications = data["notifications"]
+    if not isinstance(notifications, dict):
+        raise ValueError("config field 'notifications' must be an object")
+    github = notifications.get("github")
+    if github is None:
+        return
+    if not isinstance(github, dict):
+        raise ValueError("config field 'notifications.github' must be an object")
+    if "allow_live" in github and not isinstance(github["allow_live"], bool):
+        raise ValueError("config field 'notifications.github.allow_live' must be a boolean")
+    if (
+        "prepared_payload_path" in github
+        and github["prepared_payload_path"] is not None
+        and not isinstance(github["prepared_payload_path"], str)
+    ):
+        raise ValueError(
+            "config field 'notifications.github.prepared_payload_path' must be a string"
+        )

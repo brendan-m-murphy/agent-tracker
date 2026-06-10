@@ -25,6 +25,17 @@ class ClaimPayload(TypedDict):
     agent_id: str
 
 
+class ReleasePayload(TypedDict):
+    """JSON-friendly release response."""
+
+    project_id: str
+    task_id: str
+    from_status: str
+    status: str
+    agent_id: str
+    reason: str
+
+
 class PathSummaryPayload(TypedDict, total=False):
     """Optional resolved path fields included when configured."""
 
@@ -148,6 +159,8 @@ class WorkerPromptPayload(TypedDict):
     agent_id: str
     launch_mode: str
     launched: bool
+    coordination_policy: dict[str, str]
+    coordination: dict[str, Any]
     prompt: str
     task: dict[str, Any]
 
@@ -261,6 +274,9 @@ class AgentTrackerTools:
         task_id: str,
         agent_id: str = "",
         markdown: bool = True,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
     ) -> WorkerPromptPayload:
         """Return task context and prompt for an external worker host.
 
@@ -269,13 +285,27 @@ class AgentTrackerTools:
         their own execution adapter while the tracker remains the queue authority.
         """
         task = self.get_task_context(task_id)
-        prompt = self.coordinator.render_prompt(task_id, markdown=markdown)
+        coordination = self.coordinator.worker_coordination_context(
+            task_id=task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
+        prompt = self.coordinator.render_worker_prompt(
+            task_id,
+            markdown=markdown,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
         return {
             "project_id": self.coordinator.config.project_id,
             "task_id": task_id,
             "agent_id": agent_id,
             "launch_mode": "prompt_only",
             "launched": False,
+            "coordination_policy": coordination["policy"],
+            "coordination": coordination,
             "prompt": prompt,
             "task": task,
         }
@@ -285,12 +315,18 @@ class AgentTrackerTools:
         task_id: str,
         agent_id: str = "",
         markdown: bool = True,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
     ) -> WorkerPromptPayload:
         """Return the prompt-only worker payload for launch-worker tool hosts."""
         return self.launch_worker_prompt(
             task_id=task_id,
             agent_id=agent_id,
             markdown=markdown,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
         )
 
     def heartbeat_task(
@@ -370,6 +406,43 @@ class AgentTrackerTools:
             direct_merge=direct_merge,
         )
         return {"ok": True}
+
+    def release_task(
+        self,
+        task_id: str,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> ReleasePayload:
+        """Release an active leased task back to the queue."""
+        return self.release(
+            task_id=task_id,
+            lease_token=lease_token,
+            reason=reason,
+            agent_id=agent_id,
+            status=status,
+        )
+
+    def release(
+        self,
+        task_id: str,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> ReleasePayload:
+        """Release an active leased task back to pending queue state."""
+        return cast(
+            ReleasePayload,
+            self.coordinator.release(
+                task_id,
+                lease_token=lease_token,
+                reason=reason,
+                agent_id=agent_id,
+                status=status,
+            ),
+        )
 
     def pull_spool(self, dry_run: bool = False) -> PullSpoolPayload:
         """Pull complete remote spool files into the local spool inbox."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -14,20 +15,32 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from agent_tracker.config import ProjectConfig
-from agent_tracker.db import Store, intake_to_dict, proposed_task_to_dict, state_to_dict
+from agent_tracker.db import (
+    Store,
+    intake_to_dict,
+    intervention_to_dict,
+    notification_delivery_to_dict,
+    proposed_task_to_dict,
+    state_to_dict,
+)
+from agent_tracker.exporters import PreparedPrNotificationExporter
 from agent_tracker.models import (
     ACTIVE_STATES,
     INTAKE_STATES,
     INTEGRATION_STATES,
+    INTERVENTION_REASONS,
+    INTERVENTION_STATES,
     PROPOSAL_STATES,
     REVIEW_STATES,
     Claim,
     EventRecord,
     IntakeRecord,
+    InterventionRecord,
+    NotificationDeliveryRecord,
     ProposedTaskRecord,
     RequirementState,
     TaskRecord,
@@ -38,6 +51,13 @@ from agent_tracker.rendering import DefaultPromptRenderer
 
 _SSH_SPOOL_SCHEMES = {"ssh", "sftp"}
 _DISABLED_KNOWN_HOSTS = {"none", "off", "false", "disabled"}
+STRUCTURED_INTAKE_KINDS = ("idea", "feature", "check", "concern", "note")
+
+
+class _GitBranchCheck(TypedDict):
+    ok: bool
+    branch: str
+    detail: str
 
 
 class Coordinator:
@@ -185,6 +205,39 @@ class Coordinator:
             lease_token=lease_token,
             reason=reason,
             agent_id=agent_id,
+        )
+
+    def release(
+        self,
+        task_id: str,
+        *,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> dict[str, str]:
+        """Release an active leased task back to the queue.
+
+        Args:
+            task_id: Task identifier to release.
+            lease_token: Current active lease token for the task.
+            reason: Non-empty audit reason for returning the work to the queue.
+            agent_id: Optional agent ID used to validate lease ownership.
+            status: Target queue status. Only `pending` is currently supported.
+
+        Raises:
+            ValueError: If mutation is refused, the release reason is empty, the
+                lease is invalid, or the requested target status is unsupported.
+            KeyError: If the task does not exist.
+        """
+        self._ensure_mutation_allowed()
+        return self.store.release_task(
+            self.config.project_id,
+            task_id,
+            lease_token=lease_token,
+            reason=reason,
+            agent_id=agent_id,
+            status=status,
         )
 
     def submit_review(
@@ -336,6 +389,7 @@ class Coordinator:
     def completion_integrity_payload(self) -> dict[str, Any]:
         """Return a deterministic diagnostic for completed task evidence."""
         issues = self.store.completion_integrity_issues(self.config.project_id)
+        issues.extend(_completion_file_evidence_git_issues(self.config, self.task_states()))
         return {
             "project_id": self.config.project_id,
             "ok": not issues,
@@ -386,6 +440,48 @@ class Coordinator:
             kind=_first_text(kind) or "idea",
             source=_first_text(source),
             repo=_first_text(repo),
+            tags=_clean_tags(tags or []),
+            metadata=metadata or {},
+        )
+        return self.store.record_intake(self.config.project_id, record, actor=actor)
+
+    def record_structured_intake(
+        self,
+        text: str,
+        *,
+        kind: str,
+        source: str,
+        repo: str,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        intake_id: str = "",
+        actor: str = "system",
+    ) -> IntakeRecord:
+        """Record raw intake through the guided helper path."""
+        self._ensure_mutation_allowed()
+        raw_text = str(text)
+        if not raw_text.strip():
+            raise ValueError("intake text is required")
+        cleaned_kind = _first_text(kind)
+        cleaned_source = _first_text(source)
+        cleaned_repo = _first_text(repo)
+        if not cleaned_kind:
+            raise ValueError("intake kind is required")
+        if cleaned_kind not in STRUCTURED_INTAKE_KINDS:
+            allowed = ", ".join(STRUCTURED_INTAKE_KINDS)
+            raise ValueError(f"intake kind must be one of: {allowed}")
+        if not cleaned_source:
+            raise ValueError("intake source is required")
+        if not cleaned_repo:
+            raise ValueError("intake repo is required")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("intake metadata must be a JSON object")
+        record = IntakeRecord(
+            intake_id=_first_text(intake_id) or uuid.uuid4().hex,
+            text=raw_text,
+            kind=cleaned_kind,
+            source=cleaned_source,
+            repo=cleaned_repo,
             tags=_clean_tags(tags or []),
             metadata=metadata or {},
         )
@@ -679,6 +775,276 @@ class Coordinator:
             "proposals": [proposed_task_to_dict(record) for record in records],
         }
 
+    def record_intervention(
+        self,
+        *,
+        reason: str,
+        task_id: str = "",
+        summary: str = "",
+        metadata: dict[str, Any] | None = None,
+        intervention_id: str = "",
+        actor: str = "system",
+    ) -> InterventionRecord:
+        """Record a durable human intervention need without notifying anyone."""
+        self._ensure_mutation_allowed()
+        cleaned_reason = _first_text(reason)
+        if cleaned_reason not in INTERVENTION_REASONS:
+            allowed = ", ".join(sorted(INTERVENTION_REASONS))
+            raise ValueError(f"intervention reason must be one of: {allowed}")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("intervention metadata must be a JSON object")
+        record = InterventionRecord(
+            intervention_id=_first_text(intervention_id) or uuid.uuid4().hex,
+            task_id=_first_text(task_id),
+            reason=cleaned_reason,
+            summary=_first_text(summary),
+            metadata=metadata or {},
+        )
+        return self.store.record_intervention(
+            self.config.project_id,
+            record,
+            actor=actor,
+        )
+
+    def intervention_records(
+        self,
+        *,
+        status: str = "",
+        reason: str = "",
+        task_id: str = "",
+        limit: int = 0,
+    ) -> list[InterventionRecord]:
+        """Return durable intervention records."""
+        if limit < 0:
+            raise ValueError("limit must be greater than or equal to zero")
+        cleaned_status = _first_text(status)
+        if cleaned_status and cleaned_status not in INTERVENTION_STATES:
+            raise ValueError(f"invalid intervention status: {cleaned_status}")
+        cleaned_reason = _first_text(reason)
+        if cleaned_reason and cleaned_reason not in INTERVENTION_REASONS:
+            raise ValueError(f"invalid intervention reason: {cleaned_reason}")
+        return self.store.intervention_records(
+            self.config.project_id,
+            status=cleaned_status,
+            reason=cleaned_reason,
+            task_id=_first_text(task_id),
+            limit=limit,
+        )
+
+    def resolve_intervention(
+        self,
+        intervention_id: str,
+        *,
+        resolution: str = "",
+        evidence: list[str] | None = None,
+        actor: str = "system",
+    ) -> InterventionRecord:
+        """Resolve one intervention with evidence or a resolution reason."""
+        self._ensure_mutation_allowed()
+        cleaned_intervention_id = _first_text(intervention_id)
+        if not cleaned_intervention_id:
+            raise ValueError("intervention id is required")
+        return self.store.resolve_intervention(
+            self.config.project_id,
+            cleaned_intervention_id,
+            resolution=_first_text(resolution),
+            evidence=_clean_strings(evidence or []),
+            actor=actor,
+        )
+
+    def interventions_payload(
+        self,
+        *,
+        status: str = "",
+        reason: str = "",
+        task_id: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Return JSON-friendly intervention records."""
+        records = self.intervention_records(
+            status=status,
+            reason=reason,
+            task_id=task_id,
+            limit=limit,
+        )
+        return {
+            "project_id": self.config.project_id,
+            "interventions": [intervention_to_dict(record) for record in records],
+        }
+
+    def pr_notification_setup_payload(
+        self,
+        *,
+        workspace: str = "",
+        repo_path: str | Path | None = None,
+        remote: str = "origin",
+        timeout_seconds: int = 5,
+    ) -> dict[str, Any]:
+        """Return read-only diagnostics for PR-based intervention notifications."""
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be greater than or equal to zero")
+        checker = load_plugin(self.config, "pr_notification_setup_checker")
+        if checker is not None:
+            return checker.check_pr_notification_setup(
+                self.config,
+                workspace=workspace,
+                repo_path=repo_path,
+                remote=remote,
+                timeout_seconds=timeout_seconds,
+            )
+        notification_workspace = _notification_workspace(
+            self.config,
+            workspace=workspace,
+            repo_path=repo_path,
+        )
+        return _default_pr_notification_setup_payload(
+            self.config,
+            notification_workspace,
+            interventions=[
+                intervention_to_dict(record) for record in self.intervention_records(status="open")
+            ],
+            remote=remote,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def export_pr_notifications(
+        self,
+        *,
+        workspace: str = "",
+        repo_path: str | Path | None = None,
+        remote: str = "origin",
+        timeout_seconds: int = 5,
+        prepared_payload_path: str | Path | None = None,
+        dry_run: bool = False,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        """Export open intervention notifications to a PR or prepared payload."""
+        self._ensure_mutation_allowed()
+        setup = self.pr_notification_setup_payload(
+            workspace=workspace,
+            repo_path=repo_path,
+            remote=remote,
+            timeout_seconds=timeout_seconds,
+        )
+        prepared_payload = setup["prepared_payload"]
+        intervention_ids = list(prepared_payload.get("intervention_ids") or [])
+        target = setup.get("target")
+        target_payload = target if isinstance(target, dict) else {}
+        target_key = _notification_target_key(target_payload)
+        payload_hash = _notification_payload_hash(prepared_payload)
+        existing = (
+            self.store.notification_delivery(
+                self.config.project_id,
+                target_key,
+                channel="pull_request_comment",
+            )
+            if target_key
+            else None
+        )
+        result: dict[str, Any] = {
+            "project_id": self.config.project_id,
+            "ok": False,
+            "action": "refused",
+            "status": setup["status"],
+            "target_key": target_key,
+            "payload_hash": payload_hash,
+            "setup": setup,
+            "prepared_payload": prepared_payload,
+            "prepared_payload_path": "",
+            "delivery": notification_delivery_to_dict(existing) if existing else None,
+            "issues": list(setup.get("issues") or []),
+        }
+        if not intervention_ids:
+            result["ok"] = True
+            result["action"] = "skipped"
+            result["status"] = "no_open_interventions"
+            return result
+        if not target_key:
+            return result
+        posting_mode = str(setup.get("posting", {}).get("mode") or "")
+        if setup.get("ok") and posting_mode == "live_comment":
+            if _live_export_satisfied(existing, payload_hash):
+                result["ok"] = True
+                result["action"] = "suppressed"
+                result["status"] = "unchanged"
+                return result
+            if dry_run:
+                result["ok"] = True
+                result["action"] = "dry_run"
+                result["status"] = "pending"
+                return result
+            delivery = _post_pr_notification(
+                target_payload,
+                prepared_payload,
+                existing=existing,
+                timeout_seconds=timeout_seconds,
+                path=Path(setup["repo"]["path"]),
+            )
+            record = self.store.upsert_notification_delivery(
+                self.config.project_id,
+                target_key=target_key,
+                channel="pull_request_comment",
+                target=target_payload,
+                comment_id=delivery["comment_id"],
+                payload_hash=payload_hash,
+                status=delivery["status"],
+                last_posted_at=_utc_timestamp(),
+                metadata={
+                    "intervention_ids": intervention_ids,
+                    "body": prepared_payload["body"],
+                },
+                actor=actor,
+            )
+            result["ok"] = True
+            result["action"] = delivery["action"]
+            result["status"] = delivery["status"]
+            result["delivery"] = notification_delivery_to_dict(record)
+            return result
+
+        path = _prepared_pr_notification_path(self.config, prepared_payload_path)
+        if _prepared_export_satisfied(existing, payload_hash, path):
+            result["ok"] = True
+            result["action"] = "suppressed"
+            result["status"] = "unchanged"
+            result["prepared_payload_path"] = str(path)
+            return result
+        if dry_run:
+            result["ok"] = True
+            result["action"] = "dry_run"
+            result["status"] = "pending"
+            result["prepared_payload_path"] = str(path)
+            return result
+        payload_to_write = {
+            "project_id": self.config.project_id,
+            "target_key": target_key,
+            "payload_hash": payload_hash,
+            "target": target_payload,
+            "payload": prepared_payload,
+            "setup_status": setup["status"],
+            "setup_issues": setup.get("issues", []),
+        }
+        written_path = PreparedPrNotificationExporter().export(path, payload_to_write)
+        record = self.store.upsert_notification_delivery(
+            self.config.project_id,
+            target_key=target_key,
+            channel="pull_request_comment",
+            target=target_payload,
+            comment_id=existing.comment_id if existing else "",
+            payload_hash=payload_hash,
+            status="prepared",
+            metadata={
+                "intervention_ids": intervention_ids,
+                "prepared_payload_path": str(path),
+            },
+            actor=actor,
+        )
+        result["ok"] = True
+        result["action"] = "prepared"
+        result["status"] = "prepared"
+        result["prepared_payload_path"] = written_path
+        result["delivery"] = notification_delivery_to_dict(record)
+        return result
+
     def ingest_event_file(self, path: str | Path, *, actor: str = "system") -> bool:
         """Record an event from a JSON file."""
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -820,6 +1186,9 @@ class Coordinator:
         command: list[str] | None = None,
         dry_run: bool = False,
         timeout_seconds: int = 0,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
     ) -> dict[str, Any]:
         """Prepare or run a one-shot local worker in a configured workspace."""
         self._ensure_mutation_allowed()
@@ -838,6 +1207,20 @@ class Coordinator:
             raise ValueError(f"workspace path is not a directory: {workspace.path}")
         if dry_run and claim_task:
             raise ValueError("claim_task cannot be used with dry_run")
+        cleaned_task_id = _first_text(task_id)
+        if cleaned_task_id and _workspace_contains_config(workspace.path, self.config):
+            raise ValueError(
+                "launch-worker task workspaces must not contain the canonical tracker "
+                "config; use an isolated task worktree or explicit non-canonical workspace"
+            )
+        coordination = _worker_coordination_context(
+            self.config,
+            workspace=workspace,
+            task_id=cleaned_task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
 
         launch_id = (
             f"{_launch_id_component(self.config.project_id, fallback='project')}-"
@@ -846,7 +1229,6 @@ class Coordinator:
         )
         actor = _first_text(agent_id, f"worker-launch:{workspace.name}")
         claim: Claim | None = None
-        cleaned_task_id = _first_text(task_id)
         if claim_task:
             if not cleaned_task_id:
                 raise ValueError("task_id is required when claim_task is true")
@@ -862,6 +1244,7 @@ class Coordinator:
             prompt = prompt_text.strip()
         if not prompt:
             raise ValueError("prompt text or task_id is required")
+        prompt = _append_worker_coordination_prompt(prompt, coordination)
 
         launch_dir = workspace.artifacts_path / launch_id
         prompt_path = launch_dir / "prompt.md"
@@ -869,8 +1252,11 @@ class Coordinator:
         stdout_path = launch_dir / "stdout.txt"
         stderr_path = launch_dir / "stderr.txt"
         launch_path = launch_dir / "launch.json"
+        assignment = coordination["assignment"]
         placeholders = {
             "agent_id": actor,
+            "base_ref": assignment["base_ref"],
+            "branch": assignment["branch"],
             "launch_id": launch_id,
             "project_id": self.config.project_id,
             "prompt_path": str(prompt_path),
@@ -878,6 +1264,7 @@ class Coordinator:
             "task_id": cleaned_task_id,
             "workspace": workspace.name,
             "workspace_path": str(workspace.path),
+            "worktree_path": assignment["worktree_path"],
         }
         command_argv = _worker_command_argv(workspace, command, placeholders) if execute else []
         result: dict[str, Any] = {
@@ -891,6 +1278,7 @@ class Coordinator:
             "agent_id": actor,
             "role": _first_text(role),
             "lease": claim.__dict__ if claim else None,
+            "coordination": coordination,
             "artifacts": {
                 "directory": str(launch_dir),
                 "prompt": str(prompt_path),
@@ -957,6 +1345,42 @@ class Coordinator:
         if renderer is None:
             renderer = DefaultPromptRenderer()
         return renderer.render_prompt(self.config, state, markdown=markdown)
+
+    def worker_coordination_context(
+        self,
+        *,
+        task_id: str = "",
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
+    ) -> dict[str, Any]:
+        """Return default worker coordination policy context for a task."""
+        return _worker_coordination_context(
+            self.config,
+            task_id=task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
+
+    def render_worker_prompt(
+        self,
+        task_id: str,
+        *,
+        markdown: bool = False,
+        branch: str = "",
+        base_ref: str = "",
+        worktree_path: str = "",
+    ) -> str:
+        """Render a task prompt with worker coordination context appended."""
+        prompt = self.render_prompt(task_id, markdown=markdown)
+        coordination = self.worker_coordination_context(
+            task_id=task_id,
+            branch=branch,
+            base_ref=base_ref,
+            worktree_path=worktree_path,
+        )
+        return _append_worker_coordination_prompt(prompt, coordination)
 
     def export(self) -> list[str]:
         """Export an audit snapshot through the configured exporter."""
@@ -1150,6 +1574,135 @@ def _top_level_state_path(config: ProjectConfig, key: str) -> Path | None:
     return config.resolve_state_path(key) if value else None
 
 
+def _completion_file_evidence_git_issues(
+    config: ProjectConfig,
+    states: list[TaskState],
+) -> list[dict[str, Any]]:
+    """Return completed-task file evidence pointing at untracked or unstaged files."""
+    git_root = _git_worktree_root(config.effective_config_path)
+    if git_root is None:
+        return []
+    issues: list[dict[str, Any]] = []
+    for state in states:
+        if state.task.status != "done":
+            continue
+        for uri in state.evidence:
+            evidence_path = _file_evidence_path(uri)
+            if not evidence_path:
+                continue
+            relative_path = _git_relative_evidence_path(git_root, evidence_path)
+            if relative_path is None:
+                continue
+            evidence_state = _git_file_evidence_state(git_root, relative_path)
+            if evidence_state == "clean":
+                continue
+            if evidence_state == "untracked":
+                reason = "file evidence points at an untracked workspace file"
+                kind = "file_evidence_untracked"
+            else:
+                reason = "file evidence points at an unstaged workspace file"
+                kind = "file_evidence_unstaged"
+            issues.append(
+                {
+                    "task_id": state.task.task_id,
+                    "title": state.task.title,
+                    "status": state.task.status,
+                    "kind": kind,
+                    "reason": reason,
+                    "evidence": [uri],
+                    "completion_action": "",
+                    "completed_by": "",
+                    "completed_at": "",
+                    "direct_merge": False,
+                }
+            )
+    return issues
+
+
+def _git_worktree_root(path: Path) -> Path | None:
+    """Return the containing Git worktree root, or ``None`` outside Git."""
+    start = path if path.is_dir() else path.parent
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    root = completed.stdout.strip().splitlines()
+    if not root:
+        return None
+    return Path(root[0]).resolve()
+
+
+def _file_evidence_path(uri: str) -> str:
+    """Return a local path from a file evidence URI, or an empty string."""
+    if not uri.startswith("file:"):
+        return ""
+    text = uri.removeprefix("file:")
+    if text.startswith("//"):
+        parsed = urlsplit(uri)
+        if parsed.netloc and parsed.netloc != "localhost":
+            return ""
+        text = parsed.path
+    return unquote(text).strip()
+
+
+def _git_relative_evidence_path(git_root: Path, evidence_path: str) -> str | None:
+    """Resolve evidence below the Git root and return a Git pathspec."""
+    path = Path(evidence_path).expanduser()
+    candidate = path if path.is_absolute() else git_root / path
+    git_root_text = os.path.abspath(os.path.normpath(str(git_root)))
+    candidate_text = os.path.abspath(os.path.normpath(str(candidate)))
+    try:
+        common_path = os.path.commonpath([git_root_text, candidate_text])
+    except ValueError:
+        return None
+    if common_path != git_root_text:
+        return None
+    pathspec = Path(os.path.relpath(candidate_text, git_root_text)).as_posix()
+    if pathspec == ".":
+        return None
+    return pathspec or None
+
+
+def _git_file_evidence_state(git_root: Path, relative_path: str) -> str:
+    """Return whether a Git pathspec is clean, untracked, or unstaged."""
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(git_root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+                "--",
+                relative_path,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return "clean"
+    if completed.returncode != 0:
+        return "clean"
+    status_lines = [line for line in completed.stdout.splitlines() if len(line) >= 2]
+    if any(line[:2] in {"??", "!!"} for line in status_lines):
+        return "untracked"
+    if any(line[1] != " " for line in status_lines if line[:2] != "??"):
+        return "unstaged"
+    return "clean"
+
+
 def _spool_path(config: ProjectConfig, value: Any) -> Path | None:
     """Resolve an optional path from the `spool` config block."""
     text = _first_text(value)
@@ -1229,6 +1782,17 @@ class _WorkerWorkspace:
     worker_command: list[str]
     host: str
     remote_path: str
+
+
+@dataclass(frozen=True)
+class _NotificationWorkspace:
+    """Resolved repository context for PR notification diagnostics."""
+
+    name: str
+    kind: str
+    path: Path
+    host: str = ""
+    remote_path: str = ""
 
 
 def _workspace_records(config: ProjectConfig) -> list[_WorkerWorkspace]:
@@ -1370,6 +1934,747 @@ def _workspace_to_dict(workspace: _WorkerWorkspace) -> dict[str, Any]:
     return payload
 
 
+def _worker_coordination_context(
+    config: ProjectConfig,
+    *,
+    workspace: _WorkerWorkspace | None = None,
+    task_id: str = "",
+    branch: str = "",
+    base_ref: str = "",
+    worktree_path: str = "",
+) -> dict[str, Any]:
+    """Return worker launch context for task worktree and PR policy."""
+    cleaned_task_id = _first_text(task_id)
+    assigned_worktree = _first_text(worktree_path)
+    if (
+        cleaned_task_id
+        and assigned_worktree
+        and _workspace_contains_config(
+            Path(assigned_worktree).expanduser(),
+            config,
+        )
+    ):
+        raise ValueError(
+            "launch-worker assigned worktree must not contain the canonical tracker "
+            "config; use an isolated task worktree or explicit non-canonical workspace"
+        )
+    assignment: dict[str, str] = {
+        "branch": _first_text(branch) or (f"codex/{cleaned_task_id}" if cleaned_task_id else ""),
+        "base_ref": _first_text(base_ref) or ("main" if cleaned_task_id else ""),
+        "worktree_path": assigned_worktree
+        or (str(workspace.path) if workspace is not None else ""),
+    }
+    return {
+        "policy": dict(config.coordination_policy),
+        "assignment": assignment,
+        "notes": [
+            "Use the assigned non-canonical worktree for implementation.",
+            "Parallel implementation agents must not write to the same worktree.",
+            "Reviewers should inspect this branch, worktree, or explicit patch content.",
+        ],
+    }
+
+
+def _append_worker_coordination_prompt(prompt: str, coordination: dict[str, Any]) -> str:
+    """Append worker coordination policy to a rendered task prompt."""
+    policy = coordination["policy"]
+    assignment = coordination["assignment"]
+    lines = [
+        "",
+        "## Coordination Context",
+        "",
+        f"- Worktree policy: `{policy['worktree_mode']}`",
+        f"- PR policy: `{policy['pr_mode']}`",
+    ]
+    if assignment["branch"]:
+        lines.append(f"- Assigned branch: `{assignment['branch']}`")
+    if assignment["base_ref"]:
+        lines.append(f"- Base ref: `{assignment['base_ref']}`")
+    if assignment["worktree_path"]:
+        lines.append(f"- Assigned worktree: `{assignment['worktree_path']}`")
+    lines.extend(
+        [
+            "- Use the assigned non-canonical worktree for implementation.",
+            "- Parallel implementation agents must not write to the same worktree.",
+            "- Reviewers should inspect this branch, worktree, or explicit patch content.",
+        ]
+    )
+    return prompt.rstrip() + "\n" + "\n".join(lines) + "\n"
+
+
+def _workspace_contains_config(workspace_path: Path, config: ProjectConfig) -> bool:
+    """Return true when a workspace contains the canonical/effective config file."""
+    config_path = (config.canonical_config_path or config.effective_config_path).resolve(
+        strict=False
+    )
+    workspace = workspace_path.resolve(strict=False)
+    if config_path == workspace:
+        return True
+    try:
+        config_path.relative_to(workspace)
+    except ValueError:
+        return False
+    return True
+
+
+def _notification_workspace(
+    config: ProjectConfig,
+    *,
+    workspace: str,
+    repo_path: str | Path | None,
+) -> _NotificationWorkspace:
+    """Resolve the workspace/repository path to diagnose."""
+    explicit_repo_path = _first_text(str(repo_path) if repo_path is not None else "")
+    if explicit_repo_path:
+        path = Path(explicit_repo_path).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return _NotificationWorkspace(
+            name=_first_text(workspace),
+            kind="local",
+            path=path.resolve(strict=False),
+        )
+    cleaned_workspace = _first_text(workspace)
+    if cleaned_workspace:
+        worker_workspace = _workspace_by_name(config, cleaned_workspace)
+        return _NotificationWorkspace(
+            name=worker_workspace.name,
+            kind=worker_workspace.kind,
+            path=worker_workspace.path,
+            host=worker_workspace.host,
+            remote_path=worker_workspace.remote_path,
+        )
+    return _NotificationWorkspace(name="", kind="local", path=config.root)
+
+
+def _default_pr_notification_setup_payload(
+    config: ProjectConfig,
+    workspace: _NotificationWorkspace,
+    *,
+    interventions: list[dict[str, Any]],
+    remote: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    """Run default PR notification setup diagnostics without side effects."""
+    remote_name = _first_text(remote) or "origin"
+    payload: dict[str, Any] = {
+        "project_id": config.project_id,
+        "ok": False,
+        "status": "checking",
+        "workspace": _notification_workspace_to_dict(workspace),
+        "repo": {
+            "path": str(workspace.path),
+            "remote": None,
+            "branch": "",
+        },
+        "target": None,
+        "auth": {
+            "method": "gh",
+            "checked": False,
+            "authenticated": False,
+            "error": "",
+        },
+        "posting": {
+            "live_supported": False,
+            "prepared_payload_supported": True,
+            "mode": "prepared_payload",
+        },
+        "issues": [],
+        "prepared_payload": _prepared_pr_notification_payload(
+            interventions,
+            target=None,
+        ),
+    }
+    issues: list[dict[str, str]] = payload["issues"]
+    if workspace.kind != "local":
+        _add_notification_issue(
+            issues,
+            code="unsupported_sandbox",
+            severity="error",
+            message=(
+                "PR notification setup checks currently require a local workspace path; "
+                f"workspace {workspace.name or '(unnamed)'} is {workspace.kind!r}."
+            ),
+            remediation="Run the setup check from a local checkout or use prepared payload output.",
+        )
+        return _finalize_pr_notification_payload(payload)
+
+    remote_check = _git_remote_check(workspace.path, remote_name, timeout_seconds)
+    payload["repo"]["remote"] = remote_check["remote"] if remote_check["ok"] else None
+    if not remote_check["ok"]:
+        _add_notification_issue(
+            issues,
+            code="missing_remote",
+            severity="error",
+            message=remote_check["detail"],
+            remediation=(
+                f"Add a Git remote named {remote_name!r} that points at the GitHub "
+                "repository for this worktree."
+            ),
+        )
+        return _finalize_pr_notification_payload(payload)
+
+    branch_check = _git_branch_check(workspace.path, timeout_seconds)
+    payload["repo"]["branch"] = branch_check["branch"]
+    if not branch_check["ok"]:
+        _add_notification_issue(
+            issues,
+            code="missing_pr_association",
+            severity="error",
+            message=branch_check["detail"],
+            remediation="Check out the task branch that has the associated pull request.",
+        )
+        return _finalize_pr_notification_payload(payload)
+
+    pr_check = _gh_pr_check(
+        workspace.path,
+        timeout_seconds,
+        remote_info=remote_check["remote"],
+        branch=branch_check["branch"],
+    )
+    if not pr_check["ok"]:
+        issue_code = (
+            "missing_auth" if pr_check["reason"] == "missing_auth" else "missing_pr_association"
+        )
+        remediation = (
+            "Authenticate the GitHub CLI for this checkout or use prepared payload output."
+            if issue_code == "missing_auth"
+            else "Open a pull request for the current branch or run the check from that branch."
+        )
+        _add_notification_issue(
+            issues,
+            code=issue_code,
+            severity="error",
+            message=pr_check["detail"],
+            remediation=remediation,
+        )
+        return _finalize_pr_notification_payload(payload)
+
+    payload["target"] = pr_check["target"]
+    payload["prepared_payload"] = _prepared_pr_notification_payload(
+        interventions,
+        target=pr_check["target"],
+    )
+
+    auth_check = _gh_auth_check(workspace.path, timeout_seconds)
+    payload["auth"] = auth_check
+    if not auth_check["authenticated"]:
+        _add_notification_issue(
+            issues,
+            code="missing_auth",
+            severity="error",
+            message=auth_check["error"] or "GitHub CLI authentication is unavailable.",
+            remediation="Run `gh auth login` outside the sandbox or use prepared payload output.",
+        )
+        return _finalize_pr_notification_payload(payload)
+
+    if _live_pr_notifications_enabled(config):
+        payload["posting"]["live_supported"] = True
+        payload["posting"]["mode"] = "live_comment"
+    else:
+        _add_notification_issue(
+            issues,
+            code="unsupported_sandbox",
+            severity="warning",
+            message=(
+                "Live PR comments are not enabled for this environment; prepared "
+                "payload output is available."
+            ),
+            remediation=(
+                "Set notifications.github.allow_live to true only in an environment "
+                "where posting PR comments is safe."
+            ),
+        )
+    return _finalize_pr_notification_payload(payload)
+
+
+def _notification_workspace_to_dict(workspace: _NotificationWorkspace) -> dict[str, str]:
+    """Return a JSON-friendly notification workspace payload."""
+    payload = {
+        "name": workspace.name,
+        "kind": workspace.kind,
+        "path": str(workspace.path),
+    }
+    if workspace.host:
+        payload["host"] = workspace.host
+    if workspace.remote_path:
+        payload["remote_path"] = workspace.remote_path
+    return payload
+
+
+def _finalize_pr_notification_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Set final status and ok fields on a PR notification diagnostic payload."""
+    error_issues = [issue for issue in payload["issues"] if issue.get("severity") == "error"]
+    payload["ok"] = not error_issues
+    if error_issues:
+        payload["status"] = str(error_issues[0]["code"])
+    elif payload["issues"]:
+        payload["status"] = str(payload["issues"][0]["code"])
+    else:
+        payload["status"] = "ok"
+    return payload
+
+
+def _add_notification_issue(
+    issues: list[dict[str, str]],
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    remediation: str,
+) -> None:
+    """Append one normalized notification setup issue."""
+    issues.append(
+        {
+            "code": code,
+            "severity": severity,
+            "message": message,
+            "remediation": remediation,
+        }
+    )
+
+
+def _git_remote_check(path: Path, remote: str, timeout_seconds: int) -> dict[str, Any]:
+    """Return diagnostic information for a configured Git remote."""
+    command = ["git", "-C", str(path), "remote", "get-url", remote]
+    completed = _run_setup_check_command(command, path=path, timeout_seconds=timeout_seconds)
+    remote_url = completed.stdout.strip()
+    if completed.returncode != 0 or not remote_url:
+        return {
+            "ok": False,
+            "detail": _command_failure_detail(completed, f"Git remote {remote!r} is missing."),
+        }
+    parsed = _parse_git_remote(remote_url)
+    if parsed is None:
+        return {
+            "ok": False,
+            "detail": f"Git remote {remote!r} is not a supported owner/repo URL: {remote_url}",
+        }
+    return {
+        "ok": True,
+        "remote": {
+            "name": remote,
+            "url": remote_url,
+            **parsed,
+        },
+    }
+
+
+def _git_branch_check(path: Path, timeout_seconds: int) -> _GitBranchCheck:
+    """Return diagnostic information for the current Git branch."""
+    command = ["git", "-C", str(path), "branch", "--show-current"]
+    completed = _run_setup_check_command(command, path=path, timeout_seconds=timeout_seconds)
+    branch = completed.stdout.strip()
+    if completed.returncode != 0 or not branch:
+        return {
+            "ok": False,
+            "branch": "",
+            "detail": _command_failure_detail(
+                completed,
+                "Current checkout is detached or no branch is available.",
+            ),
+        }
+    return {"ok": True, "branch": branch, "detail": ""}
+
+
+def _gh_pr_check(
+    path: Path,
+    timeout_seconds: int,
+    *,
+    remote_info: dict[str, str],
+    branch: str,
+) -> dict[str, Any]:
+    """Return diagnostic information for the PR associated with the branch."""
+    command = [
+        "gh",
+        "pr",
+        "view",
+        branch,
+        "--repo",
+        _gh_repo_argument(remote_info),
+        "--json",
+        "number,url,headRefName,baseRefName,state",
+    ]
+    completed = _run_setup_check_command(command, path=path, timeout_seconds=timeout_seconds)
+    if completed.returncode != 0:
+        detail = _command_failure_detail(
+            completed,
+            "No pull request is associated with the current branch.",
+        )
+        return {
+            "ok": False,
+            "reason": (
+                "missing_auth"
+                if completed.returncode in {126, 127} or _looks_like_auth_failure(detail)
+                else "missing_pr"
+            ),
+            "detail": detail,
+        }
+    try:
+        data = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "ok": False,
+            "reason": "missing_pr",
+            "detail": "GitHub CLI returned non-JSON PR data.",
+        }
+    number = data.get("number")
+    url = _first_text(data.get("url"))
+    if not isinstance(number, int) or not url:
+        return {
+            "ok": False,
+            "reason": "missing_pr",
+            "detail": "GitHub CLI did not return a PR number and URL.",
+        }
+    remote = _parse_git_remote(url)
+    if remote is None:
+        return {
+            "ok": False,
+            "reason": "missing_pr",
+            "detail": "GitHub CLI returned a PR URL that does not identify a repository.",
+        }
+    mismatch = _remote_target_mismatch(remote_info, remote)
+    if mismatch:
+        return {
+            "ok": False,
+            "reason": "missing_pr",
+            "detail": (
+                "Resolved PR does not match selected remote "
+                f"{remote_info['owner']}/{remote_info['repo']}: {mismatch}."
+            ),
+        }
+    target: dict[str, Any] = {
+        "kind": "pull_request",
+        "number": number,
+        "url": url,
+        "head": _first_text(data.get("headRefName")),
+        "base": _first_text(data.get("baseRefName")),
+        "state": _first_text(data.get("state")),
+        **remote,
+    }
+    return {"ok": True, "target": target, "detail": ""}
+
+
+def _gh_auth_check(path: Path, timeout_seconds: int) -> dict[str, Any]:
+    """Return GitHub CLI authentication diagnostics."""
+    command = ["gh", "auth", "status"]
+    completed = _run_setup_check_command(command, path=path, timeout_seconds=timeout_seconds)
+    if completed.returncode == 0:
+        return {
+            "method": "gh",
+            "checked": True,
+            "authenticated": True,
+            "error": "",
+        }
+    return {
+        "method": "gh",
+        "checked": True,
+        "authenticated": False,
+        "error": _command_failure_detail(
+            completed,
+            "GitHub CLI authentication is unavailable.",
+        ),
+    }
+
+
+def _run_setup_check_command(
+    command: list[str],
+    *,
+    path: Path,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run a read-only setup diagnostic command."""
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            cwd=path,
+            timeout=timeout_seconds or None,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_output_text(exc.stdout)
+        stderr = _timeout_output_text(exc.stderr)
+        if stderr:
+            stderr += "\n"
+        stderr += f"setup check command timed out after {exc.timeout} seconds\n"
+        return subprocess.CompletedProcess(command, returncode=124, stdout=stdout, stderr=stderr)
+    except FileNotFoundError as exc:
+        return _setup_check_start_failed(command, returncode=127, exc=exc)
+    except PermissionError as exc:
+        return _setup_check_start_failed(command, returncode=126, exc=exc)
+    except OSError as exc:
+        return _setup_check_start_failed(command, returncode=1, exc=exc)
+
+
+def _setup_check_start_failed(
+    command: list[str],
+    *,
+    returncode: int,
+    exc: OSError,
+) -> subprocess.CompletedProcess[str]:
+    """Return a failed completed process for setup command startup errors."""
+    return subprocess.CompletedProcess(
+        command,
+        returncode=returncode,
+        stdout="",
+        stderr=f"setup check command failed to start: {exc}\n",
+    )
+
+
+def _command_failure_detail(
+    completed: subprocess.CompletedProcess[str],
+    fallback: str,
+) -> str:
+    """Return a concise command failure detail."""
+    output = (completed.stderr or completed.stdout or "").strip()
+    if output:
+        return output.splitlines()[-1]
+    return fallback
+
+
+def _parse_git_remote(url: str) -> dict[str, str] | None:
+    """Parse common GitHub remote/PR URLs into host, owner, and repo fields."""
+    text = _first_text(url)
+    if not text:
+        return None
+    host = ""
+    path = ""
+    if text.startswith("git@") and ":" in text:
+        host_path = text.removeprefix("git@")
+        host, path = host_path.split(":", 1)
+    else:
+        parsed = urlsplit(text)
+        host = parsed.hostname or ""
+        path = parsed.path.lstrip("/")
+    if not host or not path:
+        return None
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return None
+    return {
+        "host": host,
+        "owner": parts[0],
+        "repo": parts[1],
+    }
+
+
+def _gh_repo_argument(remote_info: dict[str, str]) -> str:
+    """Return a GitHub CLI --repo argument for a parsed remote."""
+    owner_repo = f"{remote_info['owner']}/{remote_info['repo']}"
+    host = remote_info.get("host", "")
+    return owner_repo if host in {"", "github.com"} else f"{host}/{owner_repo}"
+
+
+def _remote_target_mismatch(
+    remote_info: dict[str, str],
+    target_info: dict[str, str],
+) -> str:
+    """Return a concise mismatch detail when a PR target differs from remote."""
+    for key in ("host", "owner", "repo"):
+        if remote_info.get(key) != target_info.get(key):
+            return (
+                f"{key} is {target_info.get(key) or '(missing)'} "
+                f"instead of {remote_info.get(key) or '(missing)'}"
+            )
+    return ""
+
+
+def _looks_like_auth_failure(text: str) -> bool:
+    """Return whether command output looks like an auth/tooling failure."""
+    lowered = text.lower()
+    auth_needles = (
+        "not logged",
+        "authenticate",
+        "authentication",
+        "gh auth login",
+        "oauth",
+        "token",
+    )
+    return any(needle in lowered for needle in auth_needles)
+
+
+def _prepared_pr_notification_payload(
+    interventions: list[dict[str, Any]],
+    *,
+    target: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a prepared PR comment payload for open intervention records."""
+    lines = ["Agent tracker intervention notification"]
+    if target:
+        lines.append(f"Target PR: {target.get('url', '')}")
+    if interventions:
+        lines.append("")
+        lines.append("Open interventions:")
+        for intervention in interventions:
+            summary = _first_text(intervention.get("summary")) or "(no summary)"
+            task_id = _first_text(intervention.get("task_id"))
+            suffix = f" for task {task_id}" if task_id else ""
+            lines.append(f"- {intervention['id']}{suffix}: {summary}")
+    else:
+        lines.append("")
+        lines.append("No open interventions are currently recorded.")
+    lines.append("")
+    lines.append("Managed by agent-tracker intervention notifications.")
+    return {
+        "surface": "pull_request_comment",
+        "body": "\n".join(lines),
+        "intervention_ids": [str(item["id"]) for item in interventions],
+        "interventions": interventions,
+    }
+
+
+def _notification_target_key(target: Any) -> str:
+    """Return a stable delivery key for a notification target."""
+    if not isinstance(target, dict):
+        return ""
+    host = _first_text(target.get("host")) or "github.com"
+    owner = _first_text(target.get("owner"))
+    repo = _first_text(target.get("repo"))
+    number = target.get("number")
+    if not owner or not repo or not isinstance(number, int):
+        return ""
+    return f"github:{host}/{owner}/{repo}#pull/{number}"
+
+
+def _notification_payload_hash(payload: dict[str, Any]) -> str:
+    """Return a deterministic content hash for one notification payload."""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _prepared_pr_notification_path(
+    config: ProjectConfig,
+    override: str | Path | None,
+) -> Path:
+    """Return the configured prepared PR notification payload path."""
+    value = _first_text(str(override) if override is not None else "")
+    if not value:
+        notifications = config.raw.get("notifications", {})
+        github = notifications.get("github", {}) if isinstance(notifications, dict) else {}
+        if isinstance(github, dict):
+            value = _first_text(github.get("prepared_payload_path"))
+    path = Path(value or "exports/pr-notification.json").expanduser()
+    if not path.is_absolute():
+        path = config.effective_state_root / path
+    return path
+
+
+def _live_export_satisfied(
+    existing: NotificationDeliveryRecord | None,
+    payload_hash: str,
+) -> bool:
+    """Return whether an existing live PR comment already has this payload."""
+    if existing is None:
+        return False
+    return (
+        existing.payload_hash == payload_hash
+        and existing.status in {"posted", "updated"}
+        and bool(existing.comment_id)
+    )
+
+
+def _prepared_export_satisfied(
+    existing: NotificationDeliveryRecord | None,
+    payload_hash: str,
+    path: Path,
+) -> bool:
+    """Return whether an existing prepared payload file already has this payload."""
+    if existing is None or existing.status != "prepared":
+        return False
+    return (
+        existing.payload_hash == payload_hash
+        and existing.metadata.get("prepared_payload_path") == str(path)
+        and path.exists()
+    )
+
+
+def _post_pr_notification(
+    target: dict[str, Any],
+    prepared_payload: dict[str, Any],
+    *,
+    existing: NotificationDeliveryRecord | None,
+    timeout_seconds: int,
+    path: Path,
+) -> dict[str, str]:
+    """Create or update the PR comment for a prepared notification payload."""
+    comment_id = _first_text(existing.comment_id if existing else "")
+    body = _first_text(prepared_payload.get("body"))
+    if not body:
+        raise RuntimeError("notification payload body is empty")
+    repo_path = _gh_issue_comments_path(target)
+    command = _gh_api_command(target, repo_path, body=body)
+    status = "posted"
+    action = "created"
+    if comment_id:
+        command = _gh_api_command(
+            target,
+            f"repos/{target['owner']}/{target['repo']}/issues/comments/{quote(comment_id)}",
+            method="PATCH",
+            body=body,
+        )
+        status = "updated"
+        action = "updated"
+    completed = _run_setup_check_command(command, path=path, timeout_seconds=timeout_seconds)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            _command_failure_detail(completed, "GitHub CLI failed to post PR notification.")
+        )
+    if not comment_id:
+        try:
+            response = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("GitHub CLI returned non-JSON comment data.") from exc
+        raw_comment_id = response.get("id")
+        comment_id = str(raw_comment_id) if raw_comment_id else ""
+        if not comment_id:
+            raise RuntimeError("GitHub CLI did not return a PR comment id.")
+    return {"action": action, "status": status, "comment_id": comment_id}
+
+
+def _gh_api_command(
+    target: dict[str, Any],
+    path: str,
+    *,
+    body: str,
+    method: str = "POST",
+) -> list[str]:
+    """Return a GitHub CLI API command for an issue comment operation."""
+    command = ["gh", "api", path.lstrip("/")]
+    host = _first_text(target.get("host"))
+    if host and host != "github.com":
+        command.extend(["--hostname", host])
+    if method != "POST":
+        command.extend(["-X", method])
+    command.extend(["-f", f"body={body}"])
+    return command
+
+
+def _gh_issue_comments_path(target: dict[str, Any]) -> str:
+    """Return the GitHub API path for PR issue comments."""
+    return f"repos/{target['owner']}/{target['repo']}/issues/{target['number']}/comments"
+
+
+def _utc_timestamp() -> str:
+    """Return the current UTC timestamp."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _live_pr_notifications_enabled(config: ProjectConfig) -> bool:
+    """Return whether config explicitly permits live PR comments."""
+    notifications = config.raw.get("notifications", {})
+    if not isinstance(notifications, dict):
+        return False
+    github = notifications.get("github", {})
+    if not isinstance(github, dict):
+        return False
+    return github.get("allow_live") is True
+
+
 def _worker_command_argv(
     workspace: _WorkerWorkspace,
     command: list[str] | None,
@@ -1389,7 +2694,7 @@ def _default_worker_command() -> list[str]:
         "codex",
         "exec",
         "--cd",
-        "{workspace_path}",
+        "{worktree_path}",
         "--output-last-message",
         "{report_path}",
         "-",
@@ -1418,11 +2723,14 @@ def _run_worker_command(
     """Run a worker command in a local workspace."""
     process_env = {
         "AGENT_TRACKER_WORKER_AGENT_ID": env["agent_id"],
+        "AGENT_TRACKER_WORKER_BASE_REF": env["base_ref"],
+        "AGENT_TRACKER_WORKER_BRANCH": env["branch"],
         "AGENT_TRACKER_WORKER_LAUNCH_ID": env["launch_id"],
         "AGENT_TRACKER_WORKER_PROMPT": env["prompt_path"],
         "AGENT_TRACKER_WORKER_REPORT": env["report_path"],
         "AGENT_TRACKER_WORKER_TASK_ID": env["task_id"],
         "AGENT_TRACKER_WORKER_WORKSPACE": env["workspace"],
+        "AGENT_TRACKER_WORKER_WORKTREE": env["worktree_path"],
     }
     try:
         completed = subprocess.run(
@@ -1430,7 +2738,7 @@ def _run_worker_command(
             input=prompt,
             text=True,
             capture_output=True,
-            cwd=workspace.path,
+            cwd=Path(env["worktree_path"]).expanduser(),
             env={**os.environ, **process_env},
             timeout=timeout_seconds or None,
             check=False,
