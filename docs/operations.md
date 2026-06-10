@@ -193,7 +193,7 @@ The human output is grouped under stable headings:
 - Blocked;
 - Recently completed.
 
-Blocked entries include unsatisfied requirement details from the evaluated
+Blocked entries include short blocker summaries derived from the evaluated
 `requirements` data. Ready and waiting entries show `next_action` and latest
 evidence when available. Recently completed entries are ordered from completion
 audit records, not task priority.
@@ -201,8 +201,8 @@ audit records, not task priority.
 Human overview output wraps long task titles, blockers, next actions, evidence,
 and completion details at a standard terminal width. Wrapped task titles use a
 distinct continuation indent so they do not read like `next`, `blocker`, or
-other detail fields. Each group reports a count and is limited for readability;
-pass `--limit 0` to show every grouped task.
+other detail fields. Each group reports a count and defaults to five visible
+items for readability; pass `--limit 0` to show every grouped task.
 
 Use JSON output for automation:
 
