@@ -202,18 +202,22 @@ agent-tracker next --config demo-tracker/project.json --role maintainer --limit 
 agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200
 ```
 
-Human `status`, `overview`, `next`, and intake output is rendered with Rich for
-readable wrapping and alignment without decorative panels or box-drawing
-characters by default. Human `overview` is a quick triage view: it shows count
-summaries, an attention list for active/review/merge work, blocked tasks with
-their current blockers, ready task titles, and a short recent-completion tail.
+Human `status`, `overview`, `next`, `show`, intake list, and proposal list
+output is rendered with Rich for readable wrapping and alignment without
+decorative panels or box-drawing characters by default. Human output may use
+restrained colour for headings, statuses, and muted metadata when the terminal
+supports it; pass `--no-color` or set `NO_COLOR` to disable ANSI colour.
+Human `overview` is a quick triage view: it shows count summaries, an attention
+list for active/review/merge work, blocked tasks with their current blockers,
+ready task titles, and a short recent-completion tail.
 It intentionally omits full `next_action` prose and evidence paths; use
 `agent-tracker overview --wide` when a wider terminal should show concise
 next-action, blocker, evidence, and completion context, or
 `agent-tracker show <task-id>` for a full human detail drilldown. Use
-`agent-tracker overview --plain` for grep-friendly line-oriented text. For
-automation, add `--json` to `next`, `status`, `overview`, or intake list
-commands; JSON output is not wrapped or reformatted.
+`agent-tracker overview --plain` for grep-friendly line-oriented text. Plain
+overview and JSON output are never styled. For automation, add `--json` to
+`next`, `status`, `overview`, `show`, intake list, or proposal list commands;
+JSON output is not wrapped or reformatted.
 
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
 the token; `heartbeat`, `complete`, and `fail` require it.

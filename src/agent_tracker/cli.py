@@ -77,9 +77,10 @@ def print_json(payload: Any) -> None:
     print(json.dumps(payload, indent=2))
 
 
-def human_renderer() -> HumanOutputRenderer:
+def human_renderer(args: argparse.Namespace | None = None) -> HumanOutputRenderer:
     """Return a human output renderer bound to the current stdout stream."""
-    return HumanOutputRenderer()
+    color = False if getattr(args, "no_color", False) else None
+    return HumanOutputRenderer(color=color)
 
 
 def print_overview(payload: dict[str, Any]) -> None:
@@ -294,7 +295,7 @@ def command_status(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    human_renderer().status(payload)
+    human_renderer(args).status(payload)
     return 0
 
 
@@ -311,9 +312,9 @@ def command_overview(args: argparse.Namespace) -> int:
         print_plain_overview(payload)
         return 0
     if args.wide:
-        print_wide_overview(payload)
+        human_renderer(args).overview_wide(payload)
         return 0
-    print_overview(payload)
+    human_renderer(args).overview(payload)
     return 0
 
 
@@ -328,7 +329,7 @@ def command_next(args: argparse.Namespace) -> int:
     if args.json:
         print_json([state_to_dict(state) for state in ready])
         return 0
-    human_renderer().next_tasks(ready)
+    human_renderer(args).next_tasks(ready)
     return 0
 
 
@@ -358,7 +359,7 @@ def command_show(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    human_renderer().task_detail(payload)
+    human_renderer(args).task_detail(payload)
     return 0
 
 
@@ -784,7 +785,7 @@ def command_list_intake(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    human_renderer().intake(payload)
+    human_renderer(args).intake(payload)
     return 0
 
 
@@ -879,7 +880,7 @@ def command_list_proposals(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
-    human_renderer().proposals(payload)
+    human_renderer(args).proposals(payload)
     return 0
 
 
@@ -902,6 +903,15 @@ def add_common(parser: argparse.ArgumentParser) -> None:
         "--db",
         default="",
         help=f"Override SQLite DB path. Defaults to ${PROJECT_DB_ENV_VAR}.",
+    )
+
+
+def add_human_output_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add common human-rendering controls."""
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI colour in human output. JSON and plain modes are unchanged.",
     )
 
 
@@ -1020,6 +1030,7 @@ def add_list_intake_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments for commands that list raw intake."""
     add_common(parser)
     parser.add_argument("--json", action="store_true")
+    add_human_output_arguments(parser)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--status", default="")
     parser.add_argument("--kind", default="")
@@ -1058,9 +1069,14 @@ def _typer_intake_callback(
         "--db",
         help=f"Override SQLite DB path. Defaults to ${PROJECT_DB_ENV_VAR}.",
     ),
+    no_color: bool = typer.Option(
+        False,
+        "--no-color",
+        help="Disable ANSI colour in human output.",
+    ),
 ) -> None:
     """Share common options with grouped intake subcommands."""
-    ctx.obj = {"config": config, "db": db}
+    ctx.obj = {"config": config, "db": db, "no_color": no_color}
 
 
 def _typer_common_value(ctx: typer.Context, value: str, key: str) -> str:
@@ -1070,6 +1086,15 @@ def _typer_common_value(ctx: typer.Context, value: str, key: str) -> str:
     if isinstance(ctx.obj, dict):
         return str(ctx.obj.get(key) or "")
     return ""
+
+
+def _typer_common_bool(ctx: typer.Context, value: bool, key: str) -> bool:
+    """Return a leaf boolean option value, falling back to a Typer group option."""
+    if value:
+        return value
+    if isinstance(ctx.obj, dict):
+        return bool(ctx.obj.get(key))
+    return False
 
 
 @intake_typer_app.command("record")
@@ -1174,6 +1199,7 @@ def _typer_list_intake(
     config: str = typer.Option("", "--config"),
     db: str = typer.Option("", "--db"),
     json_output: bool = typer.Option(False, "--json", help="Print JSON."),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colour."),
     limit: int = typer.Option(0, "--limit"),
     status: str = typer.Option("", "--status"),
     kind: str = typer.Option("", "--kind"),
@@ -1184,6 +1210,7 @@ def _typer_list_intake(
         config=_typer_common_value(ctx, config, "config"),
         db=_typer_common_value(ctx, db, "db"),
         json=json_output,
+        no_color=_typer_common_bool(ctx, no_color, "no_color"),
         limit=limit,
         status=status,
         kind=kind,
@@ -1284,6 +1311,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show project status.")
     add_common(status)
     status.add_argument("--json", action="store_true")
+    add_human_output_arguments(status)
     status.add_argument("--recover-stale-leases", action="store_true")
     status.set_defaults(func=command_status)
 
@@ -1302,6 +1330,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a width-aware human summary with targeted context.",
     )
     overview.add_argument("--recover-stale-leases", action="store_true")
+    add_human_output_arguments(overview)
     overview.add_argument(
         "--limit",
         type=int,
@@ -1313,6 +1342,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_cmd = sub.add_parser("next", help="Show ready tasks.")
     add_common(next_cmd)
     next_cmd.add_argument("--json", action="store_true")
+    add_human_output_arguments(next_cmd)
     next_cmd.add_argument("--limit", type=int, default=3)
     next_cmd.add_argument("--repo", default="")
     next_cmd.add_argument("--role", default="")
@@ -1331,6 +1361,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(show)
     show.add_argument("task_id")
     show.add_argument("--json", action="store_true")
+    add_human_output_arguments(show)
     show.add_argument("--recover-stale-leases", action="store_true")
     show.set_defaults(func=command_show)
 
@@ -1738,6 +1769,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_proposals = sub.add_parser("list-proposals", help="List proposed task contracts.")
     add_common(list_proposals)
     list_proposals.add_argument("--json", action="store_true")
+    add_human_output_arguments(list_proposals)
     list_proposals.add_argument("--limit", type=int, default=0)
     list_proposals.add_argument("--status", default="")
     list_proposals.add_argument("--intake-id", default="")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import sys
 import textwrap
@@ -17,8 +18,36 @@ from agent_tracker.models import TaskState
 
 OVERVIEW_HANDLE_WIDTH = 24
 OVERVIEW_STATUS_WIDTH = 8
-OVERVIEW_HEADER_STYLE = "bold"
+OVERVIEW_HEADER_STYLE = "bold cyan"
 OVERVIEW_MUTED_STYLE = "dim"
+OVERVIEW_ATTENTION_STYLE = "yellow"
+OVERVIEW_BLOCKED_STYLE = "bold red"
+OVERVIEW_READY_STYLE = "green"
+OVERVIEW_RECENT_STYLE = "dim"
+STATUS_STYLES = {
+    "active": "yellow",
+    "awaiting_integration": "cyan",
+    "awaiting_merge": "cyan",
+    "awaiting_pr": "cyan",
+    "awaiting_review": "magenta",
+    "blocked": "bold red",
+    "claimed": "yellow",
+    "closed": "dim",
+    "deferred": "dim",
+    "done": "green",
+    "failed": "bold red",
+    "in_progress": "yellow",
+    "integration": "cyan",
+    "open": "green",
+    "pending": "green",
+    "promoted": "green",
+    "proposed": "magenta",
+    "ready": "green",
+    "rejected": "red",
+    "review": "magenta",
+    "triaged": "cyan",
+    "waiting_evidence": "yellow",
+}
 OVERVIEW_GROUPS = (
     ("ready", "Ready"),
     ("active", "Active"),
@@ -32,12 +61,34 @@ OVERVIEW_GROUPS = (
 class HumanOutputRenderer:
     """Render copy-paste-safe human CLI output."""
 
-    def __init__(self, output: TextIO | None = None, *, width: int | None = None) -> None:
-        """Bind the renderer to an output stream."""
+    def __init__(
+        self,
+        output: TextIO | None = None,
+        *,
+        width: int | None = None,
+        color: bool | None = None,
+    ) -> None:
+        """Bind the renderer to an output stream.
+
+        Args:
+            output: Destination stream. Defaults to stdout.
+            width: Optional deterministic terminal width for wrapping.
+            color: Optional colour policy. ``True`` enables colour for human
+                output, ``False`` disables it, and ``None`` enables colour only
+                for interactive terminals while respecting ``NO_COLOR``.
+        """
         self._output = output or sys.stdout
         console_options: dict[str, Any] = {"file": self._output, "highlight": False}
         if width is not None:
             console_options["width"] = width
+        no_color_requested = color is False or "NO_COLOR" in os.environ
+        default_non_tty = color is None and not self._output_is_tty()
+        self._styles_enabled = not (no_color_requested or default_non_tty)
+        if color is True:
+            console_options["force_terminal"] = True
+            console_options["color_system"] = "standard"
+        if no_color_requested or default_non_tty:
+            console_options["no_color"] = True
         self._console = Console(**console_options)
 
     def line(
@@ -60,7 +111,7 @@ class HumanOutputRenderer:
                     break_long_words=break_long_words,
                     break_on_hyphens=False,
                 ),
-                style=style or "",
+                style=self._style(style),
             )
         )
 
@@ -84,18 +135,19 @@ class HumanOutputRenderer:
             initial_indent=prefix,
             subsequent_indent=" " * len(prefix),
             break_long_words=break_long_words,
+            style=self._style(self._value_style(label, value)),
         )
 
     def kv_table(self, rows: list[tuple[str, object]], *, label_width: int = 12) -> None:
         """Print aligned key/value rows using Rich text without borders."""
         for label, value in rows:
-            line = Text(f"  {label:<{label_width}} ")
-            line.append(str(value))
+            line = Text(f"  {label:<{label_width}} ", style=self._style(OVERVIEW_MUTED_STYLE))
+            line.append(str(value), style=self._style(self._value_style(label, value)))
             self._console.print(line)
 
     def section(self, heading: str) -> None:
         """Print a plain section heading without box-drawing decoration."""
-        self._console.print(Text(heading, style="bold"))
+        self._console.print(Text(heading, style=self._style(OVERVIEW_HEADER_STYLE)))
 
     def raw_line(self, text: str) -> None:
         """Print an unwrapped line for legacy plain-print output."""
@@ -103,7 +155,9 @@ class HumanOutputRenderer:
 
     def status(self, payload: dict[str, Any]) -> None:
         """Render a project status summary."""
-        self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
+        self._console.print(
+            Text(f"{payload['name']} ({payload['project_id']})", style=self._style("bold"))
+        )
         self.section("Paths")
         path_rows: list[tuple[str, object]] = [
             ("config", payload["config_path"]),
@@ -125,7 +179,9 @@ class HumanOutputRenderer:
 
     def overview(self, payload: dict[str, Any]) -> None:
         """Render a grouped project overview."""
-        self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
+        self._console.print(
+            Text(f"{payload['name']} ({payload['project_id']})", style=self._style("bold"))
+        )
         self.line(self._overview_summary(payload), style=OVERVIEW_MUTED_STYLE)
         self._console.print()
         self._overview_attention(payload)
@@ -171,7 +227,9 @@ class HumanOutputRenderer:
             terminal width. The method intentionally keeps one task per logical
             row and includes only the extra context useful for wide terminals.
         """
-        self._console.print(Text(f"{payload['name']} ({payload['project_id']})", style="bold"))
+        self._console.print(
+            Text(f"{payload['name']} ({payload['project_id']})", style=self._style("bold"))
+        )
         self.line(self._overview_summary(payload), style=OVERVIEW_MUTED_STYLE)
         self._console.print()
         self._overview_attention(payload, wide=True)
@@ -320,9 +378,9 @@ class HumanOutputRenderer:
         total = sum(counts[key] for key in keys)
         if not items and total == 0:
             return
-        self._console.print(Text("ATTENTION", style=OVERVIEW_HEADER_STYLE))
+        self._console.print(Text("ATTENTION", style=self._style(OVERVIEW_HEADER_STYLE)))
         if not items:
-            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+            self._console.print(Text("  (none)", style=self._style(OVERVIEW_MUTED_STYLE)))
         for group, item in items:
             if wide:
                 self._overview_wide_row(group, item)
@@ -337,9 +395,9 @@ class HumanOutputRenderer:
         total = payload["counts"]["blocked"]
         if not items and total == 0:
             return
-        self._console.print(Text(f"BLOCKED ({total})", style=OVERVIEW_HEADER_STYLE))
+        self._console.print(Text(f"BLOCKED ({total})", style=self._style(OVERVIEW_BLOCKED_STYLE)))
         if not items:
-            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+            self._console.print(Text("  (none)", style=self._style(OVERVIEW_MUTED_STYLE)))
         for item in items:
             if wide:
                 self._overview_wide_row("blocked", item)
@@ -352,9 +410,9 @@ class HumanOutputRenderer:
         """Render ready work as a title-first task index."""
         items = payload["groups"]["ready"]
         total = payload["counts"]["ready"]
-        self._console.print(Text(f"READY ({total})", style=OVERVIEW_HEADER_STYLE))
+        self._console.print(Text(f"READY ({total})", style=self._style(OVERVIEW_READY_STYLE)))
         if not items:
-            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+            self._console.print(Text("  (none)", style=self._style(OVERVIEW_MUTED_STYLE)))
         for item in items:
             if wide:
                 self._overview_wide_row("ready", item)
@@ -367,9 +425,9 @@ class HumanOutputRenderer:
         """Render recent completions as a short history tail."""
         items = payload["groups"]["recently_completed"]
         total = payload["counts"]["recently_completed"]
-        self._console.print(Text(f"RECENT ({total})", style=OVERVIEW_HEADER_STYLE))
+        self._console.print(Text(f"RECENT ({total})", style=self._style(OVERVIEW_RECENT_STYLE)))
         if not items:
-            self._console.print(Text("  (none)", style=OVERVIEW_MUTED_STYLE))
+            self._console.print(Text("  (none)", style=self._style(OVERVIEW_MUTED_STYLE)))
         for item in items:
             if wide:
                 self._overview_wide_row("recently_completed", item)
@@ -407,6 +465,7 @@ class HumanOutputRenderer:
             initial_indent=prefix,
             subsequent_indent=" " * len(prefix),
             break_long_words=True,
+            style=self._overview_group_style(group),
         )
 
     def _overview_blocked_row(self, item: dict[str, Any]) -> None:
@@ -417,6 +476,7 @@ class HumanOutputRenderer:
             initial_indent=prefix,
             subsequent_indent=" " * len(prefix),
             break_long_words=True,
+            style=OVERVIEW_BLOCKED_STYLE,
         )
         blocker = self._overview_blocker(item)
         if blocker:
@@ -430,6 +490,7 @@ class HumanOutputRenderer:
             initial_indent=prefix,
             subsequent_indent=" " * len(prefix),
             break_long_words=True,
+            style=OVERVIEW_READY_STYLE,
         )
 
     def _overview_recent_row(self, item: dict[str, Any]) -> None:
@@ -441,7 +502,7 @@ class HumanOutputRenderer:
             initial_indent=prefix,
             subsequent_indent=" " * len(prefix),
             break_long_words=True,
-            style=OVERVIEW_MUTED_STYLE,
+            style=OVERVIEW_RECENT_STYLE,
         )
 
     def _overview_wide_row(self, group: str, item: dict[str, Any]) -> None:
@@ -457,7 +518,7 @@ class HumanOutputRenderer:
             initial_indent=prefix,
             subsequent_indent=" " * len(prefix),
             break_long_words=True,
-            style=OVERVIEW_MUTED_STYLE if group == "recently_completed" else None,
+            style=self._overview_group_style(group),
         )
 
     def _overview_wide_prefix(self, status: str, item: dict[str, Any]) -> tuple[str, str]:
@@ -493,7 +554,7 @@ class HumanOutputRenderer:
         self._console.print(
             Text(
                 f"  ... {hidden_count} more {noun}; use --limit 0 to show all",
-                style=OVERVIEW_MUTED_STYLE,
+                style=self._style(OVERVIEW_MUTED_STYLE),
             )
         )
 
@@ -518,6 +579,36 @@ class HumanOutputRenderer:
         if len(blockers) == 1:
             return blockers[0]
         return f"{blockers[0]} (+{len(blockers) - 1} more)"
+
+    def _overview_group_style(self, group: str) -> str | None:
+        """Return the restrained colour style for an overview group."""
+        return {
+            "active": OVERVIEW_ATTENTION_STYLE,
+            "review": "magenta",
+            "integration": "cyan",
+            "blocked": OVERVIEW_BLOCKED_STYLE,
+            "ready": OVERVIEW_READY_STYLE,
+            "recently_completed": OVERVIEW_RECENT_STYLE,
+        }.get(group)
+
+    def _value_style(self, label: str, value: object) -> str:
+        """Return the style for a table value without changing its text."""
+        if label in {"status", "state", "manual"}:
+            return STATUS_STYLES.get(str(value).lower(), "")
+        return ""
+
+    def _style(self, style: str | None) -> str:
+        """Return an enabled Rich style or an empty style when styles are disabled."""
+        if not self._styles_enabled:
+            return ""
+        return style or ""
+
+    def _output_is_tty(self) -> bool:
+        """Return whether the output stream is an interactive terminal."""
+        isatty = getattr(self._output, "isatty", None)
+        if not callable(isatty):
+            return False
+        return bool(isatty())
 
     def _compact_text(self, value: object) -> str:
         """Collapse internal whitespace for one-line summaries."""
