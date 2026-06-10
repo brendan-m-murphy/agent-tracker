@@ -2109,9 +2109,7 @@ def test_pull_spool_over_sftp_accepts_known_hosts_file(tmp_path: Path) -> None:
     with LoopbackSFTPServer(remote_root, asyncssh) as server:
         known_hosts = canonical / "known_hosts"
         known_hosts.write_bytes(
-            f"[127.0.0.1]:{server.port} ".encode()
-            + server.host_key.export_public_key()
-            + b"\n"
+            f"[127.0.0.1]:{server.port} ".encode() + server.host_key.export_public_key() + b"\n"
         )
         configure_sftp_spool(config_path, server.port)
         config_payload = json.loads(config_path.read_text(encoding="utf-8"))

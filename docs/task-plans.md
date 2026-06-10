@@ -64,14 +64,16 @@ raw artifacts into the task plan.
 
 `metadata.completion_policy` can opt a task into machine-checked completion
 evidence. With
-`{"default": "pr_or_review_required", "direct_merge_override": true}`, any
+`{"default": "pr_or_review_required", "direct_merge_override": true}`, a normal
 transition to `done` through `complete`, `resolve-review`, or
 `resolve-integration` requires cumulative evidence containing at least one
 `git:` URI and at least one `pr:`, `review:`, or `integration:` URI. The
 direct-merge override is never implicit: callers must pass `--direct-merge`
 or the equivalent service/MCP parameter, the task metadata must allow it, and
-`git:` evidence is still required. Missing, malformed, or unknown
-`completion_policy` metadata is treated as legacy behavior.
+`git:` evidence is still required, but the final transition may proceed before
+separate `pr:`, `review:`, or `integration:` evidence exists. Missing,
+malformed, or unknown `completion_policy` metadata is treated as legacy
+behavior.
 
 Evidence can be recorded before completion with `record-evidence`, review, or
 integration handoff commands. The completion validator evaluates cumulative
