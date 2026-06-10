@@ -28,6 +28,7 @@ from agent_tracker.config import (  # noqa: E402
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
 from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
+from agent_tracker.rendering import HumanOutputRenderer  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import (  # noqa: E402
     available_skill_names,
@@ -40,6 +41,13 @@ from agent_tracker.skill_bootstrap import (  # noqa: E402
 def assert_no_box_drawing(text: str) -> None:
     """Assert text output is free of Rich-style box-drawing characters."""
     assert not any(0x2500 <= ord(char) <= 0x257F for char in text)
+
+
+def render_overview_payload(payload: dict[str, Any], *, width: int) -> str:
+    """Render an overview payload at a deterministic terminal width."""
+    stdout = StringIO()
+    HumanOutputRenderer(output=stdout, width=width).overview(payload)
+    return stdout.getvalue()
 
 
 def write_project(root: Path) -> Path:
@@ -783,7 +791,7 @@ def test_cli_overview_json_groups_tasks_and_counts_limited_items(tmp_path: Path)
 def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
     tmp_path: Path,
 ) -> None:
-    """Human overview reads like a grouped queue log."""
+    """Captured human overview falls back to readable narrow detail rows."""
     config_path, _ = prepare_overview_state(tmp_path)
     stdout = StringIO()
 
@@ -793,35 +801,20 @@ def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
 
     assert code == 0
     assert "Toy Project (toy)" in output
-    lines = output.splitlines()
-    other_ready_row = next(line for line in lines if line.startswith("  other-ready"))
-    active_row = next(line for line in lines if line.startswith("  ready"))
-    review_row = next(line for line in lines if line.startswith("  review-task"))
-    integration_row = next(line for line in lines if line.startswith("  integration-task"))
-    blocked_row = next(line for line in lines if line.startswith("  blocked"))
-    completed_row = next(line for line in lines if line.startswith("  done-b"))
-
     assert "READY (1)" in output
-    assert "SUMMARY" in output
-    assert "NEXT" in output
-    assert "EVIDENCE" in output
-    assert "Other Ready" in other_ready_row
-    assert "Pick up the remaining" in other_ready_row
-    assert "Ready" in active_row
-    assert "claimed" in active_row
-    assert "Review Task" in review_row
-    assert "pr:review-task" in review_row
-    assert "Integration Task" in integration_row
-    assert "git:integrat..." in integration_row
-    assert "Blocked" in blocked_row
-    assert "Depends on ready" in blocked_row
-    assert "Done B" in completed_row
-    assert "git:done-b" in completed_row
-    assert "completed: " not in output
-    assert "next:" not in output
-    assert "evidence:" not in output
+    assert "SUMMARY" not in output
+    assert "  other-ready\n    Other Ready\n      next: Pick up the remaining ready task." in output
+    assert "  ready\n    Ready\n      state: claimed" in output
+    assert "  review-task\n    Review Task\n      state: awaiting_review" in output
+    assert "      evidence: pr:review-task" in output
+    assert "  integration-task\n    Integration Task\n      state: awaiting_merge" in output
+    assert "      evidence: git:integration-task" in output
+    assert "  blocked\n    Blocked\n      blocker: Depends on ready (ready: claimed)" in output
+    assert "  done-b\n    Done B\n      evidence: git:done-b" in output
+    assert "      completed: " in output
     assert "foundation: Foundation" not in output
     assert "  - other-ready" not in output
+    assert_no_box_drawing(output)
 
 
 def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
@@ -843,12 +836,92 @@ def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
 
     assert "Toy Project (toy)" in overview_output
     assert "READY (1)" in overview_output
-    assert "  ID" in item_output
-    assert "  other-ready" in item_output
+    assert "SUMMARY" not in item_output
+    assert "  other-ready\n    Other Ready" in item_output
     assert "Other Ready" in item_output
     assert "... 1 more; use --limit 0 to show all" in overview_output
     assert_no_box_drawing(overview_output)
     assert_no_box_drawing(item_output)
+
+
+def test_overview_human_width_80_uses_narrow_detail_fallback(tmp_path: Path) -> None:
+    """An 80-column overview avoids cramped tables."""
+    _, coord = prepare_overview_state(tmp_path)
+    output = render_overview_payload(coord.overview_payload(limit=10), width=80)
+
+    assert "Toy Project (toy)" in output
+    assert "READY (1)" in output
+    assert "SUMMARY" not in output
+    assert "  other-ready\n    Other Ready\n      next: Pick up the remaining ready task." in output
+    assert "      evidence: pr:review-task" in output
+    assert all(len(line) <= 80 for line in output.splitlines())
+    assert_no_box_drawing(output)
+
+
+def test_overview_human_width_120_uses_expanded_grouped_table(tmp_path: Path) -> None:
+    """A 120-column overview uses borderless grouped rows."""
+    _, coord = prepare_overview_state(tmp_path)
+    output = render_overview_payload(coord.overview_payload(limit=10), width=120)
+    lines = output.splitlines()
+    ready_row = next(line for line in lines if line.startswith("other-ready"))
+    active_row = next(line for line in lines if line.startswith("ready"))
+    review_row = next(line for line in lines if line.startswith("review-task"))
+    completed_row = next(line for line in lines if line.startswith("done-b"))
+
+    assert "SUMMARY" in output
+    assert "NEXT" in output
+    assert "EVIDENCE" in output
+    assert "Other Ready" in ready_row
+    assert "Pick up the remaining ready task." in ready_row
+    assert "Ready" in active_row
+    assert "claimed" in active_row
+    assert "Review Task" in review_row
+    assert "pr:review-task" in review_row
+    assert "Done B" in completed_row
+    assert "git:done-b" in completed_row
+    assert "completed:" not in output
+    assert "next:" not in output
+    assert "evidence:" not in output
+    assert all(len(line) <= 120 for line in lines)
+    assert_no_box_drawing(output)
+
+
+def test_overview_human_width_160_spends_extra_width_on_text(tmp_path: Path) -> None:
+    """A wide overview gives summary and next columns more usable space."""
+    config_path = write_overview_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "other-ready":
+            raw_task["id"] = "repository-boundary-inmemory-tests-followup"
+            raw_task["title"] = (
+                "Add repository boundary for in-memory tests with a clear renderer contract"
+            )
+            raw_task["next_action"] = (
+                "Define the smallest repository protocol needed by Coordinator while "
+                "preserving long handoff details for review."
+            )
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    overview = coord.overview_payload(limit=0)
+
+    width_120 = render_overview_payload(overview, width=120)
+    width_160 = render_overview_payload(overview, width=160)
+    row_120 = next(
+        line for line in width_120.splitlines() if line.startswith("repository-boundary")
+    )
+    row_160 = next(
+        line for line in width_160.splitlines() if line.startswith("repository-boundary")
+    )
+
+    assert len(row_160.rstrip()) > len(row_120.rstrip())
+    assert "Add repository boundary for in-" in row_160
+    assert "Add repository boundary for in-" not in row_120
+    assert "while preserving long" in row_160
+    assert "while preserving long" not in row_120
+    assert all(len(line) <= 160 for line in width_160.splitlines())
+    assert_no_box_drawing(width_160)
 
 
 def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) -> None:
@@ -894,9 +967,9 @@ def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
     assert any("Coordinate" in line and "..." in line for line in lines)
-    assert any("(+1 more)" in line for line in lines)
-    assert not any("next:" in line for line in lines)
-    assert not any("blocker:" in line for line in lines)
+    assert any("blocker:" in line and "(+1 more)" in line for line in lines)
+    assert any("next:" in line for line in lines)
+    assert any("blocker:" in line for line in lines)
     assert not any("details before asking another worker" in line for line in lines)
 
     stdout = StringIO()
@@ -915,7 +988,7 @@ def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) 
 def test_cli_overview_human_output_truncates_long_title_cells(
     tmp_path: Path,
 ) -> None:
-    """Long overview titles stay in one compact table row."""
+    """Long narrow overview titles wrap under the item, not as fields."""
     config_path = write_project(tmp_path)
     task_path = tmp_path / "tasks.json"
     payload = json.loads(task_path.read_text(encoding="utf-8"))
@@ -938,17 +1011,16 @@ def test_cli_overview_human_output_truncates_long_title_cells(
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    ready_row = next(line for line in lines if line.startswith("  ready"))
-    assert "Add repository" in ready_row
-    assert "..." in ready_row
-    assert "should not look like a field" not in "\n".join(lines)
-    assert "Keep detail fields" in ready_row
+    ready_index = lines.index("  ready")
+    assert lines[ready_index + 1].startswith("    Add repository")
+    assert any("should not look like a field" in line for line in lines[ready_index:])
+    assert any(line.startswith("      next: Keep detail fields") for line in lines)
 
 
 def test_cli_overview_human_output_truncates_unbroken_title_cells(
     tmp_path: Path,
 ) -> None:
-    """Unbroken overview title tokens stay in one compact table row."""
+    """Unbroken narrow overview title tokens wrap without escaping indentation."""
     config_path = write_project(tmp_path)
     task_path = tmp_path / "tasks.json"
     payload = json.loads(task_path.read_text(encoding="utf-8"))
@@ -967,9 +1039,8 @@ def test_cli_overview_human_output_truncates_unbroken_title_cells(
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    assert len(title_lines) == 1
-    assert title_lines[0].startswith("  ready")
-    assert "x..." in title_lines[0]
+    assert len(title_lines) > 1
+    assert all(line.startswith("    ") for line in title_lines)
     assert not any(line.startswith("x") for line in title_lines)
 
 

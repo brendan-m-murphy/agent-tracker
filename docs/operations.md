@@ -201,10 +201,12 @@ Blocked entries include short blocker summaries derived from the evaluated
 latest evidence summaries when available. Recently completed entries are ordered
 from completion audit records, not task priority.
 
-Human overview output uses compact grouped tables with one task per row. The
-table headers carry the field names, so rows do not repeat labels such as
-`next:` or `evidence:`. Long task ids, titles, blockers, next actions, evidence,
-and completion notes are truncated with `...` in default human output. Use
+Human overview output detects the terminal width. Wide terminals use compact
+grouped tables with one task per row; the table headers carry the field names,
+so rows do not repeat labels such as `next:` or `evidence:`. Narrow terminals
+fall back to compact multi-line rows with stable labels and wrapping instead of
+cramping every column. Long task ids, titles, blockers, next actions, evidence,
+and completion notes are truncated in default human output when needed. Use
 `agent-tracker task <task-id>` for full detail. Each group reports a count and
 defaults to five visible items for readability; pass `--limit 0` to show every
 grouped task.

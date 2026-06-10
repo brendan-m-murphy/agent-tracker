@@ -9,14 +9,13 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from rich.console import Console
+from rich.table import Table
 from rich.text import Text
 
 from agent_tracker.config import ProjectConfig
 from agent_tracker.models import TaskState
 
-HUMAN_OUTPUT_WIDTH = 80
-OVERVIEW_TABLE_INDENT = 2
-OVERVIEW_COLUMN_GAP = 2
+OVERVIEW_TABLE_MIN_WIDTH = 100
 OVERVIEW_HEADER_STYLE = "bold"
 OVERVIEW_MUTED_STYLE = "dim"
 OVERVIEW_GROUPS = (
@@ -32,11 +31,13 @@ OVERVIEW_GROUPS = (
 class HumanOutputRenderer:
     """Render copy-paste-safe human CLI output."""
 
-    def __init__(self, output: TextIO | None = None, *, width: int = HUMAN_OUTPUT_WIDTH) -> None:
-        """Bind the renderer to an output stream and fixed terminal width."""
+    def __init__(self, output: TextIO | None = None, *, width: int | None = None) -> None:
+        """Bind the renderer to an output stream."""
         self._output = output or sys.stdout
-        self._width = width
-        self._console = Console(file=self._output, width=width, highlight=False)
+        console_options: dict[str, Any] = {"file": self._output, "highlight": False}
+        if width is not None:
+            console_options["width"] = width
+        self._console = Console(**console_options)
 
     def line(
         self,
@@ -52,7 +53,7 @@ class HumanOutputRenderer:
             Text(
                 textwrap.fill(
                     text,
-                    width=self._width,
+                    width=self._terminal_width,
                     initial_indent=initial_indent,
                     subsequent_indent=subsequent_indent or initial_indent,
                     break_long_words=break_long_words,
@@ -132,130 +133,147 @@ class HumanOutputRenderer:
 
     def overview_item(self, group: str, item: dict[str, Any]) -> None:
         """Render one overview item."""
-        self._overview_table(group, [item])
+        if self._use_overview_table:
+            self._overview_table(group, [item])
+        else:
+            self._overview_detail_item(group, item)
 
     def _overview_table(self, group: str, items: list[dict[str, Any]]) -> None:
         """Render overview items as one-row task summaries."""
-        columns = self._overview_columns(group)
-        widths = self._overview_column_widths(columns)
-        self._overview_row(
-            [label for label, _key, _minimum, _weight in columns], widths, header=True
-        )
-        for item in items:
-            self._overview_row(
-                [
-                    self._overview_cell(group, item, key, width)
-                    for (_label, key, _min, _weight), width in zip(columns, widths)
-                ],
-                widths,
-            )
+        if not self._use_overview_table:
+            for item in items:
+                self._overview_detail_item(group, item)
+            return
 
-    def _overview_columns(self, group: str) -> list[tuple[str, str, int, int]]:
-        """Return label, value key, minimum width, and expansion weight for a group."""
+        table = Table(
+            box=None,
+            expand=True,
+            show_header=True,
+            show_edge=False,
+            pad_edge=False,
+            padding=(0, 2),
+        )
+        columns = self._overview_columns(group)
+        for label, key, minimum, ratio, maximum in columns:
+            table.add_column(
+                label,
+                min_width=minimum,
+                max_width=maximum,
+                no_wrap=True,
+                overflow="ellipsis",
+                ratio=ratio,
+                style=OVERVIEW_MUTED_STYLE if key in {"evidence", "completed"} else "",
+            )
+        for item in items:
+            cells = [self._overview_cell(group, item, key) for _label, key, *_ in columns]
+            table.add_row(*cells)
+        self._console.print(table)
+
+    def _overview_columns(self, group: str) -> list[tuple[str, str, int, int, int | None]]:
+        """Return label, value key, minimum width, expansion ratio, and maximum width."""
+        id_width = self._overview_id_width
         if group == "ready":
             return [
-                ("ID", "id", 14, 3),
-                ("SUMMARY", "summary", 14, 3),
-                ("NEXT", "next", 14, 4),
+                ("ID", "id", min(30, id_width), 2, id_width),
+                ("SUMMARY", "summary", 20, 2, None),
+                ("NEXT", "next", 28, 5, None),
             ]
         if group == "active":
             return [
-                ("ID", "id", 12, 3),
-                ("SUMMARY", "summary", 12, 3),
-                ("STATE", "state", 8, 1),
-                ("NEXT", "next", 12, 3),
+                ("ID", "id", min(30, id_width), 2, id_width),
+                ("SUMMARY", "summary", 18, 2, None),
+                ("STATE", "state", 10, 1, 16),
+                ("NEXT", "next", 24, 5, None),
             ]
         if group in {"review", "integration"}:
             return [
-                ("ID", "id", 12, 3),
-                ("SUMMARY", "summary", 12, 3),
-                ("EVIDENCE", "evidence", 10, 2),
-                ("NEXT", "next", 10, 2),
+                ("ID", "id", min(30, id_width), 2, id_width),
+                ("SUMMARY", "summary", 18, 2, None),
+                ("EVIDENCE", "evidence", 14, 2, None),
+                ("NEXT", "next", 20, 4, None),
             ]
         if group == "blocked":
             return [
-                ("ID", "id", 12, 3),
-                ("SUMMARY", "summary", 12, 3),
-                ("BLOCKER", "blocker", 12, 3),
-                ("NEXT", "next", 10, 2),
+                ("ID", "id", min(30, id_width), 2, id_width),
+                ("SUMMARY", "summary", 18, 2, None),
+                ("BLOCKER", "blocker", 20, 3, None),
+                ("NEXT", "next", 20, 4, None),
             ]
         return [
-            ("ID", "id", 12, 3),
-            ("SUMMARY", "summary", 14, 3),
-            ("COMPLETED", "completed", 12, 2),
-            ("EVIDENCE", "evidence", 12, 2),
+            ("ID", "id", min(30, id_width), 2, id_width),
+            ("SUMMARY", "summary", 20, 2, None),
+            ("COMPLETED", "completed", 16, 1, 16),
+            ("EVIDENCE", "evidence", 18, 3, None),
         ]
-
-    def _overview_column_widths(self, columns: list[tuple[str, str, int, int]]) -> list[int]:
-        """Allocate table column widths across the configured output width."""
-        gaps = OVERVIEW_COLUMN_GAP * (len(columns) - 1)
-        available = max(len(columns), self._width - OVERVIEW_TABLE_INDENT - gaps)
-        minimums = [minimum for _label, _key, minimum, _weight in columns]
-        minimum_total = sum(minimums)
-        if available <= minimum_total:
-            return self._scaled_widths(minimums, available)
-
-        extra = available - minimum_total
-        weights = [weight for _label, _key, _minimum, weight in columns]
-        weight_total = sum(weights)
-        widths = [
-            minimum + (extra * weight // weight_total) for minimum, weight in zip(minimums, weights)
-        ]
-        remainder = available - sum(widths)
-        for index in range(remainder):
-            widths[index % len(widths)] += 1
-        return widths
-
-    def _scaled_widths(self, minimums: list[int], available: int) -> list[int]:
-        """Scale minimum widths down for very narrow output."""
-        total = sum(minimums)
-        widths = [max(1, available * width // total) for width in minimums]
-        while sum(widths) > available:
-            index = max(range(len(widths)), key=lambda item: widths[item])
-            widths[index] -= 1
-        while sum(widths) < available:
-            index = min(range(len(widths)), key=lambda item: widths[item])
-            widths[index] += 1
-        return widths
 
     def _overview_cell(
         self,
         group: str,
         item: dict[str, Any],
         key: str,
-        width: int,
     ) -> str:
         """Return a one-line overview table cell."""
         if key == "id":
-            return self._truncate(item["id"], width)
+            return self._compact_text(item["id"])
         if key == "summary":
-            return self._truncate(item["title"], width)
+            return self._compact_text(item["title"])
         if key == "state":
-            return self._truncate(item.get("state") or "-", width)
+            return self._compact_text(item.get("state") or "-")
         if key == "next":
-            return self._truncate(item.get("next_action") or "-", width)
+            return self._compact_text(item.get("next_action") or "-")
         if key == "evidence":
-            return self._truncate(item.get("latest_evidence") or "-", width)
+            return self._compact_text(item.get("latest_evidence") or "-")
         if key == "completed":
             completed = self._compact_completed_at(item.get("completed_at") or "")
-            return self._truncate(completed or "-", width)
+            return completed or "-"
         if key == "blocker":
             blockers = [self._compact_text(value) for value in item.get("blockers", []) if value]
             if not blockers:
                 return "-"
             if len(blockers) == 1:
-                return self._truncate(blockers[0], width)
-            return self._truncate_with_suffix(blockers[0], width, f" (+{len(blockers) - 1} more)")
+                return blockers[0]
+            return f"{blockers[0]} (+{len(blockers) - 1} more)"
         raise ValueError(f"unsupported overview column {key!r} for group {group!r}")
 
-    def _overview_row(self, values: list[str], widths: list[int], *, header: bool = False) -> None:
-        """Print one overview table row."""
-        line = Text(" " * OVERVIEW_TABLE_INDENT)
-        for index, (value, width) in enumerate(zip(values, widths)):
-            if index:
-                line.append(" " * OVERVIEW_COLUMN_GAP)
-            line.append(f"{value:<{width}}", style=OVERVIEW_HEADER_STYLE if header else "")
-        self._console.print(line)
+    def _overview_detail_item(self, group: str, item: dict[str, Any]) -> None:
+        """Render one overview item for narrow terminals."""
+        self.line(
+            self._compact_text(item["id"]),
+            initial_indent="  ",
+            subsequent_indent="  ",
+            break_long_words=True,
+        )
+        self.line(
+            self._compact_text(item["title"]),
+            initial_indent="    ",
+            subsequent_indent="    ",
+            break_long_words=True,
+        )
+        for label, value in self._overview_detail_fields(group, item):
+            self.field(label, self._truncate(value, self._detail_width(label)), indent=6)
+
+    def _overview_detail_fields(self, group: str, item: dict[str, Any]) -> list[tuple[str, str]]:
+        """Return narrow-terminal detail fields for one overview item."""
+        fields: list[tuple[str, str]] = []
+        if group in {"active", "review", "integration"}:
+            fields.append(("state", self._compact_text(item.get("state") or "-")))
+        blockers = [self._compact_text(value) for value in item.get("blockers", []) if value]
+        if blockers:
+            blocker = blockers[0]
+            if len(blockers) > 1:
+                blocker = self._truncate_with_suffix(
+                    blocker,
+                    self._detail_width("blocker"),
+                    f" (+{len(blockers) - 1} more)",
+                )
+            fields.append(("blocker", blocker))
+        if item.get("latest_evidence"):
+            fields.append(("evidence", self._compact_text(item["latest_evidence"])))
+        if group != "recently_completed" and item.get("next_action"):
+            fields.append(("next", self._compact_text(item["next_action"])))
+        if group == "recently_completed" and item.get("completed_at"):
+            fields.append(("completed", self._compact_completed_at(item["completed_at"])))
+        return fields[:3]
 
     def _compact_text(self, value: object) -> str:
         """Collapse internal whitespace for one-line summaries."""
@@ -286,6 +304,30 @@ class HumanOutputRenderer:
         if not text:
             return ""
         return text.replace("T", " ")[:16]
+
+    @property
+    def _terminal_width(self) -> int:
+        """Return the width Rich detected for this output stream."""
+        return max(20, self._console.size.width)
+
+    @property
+    def _use_overview_table(self) -> bool:
+        """Return whether the overview has enough width for a compact table."""
+        return self._terminal_width >= OVERVIEW_TABLE_MIN_WIDTH
+
+    @property
+    def _overview_id_width(self) -> int:
+        """Return a terminal-width-aware identifier column cap."""
+        width = self._terminal_width
+        if width >= 160:
+            return 38
+        if width >= 120:
+            return 34
+        return 30
+
+    def _detail_width(self, label: str) -> int:
+        """Return available width for one narrow overview detail value."""
+        return max(1, self._terminal_width - len(f"      {label}: "))
 
     def next_tasks(self, states: list[TaskState]) -> None:
         """Render ready task summaries."""
