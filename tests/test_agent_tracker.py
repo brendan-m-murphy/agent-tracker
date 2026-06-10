@@ -3928,6 +3928,71 @@ def test_cli_list_intake_human_output_shows_status(tmp_path: Path) -> None:
         assert f"  kind     {record.kind}" in output
 
 
+def test_cli_list_intake_human_filters_match_flat_and_grouped_commands(
+    tmp_path: Path,
+) -> None:
+    """Human intake filters behave the same for flat and grouped commands."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    keep = coord.record_intake(
+        "Keep filtered intake.",
+        kind="feature",
+        repo="agent-tracker",
+    )
+    coord.update_intake_status(keep.intake_id, status="triaged")
+    skip_status = coord.record_intake(
+        "Skip open intake.",
+        kind="feature",
+        repo="agent-tracker",
+    )
+    coord.record_intake(
+        "Skip repo intake.",
+        kind="feature",
+        repo="other-repo",
+    )
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        flat_code = cli.main(
+            [
+                "list-intake",
+                "--config",
+                str(config_path),
+                "--status",
+                "triaged",
+                "--repo",
+                "agent-tracker",
+            ]
+        )
+    flat_output = stdout.getvalue()
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        grouped_code = cli.main(
+            [
+                "intake",
+                "list",
+                "--config",
+                str(config_path),
+                "--status",
+                "triaged",
+                "--repo",
+                "agent-tracker",
+            ]
+        )
+    grouped_output = stdout.getvalue()
+
+    assert flat_code == 0
+    assert grouped_code == 0
+    assert flat_output == grouped_output
+    assert f"{keep.intake_id}: Keep filtered intake." in flat_output
+    assert f"{skip_status.intake_id}: Skip open intake." not in flat_output
+    assert "Skip repo intake." not in flat_output
+    assert "  status   triaged" in flat_output
+    assert_no_box_drawing(flat_output)
+
+
 def test_cli_human_status_and_intake_output_are_plain_text(tmp_path: Path) -> None:
     """Human status and intake output use readable plain text without boxes."""
     config_path = write_project(tmp_path)
@@ -5512,10 +5577,104 @@ def test_cli_list_proposals_human_output_uses_renderer_boundary(tmp_path: Path) 
     output = stdout.getvalue()
     assert code == 0
     assert f"{proposal.proposal_id}: add-triage - Add triage workflow" in output
-    assert f"  intake: {intake.intake_id}; status: proposed" in output
-    assert "  repo: agent-tracker" in output
-    assert "  next: Review and promote the proposed task." in output
+    assert f"  intake   {intake.intake_id}" in output
+    assert "  status   proposed" in output
+    assert "  repo     agent-tracker" in output
+    assert "  next     Review and promote the proposed task." in output
     assert_no_box_drawing(output)
+
+
+def test_cli_list_proposals_human_output_wraps_long_fields(tmp_path: Path) -> None:
+    """Human proposal listings wrap long titles and next actions at stable indents."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    intake = coord.record_intake("Wrap proposal output.", kind="feature")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        task_id="wrap-proposal-output",
+        title=(
+            "Coordinate proposal intake rendering with enough descriptive detail for "
+            "maintainers to scan the task identity at narrow terminal widths"
+        ),
+        next_action=(
+            "Review the rendered proposal listing, confirm continuation lines remain "
+            "under the next action value, and keep JSON output unchanged."
+        ),
+        proposal_id="proposal-wrap",
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["list-proposals", "--config", str(config_path)])
+
+    lines = stdout.getvalue().splitlines()
+    assert code == 0
+    assert all(len(line) <= 80 for line in lines)
+    assert lines[0].startswith(f"{proposal.proposal_id}: wrap-proposal-output - Coordinate")
+    assert "maintainers to scan the task identity" in " ".join(lines)
+    assert any(line.startswith("  ") and "maintainers" in line for line in lines)
+    assert any(line.startswith("  next     Review the rendered proposal") for line in lines)
+    assert any(
+        line.startswith(" " * 11) and "under the next action value" in line for line in lines
+    )
+    assert_no_box_drawing("\n".join(lines))
+
+
+def test_cli_list_proposals_human_output_honors_filters(tmp_path: Path) -> None:
+    """Human proposal listings apply status and intake-id filters."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    proposed_intake = coord.record_intake("Keep proposed.", kind="feature")
+    rejected_intake = coord.record_intake("Keep rejected.", kind="feature")
+    proposed = coord.propose_task_from_intake(
+        proposed_intake.intake_id,
+        task_id="keep-proposed",
+        title="Keep proposed task",
+    )
+    rejected = coord.propose_task_from_intake(
+        rejected_intake.intake_id,
+        task_id="keep-rejected",
+        title="Keep rejected task",
+    )
+    coord.withdraw_proposed_task(rejected.proposal_id)
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        proposed_code = cli.main(
+            [
+                "list-proposals",
+                "--config",
+                str(config_path),
+                "--status",
+                "proposed",
+            ]
+        )
+    proposed_output = stdout.getvalue()
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        rejected_code = cli.main(
+            [
+                "list-proposals",
+                "--config",
+                str(config_path),
+                "--intake-id",
+                rejected_intake.intake_id,
+            ]
+        )
+    rejected_output = stdout.getvalue()
+
+    assert proposed_code == 0
+    assert rejected_code == 0
+    assert proposed.proposal_id in proposed_output
+    assert rejected.proposal_id not in proposed_output
+    assert rejected.proposal_id in rejected_output
+    assert "  status   rejected" in rejected_output
+    assert proposed.proposal_id not in rejected_output
+    assert_no_box_drawing(proposed_output)
+    assert_no_box_drawing(rejected_output)
 
 
 def test_cli_update_and_withdraw_proposal_json(tmp_path: Path) -> None:
