@@ -27,7 +27,7 @@ from agent_tracker.config import (  # noqa: E402
 )
 from agent_tracker.db import DB_SCHEMA_VERSION, DB_SCHEMA_VERSION_KEY  # noqa: E402
 from agent_tracker.mcp_tools import AgentTrackerTools  # noqa: E402
-from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES  # noqa: E402
+from agent_tracker.models import INTEGRATION_STATES, REVIEW_STATES, InterventionRecord  # noqa: E402
 from agent_tracker.service import Coordinator  # noqa: E402
 from agent_tracker.skill_bootstrap import (  # noqa: E402
     available_skill_names,
@@ -386,6 +386,18 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
                 "workspaces": {"hpc": {"path": ".", "capabilities": [1]}},
             },
             "config field 'workspaces.hpc.capabilities' must be a string or list of strings",
+        ),
+        (
+            {"project_id": "toy", "pr_notification_setup_checker": []},
+            "config field 'pr_notification_setup_checker' must be a string",
+        ),
+        (
+            {"project_id": "toy", "notifications": []},
+            "config field 'notifications' must be an object",
+        ),
+        (
+            {"project_id": "toy", "notifications": {"github": {"allow_live": "yes"}}},
+            "config field 'notifications.github.allow_live' must be a boolean",
         ),
     ],
 )
@@ -3048,6 +3060,600 @@ def test_cli_task_human_output_stays_prompt_renderer(tmp_path: Path) -> None:
     assert "## Summary\nReady to run." in output
     assert "Paths\n" not in output
     assert_no_box_drawing(output)
+
+
+def test_interventions_are_recorded_resolved_audited_and_exported(tmp_path: Path) -> None:
+    """Interventions are durable state separate from notification delivery."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    intervention = coord.record_intervention(
+        reason="setup_missing",
+        task_id="ready",
+        summary="PR notification setup is missing.",
+        metadata={"target": "pull-request"},
+        actor="coordinator",
+    )
+    listed = coord.intervention_records(
+        status="open",
+        reason="setup_missing",
+        task_id="ready",
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert intervention.intervention_id
+    assert intervention.status == "open"
+    assert listed == [intervention]
+    assert snapshot["interventions"][0]["id"] == intervention.intervention_id
+    assert snapshot["interventions"][0]["reason"] == "setup_missing"
+    assert snapshot["interventions"][0]["metadata"] == {"target": "pull-request"}
+    assert any(
+        audit["action"] == "intervention.record"
+        and audit["actor"] == "coordinator"
+        and audit["task_id"] == "ready"
+        and audit["payload"]["intervention_id"] == intervention.intervention_id
+        for audit in snapshot["audit"]
+    )
+
+    with pytest.raises(ValueError, match="resolution requires evidence or reason"):
+        coord.resolve_intervention(intervention.intervention_id, actor="pm")
+
+    resolved = coord.resolve_intervention(
+        intervention.intervention_id,
+        evidence=["evidence://setup-check"],
+        actor="pm",
+    )
+    resolved_snapshot = coord.store.snapshot(config.project_id)
+
+    assert resolved.status == "resolved"
+    assert resolved.evidence == ["evidence://setup-check"]
+    assert resolved.resolved_by == "pm"
+    assert coord.intervention_records(status="open") == []
+    assert coord.intervention_records(status="resolved") == [resolved]
+    assert any(
+        audit["action"] == "intervention.resolve"
+        and audit["actor"] == "pm"
+        and audit["payload"]["evidence"] == ["evidence://setup-check"]
+        for audit in resolved_snapshot["audit"]
+    )
+    with pytest.raises(ValueError, match="already resolved"):
+        coord.resolve_intervention(
+            intervention.intervention_id,
+            resolution="Already handled.",
+            actor="pm",
+        )
+
+
+def test_interventions_validate_reason_task_and_reason_only_resolution(
+    tmp_path: Path,
+) -> None:
+    """Intervention records use the documented reason set and resolution rules."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="intervention reason"):
+        coord.record_intervention(reason="unknown", summary="Bad reason.")
+    with pytest.raises(ValueError, match="unknown task"):
+        coord.record_intervention(
+            reason="setup_missing",
+            task_id="missing",
+            summary="Missing task.",
+        )
+    with pytest.raises(ValueError, match="resolution state"):
+        coord.store.record_intervention(
+            config.project_id,
+            InterventionRecord(
+                intervention_id="prefilled",
+                reason="setup_missing",
+                resolution="Already done.",
+            ),
+        )
+
+    intervention = coord.record_intervention(
+        reason="approval_required",
+        summary="Need a human decision.",
+    )
+    resolved = coord.resolve_intervention(
+        intervention.intervention_id,
+        resolution="Approved by project owner.",
+        actor="pm",
+    )
+
+    assert resolved.status == "resolved"
+    assert resolved.resolution == "Approved by project owner."
+    assert resolved.evidence == []
+
+
+def test_interventions_are_compatible_with_pre_intervention_database(
+    tmp_path: Path,
+) -> None:
+    """Old databases without intervention tables stay readable and self-upgrade."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute("DROP TABLE interventions")
+
+    assert coord.intervention_records() == []
+    assert coord.store.snapshot(config.project_id)["interventions"] == []
+
+    intervention = coord.record_intervention(
+        reason="missing_evidence",
+        summary="Need final evidence.",
+    )
+
+    assert coord.intervention_records() == [intervention]
+
+
+def test_cli_record_list_and_resolve_interventions(tmp_path: Path) -> None:
+    """CLI commands expose intervention state as JSON and readable text."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "record-intervention",
+                "--config",
+                str(config_path),
+                "--task-id",
+                "ready",
+                "--reason",
+                "pr_review_needed",
+                "--metadata-json",
+                '{"surface": "pull-request"}',
+                "--actor",
+                "coordinator",
+                "PR review is needed.",
+            ]
+        )
+
+    recorded = json.loads(stdout.getvalue())
+    assert code == 0
+    assert recorded["task_id"] == "ready"
+    assert recorded["reason"] == "pr_review_needed"
+    assert recorded["metadata"] == {"surface": "pull-request"}
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-interventions", "--config", str(config_path), "--json"])
+
+    listed = json.loads(stdout.getvalue())
+    assert code == 0
+    assert [item["id"] for item in listed["interventions"]] == [recorded["id"]]
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "resolve-intervention",
+                "--config",
+                str(config_path),
+                recorded["id"],
+                "--reason",
+                "Review completed.",
+                "--actor",
+                "pm",
+            ]
+        )
+
+    resolved = json.loads(stdout.getvalue())
+    assert code == 0
+    assert resolved["status"] == "resolved"
+    assert resolved["resolution"] == "Review completed."
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["list-interventions", "--config", str(config_path)])
+
+    output = stdout.getvalue()
+    assert code == 0
+    assert "PR review is needed." in output
+    assert "  status     resolved" in output
+    assert "  reason     pr_review_needed" in output
+    assert "  task       ready" in output
+    assert "  resolution Review completed." in output
+    assert_no_box_drawing(output)
+
+
+def _setup_command_key(command: list[str]) -> tuple[str, ...]:
+    """Normalize setup-check commands for test stubs."""
+    if len(command) >= 4 and command[0] == "git" and command[1] == "-C":
+        return ("git", *command[3:])
+    return tuple(command)
+
+
+def _completed_process(
+    command: list[str],
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> Any:
+    """Return a subprocess result for setup-check tests."""
+    return service_module.subprocess.CompletedProcess(
+        command,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _stub_setup_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: dict[tuple[str, ...], tuple[int, str, str]],
+) -> list[tuple[str, ...]]:
+    """Stub service setup commands and record normalized invocations."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if key not in responses:
+            raise AssertionError(f"unexpected setup command: {key}")
+        returncode, stdout, stderr = responses[key]
+        return _completed_process(command, returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+    return calls
+
+
+def test_pr_notification_setup_flags_missing_remote_without_gh_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing Git remotes stop setup checks before any GitHub CLI probe."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intervention = coord.record_intervention(
+        reason="setup_missing",
+        task_id="ready",
+        summary="Need notification setup.",
+    )
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                2,
+                "",
+                "error: No such remote 'origin'\n",
+            ),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_remote"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_remote"]
+    assert payload["posting"]["live_supported"] is False
+    assert payload["posting"]["prepared_payload_supported"] is True
+    assert payload["prepared_payload"]["intervention_ids"] == [intervention.intervention_id]
+    assert calls == [("git", "remote", "get-url", "origin")]
+
+
+def test_pr_notification_setup_flags_missing_pr_association(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GitHub remote without an associated branch PR is reported distinctly."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (
+                0,
+                "feature/pr-notifications\n",
+                "",
+            ),
+            (
+                "gh",
+                "pr",
+                "view",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (1, "", "no pull requests found for branch\n"),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_pr_association"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_pr_association"]
+    assert payload["repo"]["remote"]["owner"] == "example"
+    assert payload["repo"]["remote"]["repo"] == "library"
+    assert payload["repo"]["branch"] == "feature/pr-notifications"
+    assert payload["target"] is None
+    assert ("gh", "auth", "status") not in calls
+
+
+def test_pr_notification_setup_rejects_pr_target_from_different_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The selected Git remote constrains PR lookup and target validation."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "upstream"): (
+                0,
+                "https://github.com/example/selected.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "--repo",
+                "example/selected",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/other/selected/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path, remote="upstream")
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_pr_association"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_pr_association"]
+    assert "does not match selected remote" in payload["issues"][0]["message"]
+    assert payload["target"] is None
+    assert (
+        "gh",
+        "pr",
+        "view",
+        "--repo",
+        "example/selected",
+        "--json",
+        "number,url,headRefName,baseRefName,state",
+    ) in calls
+    assert ("gh", "auth", "status") not in calls
+
+
+def test_pr_notification_setup_missing_gh_is_missing_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing GitHub CLI is classified as an auth/tooling setup gap."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if command[0] == "gh":
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+        responses = {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+        }
+        returncode, stdout, stderr = responses[key]
+        return _completed_process(command, returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_auth"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_auth"]
+    assert "failed to start" in payload["issues"][0]["message"]
+    assert ("gh", "auth", "status") not in calls
+
+
+def test_pr_notification_setup_flags_missing_auth_after_pr_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live posting is refused when a PR is known but gh auth is unavailable."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    calls = _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "git@github.com:example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+            ("gh", "auth", "status"): (
+                1,
+                "",
+                "You are not logged into any GitHub hosts\n",
+            ),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "missing_auth"
+    assert [issue["code"] for issue in payload["issues"]] == ["missing_auth"]
+    assert payload["target"]["number"] == 123
+    assert payload["target"]["owner"] == "example"
+    assert payload["auth"]["checked"] is True
+    assert payload["auth"]["authenticated"] is False
+    assert ("gh", "auth", "status") in calls
+
+
+def test_pr_notification_setup_uses_prepared_payload_when_live_posting_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authenticated PR checks still default to prepared payloads in safe mode."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intervention = coord.record_intervention(
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+            ("gh", "auth", "status"): (0, "Logged in to github.com\n", ""),
+        },
+    )
+
+    payload = coord.pr_notification_setup_payload(repo_path=tmp_path)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "unsupported_sandbox"
+    assert [issue["code"] for issue in payload["issues"]] == ["unsupported_sandbox"]
+    assert payload["issues"][0]["severity"] == "warning"
+    assert payload["posting"] == {
+        "live_supported": False,
+        "prepared_payload_supported": True,
+        "mode": "prepared_payload",
+    }
+    assert payload["prepared_payload"]["surface"] == "pull_request_comment"
+    assert payload["prepared_payload"]["intervention_ids"] == [intervention.intervention_id]
+    assert "Human review is needed." in payload["prepared_payload"]["body"]
+
+
+def test_cli_check_pr_notification_setup_outputs_json_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup-check CLI exposes the service diagnostic as JSON."""
+    config_path = write_project(tmp_path)
+    expected = {
+        "project_id": "toy",
+        "ok": False,
+        "status": "missing_remote",
+        "workspace": {"name": "", "kind": "local", "path": str(tmp_path)},
+        "repo": {"path": str(tmp_path), "remote": None, "branch": ""},
+        "target": None,
+        "auth": {"method": "gh", "checked": False, "authenticated": False, "error": ""},
+        "posting": {
+            "live_supported": False,
+            "prepared_payload_supported": True,
+            "mode": "prepared_payload",
+        },
+        "issues": [
+            {
+                "code": "missing_remote",
+                "severity": "error",
+                "message": "missing",
+                "remediation": "add remote",
+            }
+        ],
+        "prepared_payload": {
+            "surface": "pull_request_comment",
+            "body": "body",
+            "intervention_ids": [],
+            "interventions": [],
+        },
+    }
+
+    def fake_payload(self: Coordinator, **_: object) -> dict[str, Any]:
+        return expected
+
+    monkeypatch.setattr(Coordinator, "pr_notification_setup_payload", fake_payload)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "check-pr-notification-setup",
+                "--config",
+                str(config_path),
+                "--repo-path",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == expected
 
 
 def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
