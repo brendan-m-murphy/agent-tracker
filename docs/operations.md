@@ -376,6 +376,12 @@ copy-paste-safe output, JSON compatibility, summary/detail drilldown, output
 modes, intake/proposal consistency, and the deferred Textual TUI posture. See
 `docs/research/2026-06-09-cli-tui-helper-evaluation.md` before adding a runtime
 dependency for richer human output or TUI behavior.
+Parser changes have a separate compatibility contract: keep existing flat
+commands and JSON payloads stable, treat grouped commands as additive aliases,
+and do not expose shell-completion helper flags unless shell completion is
+explicitly designed. See
+`docs/research/2026-06-10-cli-parser-migration.md` before expanding Typer or
+Click beyond the existing grouped intake adapter.
 
 ## Typed Tool Surface
 
