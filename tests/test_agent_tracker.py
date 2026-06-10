@@ -272,6 +272,27 @@ def write_project_with_completion_policy(root: Path, policy: object) -> Path:
     return config_path
 
 
+def write_project_with_workspace(root: Path, workspace: Path) -> Path:
+    """Write a toy project with one local worker workspace."""
+    root.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    config_path = write_project(root)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "hpc": {
+            "kind": "local",
+            "path": str(workspace),
+            "config_path": "agent-tracker.config.json",
+            "spool_outbox": ".agent-tracker/spool/outbox",
+            "artifacts_path": "results/worker-launches",
+            "roles": ["agent-coordinator"],
+            "capabilities": ["local-worker", "summary-test"],
+        }
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    return config_path
+
+
 PR_OR_REVIEW_POLICY = {
     "default": "pr_or_review_required",
     "direct_merge_override": True,
@@ -333,6 +354,32 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
         (
             {"project_id": "toy", "spool": {"ssh": {"client_keys": [1]}}},
             "config field 'spool.ssh.client_keys' must be a string or list of strings",
+        ),
+        (
+            {"project_id": "toy", "workspaces": []},
+            "config field 'workspaces' must be an object",
+        ),
+        (
+            {"project_id": "toy", "workspaces": {"hpc": []}},
+            "config field 'workspaces.hpc' must be an object",
+        ),
+        (
+            {"project_id": "toy", "workspaces": {"hpc": {"kind": "local"}}},
+            "config field 'workspaces.hpc.path' is required",
+        ),
+        (
+            {
+                "project_id": "toy",
+                "workspaces": {"remote": {"kind": "ssh", "host": "host"}},
+            },
+            "config field 'workspaces.remote.remote_path' is required",
+        ),
+        (
+            {
+                "project_id": "toy",
+                "workspaces": {"hpc": {"path": ".", "capabilities": [1]}},
+            },
+            "config field 'workspaces.hpc.capabilities' must be a string or list of strings",
         ),
     ],
 )
@@ -1717,6 +1764,322 @@ def test_import_removes_tasks_deleted_from_source_only_when_reconciling(tmp_path
 
     assert "deferred" in preserved_task_ids
     assert "deferred" not in reconciled_task_ids
+
+
+def test_workspace_payload_resolves_local_registry_paths(tmp_path: Path) -> None:
+    """Workspace registry entries expose resolved local paths and capabilities."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    payload = Coordinator(load_config(config_path)).workspace_payload()
+
+    assert payload["workspaces"] == [
+        {
+            "name": "hpc",
+            "kind": "local",
+            "path": str(workspace),
+            "config_path": str(workspace / "agent-tracker.config.json"),
+            "spool_outbox": str(workspace / ".agent-tracker" / "spool" / "outbox"),
+            "artifacts_path": str(workspace / "results" / "worker-launches"),
+            "roles": ["agent-coordinator"],
+            "capabilities": ["local-worker", "summary-test"],
+        }
+    ]
+
+
+@pytest.mark.parametrize("field", ["config_path", "spool_outbox", "artifacts_path"])
+@pytest.mark.parametrize("escape_kind", ["absolute", "parent"])
+def test_workspace_payload_rejects_non_relative_local_paths(
+    tmp_path: Path,
+    field: str,
+    escape_kind: str,
+) -> None:
+    """Local workspace child path settings cannot be absolute or escape upward."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"]["hpc"][field] = (
+        str(workspace / "absolute-child") if escape_kind == "absolute" else "../outside"
+    )
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"workspaces.hpc.{field}"):
+        Coordinator(load_config(config_path)).workspace_payload()
+
+
+def test_launch_worker_dry_run_does_not_create_artifacts(tmp_path: Path) -> None:
+    """Dry-run worker launches report intended paths without writing files."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+
+    result = coord.launch_worker("hpc", prompt_text="Report capabilities.", dry_run=True)
+
+    assert result["status"] == "dry_run"
+    assert result["workspace"]["name"] == "hpc"
+    assert result["command"] == []
+    assert not Path(result["artifacts"]["directory"]).exists()
+
+
+def test_launch_worker_dry_run_rejects_claim_without_mutation(tmp_path: Path) -> None:
+    """Dry-run worker launches cannot claim tasks as a side effect."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="claim_task cannot be used with dry_run"):
+        coord.launch_worker(
+            "hpc",
+            task_id="ready",
+            agent_id="agent-1",
+            claim_task=True,
+            dry_run=True,
+        )
+
+    state = coord.get_task("ready")
+    assert state.task.status == "pending"
+    assert state.lease_token == ""
+    assert state.lease_agent_id == ""
+    assert not (workspace / "results" / "worker-launches").exists()
+
+
+def test_launch_worker_prepares_prompt_report_spool_and_task_evidence(
+    tmp_path: Path,
+) -> None:
+    """Prepared local launches write durable artifacts and task evidence."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    result = coord.launch_worker("hpc", task_id="ready", agent_id="agent-1")
+    artifacts = result["artifacts"]
+    state = coord.get_task("ready")
+    outbox = workspace / ".agent-tracker" / "spool" / "outbox"
+
+    assert result["status"] == "prepared"
+    assert Path(artifacts["prompt"]).read_text(encoding="utf-8").startswith("# Ready")
+    assert Path(artifacts["report"]).read_text(encoding="utf-8") == (
+        "Worker launch prepared; no command was executed.\n"
+    )
+    assert Path(artifacts["launch"]).exists()
+    assert f"worker-launch:{result['launch_id']}" in state.evidence
+    assert f"file:{artifacts['launch']}" in state.evidence
+    event_files = sorted(outbox.glob("*.json"))
+    assert len(event_files) == 1
+    event = json.loads(event_files[0].read_text(encoding="utf-8"))
+    assert event["kind"] == "agent_tracker.worker_launch"
+    assert event["task_id"] == "ready"
+    assert event["status"] == "prepared"
+
+
+def test_cli_launch_worker_executes_local_command_and_writes_report(
+    tmp_path: Path,
+) -> None:
+    """The launch-worker CLI can execute a harmless local worker command."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    script = (
+        "from pathlib import Path; "
+        "import os; "
+        "Path(os.environ['AGENT_TRACKER_WORKER_REPORT']).write_text("
+        "'capabilities available\\n', encoding='utf-8')"
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "hpc",
+                "--prompt",
+                "Report capabilities.",
+                "--agent",
+                "agent-1",
+                "--execute",
+                "--json",
+                "--command",
+                sys.executable,
+                "-c",
+                script,
+            ]
+        )
+
+    assert code == 0
+    result = json.loads(stdout.getvalue())
+    assert result["status"] == "succeeded"
+    assert result["returncode"] == 0
+    assert Path(result["artifacts"]["report"]).read_text(encoding="utf-8") == (
+        "capabilities available\n"
+    )
+    assert Path(result["artifacts"]["stdout"]).read_text(encoding="utf-8") == ""
+    assert Path(result["artifacts"]["stderr"]).read_text(encoding="utf-8") == ""
+
+
+def test_cli_launch_worker_ssh_workspace_reports_error_without_traceback(
+    tmp_path: Path,
+) -> None:
+    """The CLI reports unsupported SSH worker launches without a traceback."""
+    root = tmp_path / "tracker"
+    root.mkdir()
+    config_path = write_project(root)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["workspaces"] = {
+        "remote": {
+            "kind": "ssh",
+            "host": "example.internal",
+            "remote_path": "/srv/project",
+        }
+    }
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    stderr = StringIO()
+
+    with redirect_stderr(stderr):
+        code = cli.main(
+            [
+                "launch-worker",
+                "--config",
+                str(config_path),
+                "--workspace",
+                "remote",
+                "--prompt",
+                "Report capabilities.",
+            ]
+        )
+
+    assert code == 1
+    assert "error: launch-worker currently supports only local workspaces" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_cli_launch_worker_command_remainder_keeps_later_options_in_command() -> None:
+    """Tokens after --command belong to the worker command argv."""
+    args = cli.build_parser().parse_args(
+        [
+            "launch-worker",
+            "--workspace",
+            "hpc",
+            "--execute",
+            "--json",
+            "--command",
+            "python",
+            "-c",
+            "print(1)",
+        ]
+    )
+    trailing_args = cli.build_parser().parse_args(
+        [
+            "launch-worker",
+            "--workspace",
+            "hpc",
+            "--execute",
+            "--command",
+            "python",
+            "-c",
+            "print(1)",
+            "--json",
+        ]
+    )
+
+    assert args.json is True
+    assert args.command == ["python", "-c", "print(1)"]
+    assert trailing_args.json is False
+    assert trailing_args.command == ["python", "-c", "print(1)", "--json"]
+
+
+@pytest.mark.parametrize(
+    ("exc", "returncode"),
+    [
+        (FileNotFoundError(2, "No such file or directory", "missing-worker"), 127),
+        (PermissionError(13, "Permission denied", "denied-worker"), 126),
+    ],
+)
+def test_launch_worker_start_errors_write_failed_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc: OSError,
+    returncode: int,
+) -> None:
+    """Worker process startup failures produce durable failed launch artifacts."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+
+    def fail_run(*args: object, **kwargs: object) -> object:
+        raise exc
+
+    monkeypatch.setattr(service_module.subprocess, "run", fail_run)
+
+    result = coord.launch_worker(
+        "hpc",
+        prompt_text="Report capabilities.",
+        execute=True,
+        command=["worker-command"],
+    )
+    artifacts = result["artifacts"]
+    launch = json.loads(Path(artifacts["launch"]).read_text(encoding="utf-8"))
+
+    assert result["status"] == "failed"
+    assert result["returncode"] == returncode
+    assert launch["status"] == "failed"
+    assert launch["returncode"] == returncode
+    assert Path(artifacts["stdout"]).read_text(encoding="utf-8") == ""
+    assert "worker command failed to start" in Path(artifacts["stderr"]).read_text(encoding="utf-8")
+    assert Path(artifacts["report"]).read_text(encoding="utf-8") == (
+        "Worker command produced no report.\n"
+    )
+
+
+def test_launch_worker_timeout_writes_failed_artifacts(tmp_path: Path) -> None:
+    """Timed-out worker commands produce a failed launch result and logs."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+
+    result = coord.launch_worker(
+        "hpc",
+        prompt_text="Report capabilities.",
+        execute=True,
+        command=[sys.executable, "-c", "import time; time.sleep(5)"],
+        timeout_seconds=1,
+    )
+
+    assert result["status"] == "failed"
+    assert result["returncode"] == 124
+    assert "timed out" in Path(result["artifacts"]["stderr"]).read_text(encoding="utf-8")
+    launch = json.loads(Path(result["artifacts"]["launch"]).read_text(encoding="utf-8"))
+    assert launch["status"] == "failed"
+    assert launch["returncode"] == 124
+
+
+def test_launch_worker_sanitizes_launch_id_path_components(tmp_path: Path) -> None:
+    """Launch artifact and event filenames do not use raw path-like IDs."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["project_id"] = "../toy.project"
+    hpc_workspace = config_payload["workspaces"].pop("hpc")
+    config_payload["workspaces"] = {"../hpc.workspace": hpc_workspace}
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+
+    result = coord.launch_worker("../hpc.workspace", prompt_text="Report capabilities.")
+    launch_id = result["launch_id"]
+    launch_path = Path(result["artifacts"]["launch"])
+    outbox = workspace / ".agent-tracker" / "spool" / "outbox"
+    event_files = sorted(outbox.glob("*.json"))
+
+    assert "/" not in launch_id
+    assert "\\" not in launch_id
+    assert ".." not in launch_id
+    assert launch_path.parent == workspace / "results" / "worker-launches" / launch_id
+    assert launch_path.exists()
+    assert len(event_files) == 1
+    assert event_files[0].parent == outbox
+    assert event_files[0].name == f"{launch_id}.json"
 
 
 def test_import_rejects_unknown_task_dependency(tmp_path: Path) -> None:

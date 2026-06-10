@@ -314,6 +314,8 @@ agent-tracker status --json
 | `ingest-event` | Ingest one JSON event file. | `agent-tracker ingest-event --config demo-tracker/project.json event.json --actor callback` |
 | `pull-spool` | Copy complete JSON files from `spool.remote_inbox` to the local spool inbox; add `--dry-run` to preview. | `agent-tracker pull-spool --config demo-tracker/project.json --dry-run` |
 | `ingest-spool` | Ingest all `*.json` files from the configured local spool inbox. | `agent-tracker ingest-spool --config demo-tracker/project.json --actor spool` |
+| `list-workspaces` | List configured cross-project worker workspaces. | `agent-tracker list-workspaces --config demo-tracker/project.json` |
+| `launch-worker` | Prepare or run a one-shot local worker in a configured workspace. | `agent-tracker launch-worker --config demo-tracker/project.json --workspace hpc --task-id write-readme` |
 | `intake record` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker intake --config demo-tracker/project.json record --kind feature --tag inbox "Add triage workflow"` |
 | `intake list` | List raw intake records for later project-manager triage. | `agent-tracker intake --config demo-tracker/project.json list --json` |
 | `intake update` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker intake --config demo-tracker/project.json update <intake-id> --status closed` |
@@ -381,6 +383,48 @@ also supports opt-in `ssh://` and `sftp://` remote inboxes when the optional
 inbox, skips `.partial`, `.part`, and `.tmp` names, leaves remote files in
 place, skips identical files already present in the local inbox/done/error
 paths, and reports conflicts instead of overwriting different local files.
+
+## Cross-Project Workspaces
+
+Projects that coordinate work across local repositories can configure named
+worker workspaces:
+
+```json
+{
+  "workspaces": {
+    "hpc": {
+      "kind": "local",
+      "path": "~/Documents/hpc-ci-project-tracker",
+      "config_path": "agent-tracker.config.json",
+      "spool_outbox": ".agent-tracker/spool/outbox",
+      "artifacts_path": "results/worker-launches",
+      "capabilities": ["local-worker", "summary-test"]
+    }
+  }
+}
+```
+
+Inspect configured workspaces with:
+
+```bash
+agent-tracker list-workspaces --config tracking/project.json
+```
+
+`launch-worker` renders a task prompt or accepts a literal prompt, writes
+prompt/report/launch artifacts under the configured workspace path, and can run either
+the workspace's `worker_command` or a command supplied on the CLI:
+
+```bash
+agent-tracker launch-worker --config tracking/project.json \
+  --workspace hpc \
+  --task-id collect-status \
+  --execute
+```
+
+The default command is a local `codex exec` one-shot. Current `launch-worker`
+execution is local-only. SSH/SFTP support exists for pulling remote spool
+events; remote queue mutation remains mediated by the task-ingest command
+contract and processor work.
 
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,
 `pr:https://github.com/org/repo/pull/123`, or `artifact:s3://bucket/key`.

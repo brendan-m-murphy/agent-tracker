@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
+import os
 import posixpath
+import shlex
 import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -787,6 +792,154 @@ class Coordinator:
                 result["copied"] += 1
         return result
 
+    def workspace_payload(self) -> dict[str, Any]:
+        """Return configured cross-project workspaces."""
+        return {
+            "project_id": self.config.project_id,
+            "workspaces": [
+                _workspace_to_dict(workspace)
+                for workspace in sorted(
+                    _workspace_records(self.config),
+                    key=lambda item: item.name,
+                )
+            ],
+        }
+
+    def launch_worker(
+        self,
+        workspace_name: str,
+        *,
+        task_id: str = "",
+        prompt_text: str = "",
+        agent_id: str = "",
+        role: str = "",
+        lease_seconds: int = 3600,
+        claim_task: bool = False,
+        markdown: bool = True,
+        execute: bool = False,
+        command: list[str] | None = None,
+        dry_run: bool = False,
+        timeout_seconds: int = 0,
+    ) -> dict[str, Any]:
+        """Prepare or run a one-shot local worker in a configured workspace."""
+        self._ensure_mutation_allowed()
+        workspace = _workspace_by_name(self.config, workspace_name)
+        if workspace.kind != "local":
+            raise ValueError(
+                "launch-worker currently supports only local workspaces; "
+                "use pull-spool for SSH/SFTP event collection until the "
+                "task-ingest command processor exists"
+            )
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be greater than or equal to zero")
+        if not workspace.path.is_dir():
+            raise ValueError(f"workspace path is not a directory: {workspace.path}")
+        if dry_run and claim_task:
+            raise ValueError("claim_task cannot be used with dry_run")
+
+        launch_id = (
+            f"{_launch_id_component(self.config.project_id, fallback='project')}-"
+            f"{_launch_id_component(workspace.name, fallback='workspace')}-"
+            f"{uuid.uuid4().hex[:12]}"
+        )
+        actor = _first_text(agent_id, f"worker-launch:{workspace.name}")
+        claim: Claim | None = None
+        cleaned_task_id = _first_text(task_id)
+        if claim_task:
+            if not cleaned_task_id:
+                raise ValueError("task_id is required when claim_task is true")
+            claim = self.claim(
+                agent_id=actor,
+                task_id=cleaned_task_id,
+                role=role,
+                lease_seconds=lease_seconds,
+            )
+        if cleaned_task_id:
+            prompt = self.render_prompt(cleaned_task_id, markdown=markdown)
+        else:
+            prompt = prompt_text.strip()
+        if not prompt:
+            raise ValueError("prompt text or task_id is required")
+
+        launch_dir = workspace.artifacts_path / launch_id
+        prompt_path = launch_dir / "prompt.md"
+        report_path = launch_dir / "report.md"
+        stdout_path = launch_dir / "stdout.txt"
+        stderr_path = launch_dir / "stderr.txt"
+        launch_path = launch_dir / "launch.json"
+        placeholders = {
+            "agent_id": actor,
+            "launch_id": launch_id,
+            "project_id": self.config.project_id,
+            "prompt_path": str(prompt_path),
+            "report_path": str(report_path),
+            "task_id": cleaned_task_id,
+            "workspace": workspace.name,
+            "workspace_path": str(workspace.path),
+        }
+        command_argv = _worker_command_argv(workspace, command, placeholders) if execute else []
+        result: dict[str, Any] = {
+            "project_id": self.config.project_id,
+            "workspace": _workspace_to_dict(workspace),
+            "launch_id": launch_id,
+            "status": "dry_run" if dry_run else "prepared",
+            "dry_run": dry_run,
+            "execute": execute,
+            "task_id": cleaned_task_id,
+            "agent_id": actor,
+            "role": _first_text(role),
+            "lease": claim.__dict__ if claim else None,
+            "artifacts": {
+                "directory": str(launch_dir),
+                "prompt": str(prompt_path),
+                "report": str(report_path),
+                "stdout": str(stdout_path),
+                "stderr": str(stderr_path),
+                "launch": str(launch_path),
+            },
+            "command": command_argv,
+        }
+        if dry_run:
+            return result
+
+        launch_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(prompt, encoding="utf-8")
+        if execute:
+            completed = _run_worker_command(
+                command_argv,
+                workspace=workspace,
+                prompt=prompt,
+                report_path=report_path,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                env=placeholders,
+                timeout_seconds=timeout_seconds,
+            )
+            result["status"] = "succeeded" if completed.returncode == 0 else "failed"
+            result["returncode"] = completed.returncode
+        else:
+            report_path.write_text(
+                "Worker launch prepared; no command was executed.\n",
+                encoding="utf-8",
+            )
+        launch_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        if workspace.spool_outbox is not None:
+            _write_worker_launch_event(workspace, result)
+        if cleaned_task_id:
+            self.record_evidence(
+                cleaned_task_id,
+                f"worker-launch:{launch_id}",
+                actor=actor,
+            )
+            self.record_evidence(
+                cleaned_task_id,
+                f"file:{launch_path}",
+                actor=actor,
+            )
+        return result
+
     def render_prompt(
         self,
         task_id: str,
@@ -1061,6 +1214,305 @@ class _SftpSpoolConfig:
     client_keys: list[str] | None
 
 
+@dataclass(frozen=True)
+class _WorkerWorkspace:
+    """Resolved cross-project workspace configuration."""
+
+    name: str
+    kind: str
+    path: Path
+    config_path: Path | None
+    spool_outbox: Path | None
+    artifacts_path: Path
+    roles: list[str]
+    capabilities: list[str]
+    worker_command: list[str]
+    host: str
+    remote_path: str
+
+
+def _workspace_records(config: ProjectConfig) -> list[_WorkerWorkspace]:
+    """Return resolved workspace registry entries."""
+    raw_workspaces = config.raw.get("workspaces", {})
+    if not isinstance(raw_workspaces, dict):
+        return []
+    return [
+        _parse_workspace(config, name, value)
+        for name, value in raw_workspaces.items()
+        if isinstance(value, dict)
+    ]
+
+
+def _workspace_by_name(config: ProjectConfig, name: str) -> _WorkerWorkspace:
+    """Return one configured workspace by name."""
+    cleaned = _first_text(name)
+    if not cleaned:
+        raise ValueError("workspace is required")
+    for workspace in _workspace_records(config):
+        if workspace.name == cleaned:
+            return workspace
+    raise KeyError(f"unknown workspace: {cleaned}")
+
+
+def _parse_workspace(config: ProjectConfig, name: str, raw: dict[str, Any]) -> _WorkerWorkspace:
+    """Resolve one workspace registry entry."""
+    cleaned_name = _first_text(name)
+    kind = _first_text(raw.get("kind")) or "local"
+    if kind == "local":
+        path = _resolve_config_path(config, _first_text(raw.get("path")))
+    else:
+        path = Path(_first_text(raw.get("remote_path")) or ".")
+    config_path = _workspace_relative_path(
+        path,
+        raw.get("config_path"),
+        field_name=f"workspaces.{cleaned_name}.config_path",
+        require_child=kind == "local",
+    )
+    spool_outbox = _workspace_relative_path(
+        path,
+        raw.get("spool_outbox"),
+        field_name=f"workspaces.{cleaned_name}.spool_outbox",
+        require_child=kind == "local",
+    )
+    artifacts_path = (
+        _workspace_relative_path(
+            path,
+            raw.get("artifacts_path"),
+            field_name=f"workspaces.{cleaned_name}.artifacts_path",
+            require_child=kind == "local",
+        )
+        or path / ".agent-tracker" / "workers"
+    )
+    return _WorkerWorkspace(
+        name=cleaned_name,
+        kind=kind,
+        path=path,
+        config_path=config_path,
+        spool_outbox=spool_outbox,
+        artifacts_path=artifacts_path,
+        roles=_string_list(raw.get("roles")),
+        capabilities=_string_list(raw.get("capabilities")),
+        worker_command=_string_list(raw.get("worker_command")),
+        host=_first_text(raw.get("host")),
+        remote_path=_first_text(raw.get("remote_path")),
+    )
+
+
+def _workspace_relative_path(
+    root: Path,
+    value: Any,
+    *,
+    field_name: str,
+    require_child: bool,
+) -> Path | None:
+    """Resolve an optional path configured below a workspace root.
+
+    Args:
+        root: Workspace root used as the base for relative paths.
+        value: Raw config value to resolve. Empty values are treated as absent.
+        field_name: Human-readable config field name for validation errors.
+        require_child: Whether absolute paths and parent-directory escapes are
+            rejected.
+
+    Returns:
+        The resolved path joined to ``root``, an absolute path when allowed for
+        non-local workspaces, or ``None`` when ``value`` is empty.
+
+    Raises:
+        ValueError: If ``require_child`` is true and ``value`` is absolute or
+            resolves outside ``root``.
+    """
+    text = _first_text(value)
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        if require_child:
+            raise ValueError(f"{field_name} must be a workspace-relative path")
+        return path
+    candidate = root / path
+    if require_child:
+        try:
+            candidate.resolve(strict=False).relative_to(root.resolve(strict=False))
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be contained by the workspace path") from exc
+    return candidate
+
+
+def _string_list(value: Any) -> list[str]:
+    """Return a normalized string list from a string or list value."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return shlex.split(value) if value.strip() else []
+    if isinstance(value, list):
+        return _clean_strings(value)
+    return []
+
+
+def _workspace_to_dict(workspace: _WorkerWorkspace) -> dict[str, Any]:
+    """Return a JSON-friendly workspace payload."""
+    payload = {
+        "name": workspace.name,
+        "kind": workspace.kind,
+        "path": str(workspace.path),
+        "config_path": str(workspace.config_path) if workspace.config_path else "",
+        "spool_outbox": str(workspace.spool_outbox) if workspace.spool_outbox else "",
+        "artifacts_path": str(workspace.artifacts_path),
+        "roles": workspace.roles,
+        "capabilities": workspace.capabilities,
+    }
+    if workspace.kind == "ssh":
+        payload["host"] = workspace.host
+        payload["remote_path"] = workspace.remote_path
+    if workspace.worker_command:
+        payload["worker_command"] = workspace.worker_command
+    return payload
+
+
+def _worker_command_argv(
+    workspace: _WorkerWorkspace,
+    command: list[str] | None,
+    placeholders: dict[str, str],
+) -> list[str]:
+    """Return the command argv for a worker launch."""
+    raw_command = command or workspace.worker_command or _default_worker_command()
+    rendered = [_render_template_arg(arg, placeholders) for arg in raw_command]
+    if not rendered:
+        raise ValueError("worker command is empty")
+    return rendered
+
+
+def _default_worker_command() -> list[str]:
+    """Return the default local Codex one-shot command."""
+    return [
+        "codex",
+        "exec",
+        "--cd",
+        "{workspace_path}",
+        "--output-last-message",
+        "{report_path}",
+        "-",
+    ]
+
+
+def _render_template_arg(arg: str, placeholders: dict[str, str]) -> str:
+    """Render one command argument placeholder."""
+    rendered = arg
+    for key, value in placeholders.items():
+        rendered = rendered.replace("{" + key + "}", value)
+    return rendered
+
+
+def _run_worker_command(
+    command: list[str],
+    *,
+    workspace: _WorkerWorkspace,
+    prompt: str,
+    report_path: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    env: dict[str, str],
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    """Run a worker command in a local workspace."""
+    process_env = {
+        "AGENT_TRACKER_WORKER_AGENT_ID": env["agent_id"],
+        "AGENT_TRACKER_WORKER_LAUNCH_ID": env["launch_id"],
+        "AGENT_TRACKER_WORKER_PROMPT": env["prompt_path"],
+        "AGENT_TRACKER_WORKER_REPORT": env["report_path"],
+        "AGENT_TRACKER_WORKER_TASK_ID": env["task_id"],
+        "AGENT_TRACKER_WORKER_WORKSPACE": env["workspace"],
+    }
+    try:
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            cwd=workspace.path,
+            env={**os.environ, **process_env},
+            timeout=timeout_seconds or None,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_output_text(exc.stdout)
+        stderr = _timeout_output_text(exc.stderr)
+        if stderr:
+            stderr += "\n"
+        stderr += f"worker command timed out after {exc.timeout} seconds\n"
+        completed = subprocess.CompletedProcess(
+            command,
+            returncode=124,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except FileNotFoundError as exc:
+        completed = _worker_start_failed(command, returncode=127, exc=exc)
+    except PermissionError as exc:
+        completed = _worker_start_failed(command, returncode=126, exc=exc)
+    except OSError as exc:
+        completed = _worker_start_failed(command, returncode=1, exc=exc)
+    stdout_path.write_text(completed.stdout, encoding="utf-8")
+    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    if not report_path.exists():
+        report_text = completed.stdout or "Worker command produced no report.\n"
+        report_path.write_text(report_text, encoding="utf-8")
+    return completed
+
+
+def _worker_start_failed(
+    command: list[str],
+    *,
+    returncode: int,
+    exc: OSError,
+) -> subprocess.CompletedProcess[str]:
+    """Return a failed completed process for command startup errors."""
+    return subprocess.CompletedProcess(
+        command,
+        returncode=returncode,
+        stdout="",
+        stderr=f"worker command failed to start: {exc}\n",
+    )
+
+
+def _timeout_output_text(value: str | bytes | None) -> str:
+    """Return captured timeout output as text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
+def _launch_id_component(value: str, *, fallback: str) -> str:
+    """Return a path-safe launch ID component."""
+    cleaned = _first_text(value)
+    chars = [char.lower() if char.isalnum() else "-" for char in cleaned]
+    component = "-".join(part for part in "".join(chars).split("-") if part)
+    return component or fallback
+
+
+def _write_worker_launch_event(workspace: _WorkerWorkspace, result: dict[str, Any]) -> None:
+    """Publish a worker launch event into a workspace outbox."""
+    if workspace.spool_outbox is None:
+        return
+    workspace.spool_outbox.mkdir(parents=True, exist_ok=True)
+    launch_id = _launch_id_component(str(result["launch_id"]), fallback="launch")
+    event_path = workspace.spool_outbox / f"{launch_id}.json"
+    payload = {
+        "event_id": f"worker-launch-{launch_id}",
+        "kind": "agent_tracker.worker_launch",
+        "task_id": result.get("task_id", ""),
+        "workspace": workspace.name,
+        "status": result.get("status", ""),
+        "artifact": f"file:{result['artifacts']['launch']}",
+        "report": f"file:{result['artifacts']['report']}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_spool_file_atomic(json.dumps(payload, indent=2).encode(), event_path)
+
+
 def _is_spool_event_file(path: Path) -> bool:
     """Return whether a remote spool path is a complete JSON event file."""
     return _is_spool_event_name(path.name)
@@ -1295,10 +1747,9 @@ def _is_safe_spool_entry_name(name: str) -> bool:
 def _load_asyncssh() -> Any:
     """Import AsyncSSH lazily for optional SSH spool support."""
     try:
-        import asyncssh  # type: ignore[import-not-found]
+        return importlib.import_module("asyncssh")
     except ModuleNotFoundError as exc:
         raise ImportError(
             "SSH spool transport requires the optional 'ssh' extra; "
             "install it with `agent-tracker[ssh]` or run `uv run --extra ssh ...`"
         ) from exc
-    return asyncssh

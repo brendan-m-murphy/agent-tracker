@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sqlite3
 import sys
 import textwrap
@@ -608,6 +609,74 @@ def command_pull_spool(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_list_workspaces(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.workspace_payload()
+    if args.json:
+        print_json(payload)
+        return 0
+    if not payload["workspaces"]:
+        _human_console().print(Text("No workspaces configured."))
+        return 0
+    for workspace in payload["workspaces"]:
+        _print_human_line(
+            f"{workspace['name']}: {workspace['kind']} {workspace['path']}",
+            subsequent_indent="  ",
+        )
+        if workspace.get("config_path"):
+            _print_human_field("config", workspace["config_path"])
+        if workspace.get("spool_outbox"):
+            _print_human_field("spool", workspace["spool_outbox"])
+        if workspace.get("capabilities"):
+            _print_human_field("capabilities", ", ".join(workspace["capabilities"]))
+    return 0
+
+
+def command_launch_worker(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    prompt_text = args.prompt
+    if args.prompt_file:
+        prompt_text = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+    command = list(args.command)
+    if args.command_string:
+        command = shlex.split(args.command_string)
+    result = coord.launch_worker(
+        args.workspace,
+        task_id=args.task_id,
+        prompt_text=prompt_text,
+        agent_id=args.agent,
+        role=args.role,
+        lease_seconds=args.lease_seconds,
+        claim_task=args.claim_task,
+        markdown=args.markdown,
+        execute=args.execute,
+        command=command or None,
+        dry_run=args.dry_run,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if args.json:
+        print_json(result)
+        return 0
+    _print_human_section(f"Worker launch {result['launch_id']}")
+    _print_human_kv_table(
+        [
+            ("status", result["status"]),
+            ("workspace", result["workspace"]["name"]),
+            ("task", result.get("task_id") or "(prompt only)"),
+            ("prompt", result["artifacts"]["prompt"]),
+            ("report", result["artifacts"]["report"]),
+            ("launch", result["artifacts"]["launch"]),
+        ],
+        label_width=9,
+    )
+    if result.get("command"):
+        _print_human_kv_table([("command", shlex.join(result["command"]))], label_width=9)
+    if "returncode" in result:
+        _print_human_kv_table([("return", result["returncode"])], label_width=9)
+    return 0
+
+
 def command_record_intake(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -1198,6 +1267,37 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(pull_spool)
     pull_spool.add_argument("--dry-run", action="store_true")
     pull_spool.set_defaults(func=command_pull_spool)
+
+    list_workspaces = sub.add_parser(
+        "list-workspaces",
+        help="List configured local and remote worker workspaces.",
+    )
+    add_common(list_workspaces)
+    list_workspaces.add_argument("--json", action="store_true")
+    list_workspaces.set_defaults(func=command_list_workspaces)
+
+    launch_worker = sub.add_parser(
+        "launch-worker",
+        help="Prepare or run a one-shot local worker in a configured workspace.",
+    )
+    add_common(launch_worker)
+    launch_worker.add_argument("--workspace", required=True)
+    launch_worker.add_argument("--task-id", default="")
+    launch_worker.add_argument("--prompt", default="")
+    launch_worker.add_argument("--prompt-file", default="")
+    launch_worker.add_argument("--agent", default="")
+    launch_worker.add_argument("--role", default="")
+    launch_worker.add_argument("--lease-seconds", type=int, default=3600)
+    launch_worker.add_argument("--claim-task", action="store_true")
+    launch_worker.add_argument("--markdown", dest="markdown", action="store_true", default=True)
+    launch_worker.add_argument("--no-markdown", dest="markdown", action="store_false")
+    launch_worker.add_argument("--execute", action="store_true")
+    launch_worker.add_argument("--dry-run", action="store_true")
+    launch_worker.add_argument("--timeout-seconds", type=int, default=0)
+    launch_worker.add_argument("--command-string", default="")
+    launch_worker.add_argument("--command", nargs=argparse.REMAINDER, default=[])
+    launch_worker.add_argument("--json", action="store_true")
+    launch_worker.set_defaults(func=command_launch_worker)
 
     record_intake = sub.add_parser(
         "record-intake",

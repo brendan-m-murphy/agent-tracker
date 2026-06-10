@@ -108,6 +108,16 @@ when replacing a built-in default with project-specific behavior.
     "done": "spool/done",
     "error": "spool/error",
     "remote_inbox": "/shared/demo/spool/outbox"
+  },
+  "workspaces": {
+    "hpc": {
+      "kind": "local",
+      "path": "~/Documents/hpc-ci-project-tracker",
+      "config_path": "agent-tracker.config.json",
+      "spool_outbox": ".agent-tracker/spool/outbox",
+      "artifacts_path": "results/worker-launches",
+      "capabilities": ["local-worker"]
+    }
   }
 }
 ```
@@ -132,6 +142,7 @@ when replacing a built-in default with project-specific behavior.
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
 | `spool_error` | No | `<inbox>/error` | Legacy top-level error path used when `spool` is absent. |
+| `workspaces` | No | None | Named local or SSH workspace registry for cross-project worker launch and diagnostics. |
 
 Use stable `project_id` values. Evidence, events, audit entries, and snapshots
 are all tied to that identifier.
@@ -342,9 +353,78 @@ and should not store secrets in committed config files.
 
 `pull-spool` is a bounded copy step. It does not run as a daemon.
 
+## Workspace Registry
+
+The optional `workspaces` object gives coordinators stable names for local or
+remote project checkouts. `list-workspaces` reports the resolved registry.
+`launch-worker` currently executes only `kind: "local"` entries.
+
+```json
+{
+  "workspaces": {
+    "hpc": {
+      "kind": "local",
+      "path": "~/Documents/hpc-ci-project-tracker",
+      "config_path": "agent-tracker.config.json",
+      "spool_outbox": ".agent-tracker/spool/outbox",
+      "artifacts_path": "results/worker-launches",
+      "roles": ["agent-coordinator"],
+      "capabilities": ["local-worker", "summary-test"],
+      "worker_command": [
+        "codex",
+        "exec",
+        "--cd",
+        "{workspace_path}",
+        "--output-last-message",
+        "{report_path}",
+        "-"
+      ]
+    }
+  }
+}
+```
+
+Local workspace paths are resolved relative to the tracker config unless they
+are absolute or start with `~`. `config_path`, `spool_outbox`, and
+`artifacts_path` are resolved relative to the workspace path. If
+`artifacts_path` is omitted, worker artifacts are written below
+`.agent-tracker/workers` inside the workspace.
+
+`worker_command` can be a list of argv items or a shell-like string parsed with
+`shlex`. It is not run through a shell. The launcher replaces these placeholders
+inside argv items:
+
+- `{agent_id}`
+- `{launch_id}`
+- `{project_id}`
+- `{prompt_path}`
+- `{report_path}`
+- `{task_id}`
+- `{workspace}`
+- `{workspace_path}`
+
+SSH workspace entries are validated and listed, but not launched yet:
+
+```json
+{
+  "workspaces": {
+    "remote-hpc": {
+      "kind": "ssh",
+      "host": "hpc-login",
+      "remote_path": "/work/project",
+      "spool_outbox": ".agent-tracker/spool/outbox"
+    }
+  }
+}
+```
+
+Use SSH/SFTP `pull-spool` for remote event collection today. Remote queue
+mutation should wait for the task-ingest command processor rather than letting
+remote workers open canonical SQLite directly.
+
 ## Current Validation Behavior
 
-Current config loading is intentionally lightweight. Missing required keys,
-invalid JSON, invalid plugin specs, and SQLite setup errors are reported by the
-CLI as concise `error: ...` messages. A future schema-versioning task will add
-stronger config validation and migrations.
+Config loading validates the schema version, known string fields, spool fields,
+SSH spool options, and workspace registry shapes. Invalid JSON, invalid plugin
+specs, and SQLite setup errors are reported by the CLI as concise `error: ...`
+messages.

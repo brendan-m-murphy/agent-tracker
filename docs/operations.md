@@ -349,6 +349,71 @@ agent-tracker task --config project.json write-readme --json
 The default prompt is intentionally compact. Use a custom prompt renderer plugin
 when a project needs richer context.
 
+## Launch Local Workers
+
+Use `workspaces` in the project config when a coordinator needs to address other
+local project checkouts by name. Inspect the registry first:
+
+```bash
+agent-tracker list-workspaces --config project.json
+```
+
+Prepare a worker launch for a task without executing a command:
+
+```bash
+agent-tracker launch-worker --config project.json \
+  --workspace hpc \
+  --task-id write-readme
+```
+
+This writes a rendered prompt, a placeholder report, and a launch JSON artifact
+below the workspace's configured `artifacts_path`. `--markdown` is the default;
+`--no-markdown` forwards `markdown=False` to custom prompt renderers. The
+built-in renderer currently emits the same compact Markdown-style prompt for
+both modes. The launcher records `worker-launch:<id>` and
+`file:<launch.json>` evidence on the task when `--task-id` is supplied. If the
+workspace has `spool_outbox`, it also writes a complete
+`agent_tracker.worker_launch` event JSON file there for later collection.
+
+Run the configured local worker command with `--execute`:
+
+```bash
+agent-tracker launch-worker --config project.json \
+  --workspace hpc \
+  --task-id write-readme \
+  --agent hpc-worker-1 \
+  --execute
+```
+
+The default command is:
+
+```bash
+codex exec --cd {workspace_path} --output-last-message {report_path} -
+```
+
+The rendered prompt is passed on stdin. The command runs in the workspace
+directory, stdout and stderr are captured as launch artifacts, and the final
+report path is exposed through `AGENT_TRACKER_WORKER_REPORT`.
+
+For smoke tests or non-Codex workers, pass an explicit command:
+
+```bash
+agent-tracker launch-worker --config project.json \
+  --workspace hpc \
+  --prompt "Report installed agent-tracker capabilities." \
+  --json \
+  --execute \
+  --command python -c "print('ok')"
+```
+
+Put `launch-worker` options such as `--json` before `--command`. Every token
+after `--command` is treated as part of the worker command argv.
+
+`launch-worker` execution is currently local-only. SSH workspaces can be
+validated and listed, and SSH/SFTP `pull-spool` can collect remote event files,
+but remote queue mutation should wait for the task-ingest command processor
+instead of letting remote agents write canonical SQLite directly.
+
 ## Heartbeat A Lease
 
 Extend the lease and mark the task `in_progress`:
