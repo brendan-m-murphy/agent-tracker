@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sys
 import textwrap
@@ -130,6 +131,115 @@ class HumanOutputRenderer:
             self._overview_ready_row(item)
         else:
             self._overview_attention_row(group, item)
+
+    def task_detail(self, payload: dict[str, Any]) -> None:
+        """Render full human detail for one task.
+
+        Args:
+            payload: Task detail dictionary produced by
+                `Coordinator.task_detail_payload`.
+
+        Side Effects:
+            Writes wrapped, copy-paste-safe human output to the renderer stream.
+        """
+        self.section(f"{payload['id']}: {payload['title']}")
+        rows: list[tuple[str, object]] = [
+            ("state", payload["state"]),
+            ("manual", payload["manual_status"]),
+            ("priority", payload["priority"]),
+        ]
+        if payload.get("repo"):
+            rows.append(("repo", payload["repo"]))
+        if payload.get("prompt_key"):
+            rows.append(("prompt key", payload["prompt_key"]))
+        if payload.get("prompt_path"):
+            rows.append(("prompt path", payload["prompt_path"]))
+        self._detail_rows(rows, label_width=11)
+
+        if payload.get("summary"):
+            self._detail_section("SUMMARY")
+            self.line(payload["summary"], initial_indent="  ", subsequent_indent="  ")
+
+        if payload.get("blockers"):
+            self._detail_section("BLOCKERS")
+            for blocker in payload["blockers"]:
+                self.line(f"- {blocker}", initial_indent="  ", subsequent_indent="    ")
+
+        if payload.get("requirements"):
+            self._detail_section("REQUIREMENTS")
+            for requirement in payload["requirements"]:
+                marker = "OK" if requirement["satisfied"] else "BLOCKED"
+                detail = requirement.get("detail") or ""
+                suffix = f" ({detail})" if detail else ""
+                self.line(
+                    f"- {marker} {requirement['description']}{suffix}",
+                    initial_indent="  ",
+                    subsequent_indent="    ",
+                )
+
+        if payload.get("execution"):
+            self._detail_section("EXECUTION")
+            self._detail_mapping(payload["execution"])
+
+        if payload.get("next_action"):
+            self._detail_section("NEXT ACTION")
+            self.line(payload["next_action"], initial_indent="  ", subsequent_indent="  ")
+
+        if payload.get("validation_checks"):
+            self._detail_section("VALIDATION")
+            for check in payload["validation_checks"]:
+                self.line(f"- {check}", initial_indent="  ", subsequent_indent="    ")
+
+        self._detail_section("EVIDENCE")
+        if payload.get("evidence"):
+            for evidence in payload["evidence"]:
+                self.line(f"- {evidence}", initial_indent="  ", subsequent_indent="    ")
+        else:
+            self.line(
+                "(none)",
+                initial_indent="  ",
+                subsequent_indent="  ",
+                style=OVERVIEW_MUTED_STYLE,
+            )
+
+        if payload.get("metadata"):
+            self._detail_section("METADATA")
+            self._detail_mapping(payload["metadata"])
+
+        lease_rows = [
+            ("agent", payload.get("lease_agent_id") or "(none)"),
+            ("expires", payload.get("lease_expires_at") or "(none)"),
+        ]
+        self._detail_section("LEASE")
+        self._detail_rows(lease_rows, label_width=9)
+
+        completion_rows = [
+            ("action", payload.get("completion_action") or "(none)"),
+            ("by", payload.get("completed_by") or "(none)"),
+            ("at", payload.get("completed_at") or "(none)"),
+        ]
+        self._detail_section("COMPLETION")
+        self._detail_rows(completion_rows, label_width=9)
+
+    def _detail_rows(
+        self,
+        rows: list[tuple[str, object]],
+        *,
+        label_width: int,
+    ) -> None:
+        """Render wrapped key/value rows for task detail sections."""
+        for label, value in rows:
+            self.kv_row(label, value, label_width=label_width)
+
+    def _detail_section(self, heading: str) -> None:
+        """Render a visually separated task detail section."""
+        self._console.print()
+        self.section(heading)
+
+    def _detail_mapping(self, payload: dict[str, Any]) -> None:
+        """Render a dictionary as stable detail rows."""
+        for key in sorted(payload):
+            self.field(str(key), _detail_value(payload[key]), indent=2)
 
     def _overview_summary(self, payload: dict[str, Any]) -> str:
         """Return the one-line overview count summary."""
@@ -473,6 +583,13 @@ def _metadata_notebook_paths(metadata: dict) -> list[str]:
     if isinstance(value, list):
         return [item.strip() for item in value if isinstance(item, str) and item.strip()]
     return []
+
+
+def _detail_value(value: Any) -> str:
+    """Return a stable text representation for detail field values."""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True)
+    return str(value)
 
 
 def _render_text_include(config: ProjectConfig, source_path: str, *, label: str) -> list[str]:

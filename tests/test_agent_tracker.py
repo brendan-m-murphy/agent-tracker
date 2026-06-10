@@ -1136,6 +1136,151 @@ def test_cli_overview_human_output_truncates_unbroken_title_cells(
     assert not any(line.startswith("x") for line in title_lines)
 
 
+def test_cli_show_human_output_expands_blocked_task_detail(tmp_path: Path) -> None:
+    """Show exposes full blockers, requirements, metadata, and next action."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "blocked":
+            raw_task["summary"] = "Blocked until the ready task lands."
+            raw_task["next_action"] = (
+                "Return to the overview after ready publishes implementation evidence."
+            )
+            raw_task["validation_checks"] = ["Manual check: ready evidence explains the handoff."]
+            raw_task["metadata"] = {
+                "roles": ["coordinator"],
+                "write_scopes": ["docs/operations.md"],
+            }
+            raw_task["requirements"] = [
+                {
+                    "kind": "task",
+                    "task": "ready",
+                    "description": (
+                        "Wait for the ready task to publish complete handoff evidence "
+                        "with enough detail for the next agent."
+                    ),
+                }
+            ]
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    coord.claim(agent_id="agent-1", task_id="ready")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["show", "--config", str(config_path), "blocked"])
+
+    output = stdout.getvalue()
+    assert code == 0
+    assert output.startswith("blocked: Blocked\n")
+    assert "BLOCKERS\n" in output
+    assert "Wait for the ready task to publish complete handoff evidence" in output
+    assert "REQUIREMENTS\n" in output
+    assert "- BLOCKED Wait for the ready task" in output
+    assert "NEXT ACTION\n" in output
+    assert "Return to the overview after ready publishes implementation evidence." in output
+    assert "VALIDATION\n" in output
+    assert "Manual check: ready evidence explains the handoff." in output
+    assert "METADATA\n" in output
+    assert 'roles: ["coordinator"]' in output
+    assert 'write_scopes: ["docs/operations.md"]' in output
+    assert_no_box_drawing(output)
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        json_code = cli.main(["show", "--config", str(config_path), "blocked", "--json"])
+    detail_payload = json.loads(stdout.getvalue())
+
+    assert json_code == 0
+    assert detail_payload["id"] == "blocked"
+    assert detail_payload["blockers"] == [
+        "Wait for the ready task to publish complete handoff evidence with enough "
+        "detail for the next agent. (ready: claimed)"
+    ]
+    assert detail_payload["latest_evidence"] == ""
+
+
+def test_cli_show_human_output_includes_lease_evidence_and_completion(
+    tmp_path: Path,
+) -> None:
+    """Show includes active lease details and completion history when available."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.record_evidence("ready", "git:branch-abc123", actor="agent-1")
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        active_code = cli.main(["show", "--config", str(config_path), "ready"])
+    active_output = stdout.getvalue()
+
+    assert active_code == 0
+    assert "LEASE\n" in active_output
+    assert "agent     agent-1" in active_output
+    assert "EVIDENCE\n" in active_output
+    assert "- git:branch-abc123" in active_output
+    assert "COMPLETION\n" in active_output
+    assert "action    (none)" in active_output
+
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["pr:https://example.invalid/pr/1"],
+    )
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        done_code = cli.main(["show", "--config", str(config_path), "ready"])
+    done_output = stdout.getvalue()
+
+    assert done_code == 0
+    assert "- git:branch-abc123" in done_output
+    assert "- pr:https://example.invalid/pr/1" in done_output
+    assert "action    task.complete" in done_output
+    assert "by        agent-1" in done_output
+    assert "at        (none)" not in done_output
+    assert_no_box_drawing(done_output)
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        json_code = cli.main(["show", "--config", str(config_path), "ready", "--json"])
+    detail_payload = json.loads(stdout.getvalue())
+
+    assert json_code == 0
+    assert detail_payload["completion_action"] == "task.complete"
+    assert detail_payload["completed_by"] == "agent-1"
+    assert detail_payload["latest_evidence"] == "pr:https://example.invalid/pr/1"
+
+
+def test_cli_show_omits_completion_audit_after_task_reopens(tmp_path: Path) -> None:
+    """Show reports completion details only for tasks that are currently done."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    coord.complete(
+        "ready",
+        lease_token=claim.lease_token,
+        agent_id="agent-1",
+        evidence=["pr:https://example.invalid/pr/1"],
+    )
+    coord.import_tasks(reconcile_runtime_state=True)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["show", "--config", str(config_path), "ready", "--json"])
+    detail_payload = json.loads(stdout.getvalue())
+
+    assert code == 0
+    assert detail_payload["state"] == "ready"
+    assert "completion_action" not in detail_payload
+    assert "completed_by" not in detail_payload
+    assert "completed_at" not in detail_payload
+
+
 def test_cli_next_human_output_wraps_long_next_action(tmp_path: Path) -> None:
     """Human next output wraps long next-action lines under the field value."""
     config_path = write_project(tmp_path)

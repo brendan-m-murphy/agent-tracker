@@ -304,10 +304,24 @@ starts with count summaries, separates actionable Active/Review/Merge work from
 blocked work, shows ready task titles, keeps blocker text only for the separate
 `BLOCKED` section, and ends with a short recent completion tail. It
 intentionally omits full `next_action` prose, evidence paths, and completion
-evidence from the default view. Use
-`agent-tracker task <task-id>` for full detail or `overview --json` for full
-structured values. Each group reports a count and defaults to five visible
-items for readability; pass `--limit 0` to show every grouped task.
+evidence from the default view. Use `agent-tracker show <task-id>` for a full
+human drilldown, `agent-tracker show <task-id> --json` for the same computed
+detail payload as structured data, `agent-tracker task <task-id>` for the
+worker prompt, or `overview --json` for grouped structured values. Each group
+reports a count and defaults to five visible items for readability; pass
+`--limit 0` to show every grouped task.
+
+Show a full human detail view for one task:
+
+```bash
+agent-tracker show --config project.json <task-id>
+```
+
+The detail view includes the full ID and title, evaluated and manual state,
+repo, blockers and dependency requirements, execution metadata, next action,
+validation checks, evidence history, task metadata, lease status, and completion
+action, actor, and time when a completion audit record exists. Add `--json` to
+emit the same detail payload for automation or review tooling.
 
 Use JSON output for automation:
 
