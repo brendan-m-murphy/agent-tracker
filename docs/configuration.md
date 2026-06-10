@@ -434,7 +434,11 @@ request is moved to `done` or `error`.
 
 The optional `workspaces` object gives coordinators stable names for local or
 remote project checkouts. `list-workspaces` reports the resolved registry.
-`launch-worker` currently executes only `kind: "local"` entries.
+`launch-worker` currently executes only `kind: "local"` entries, but local and
+future SSH launchers share the same worker launch contract: the canonical
+tracker owns leases and SQLite writes, the worker receives an explicit prompt
+and assignment, and reports/logs are returned as launch artifacts.
+See [](worker-launch-contract.md) for the full local/SSH launch contract.
 
 ```json
 {
@@ -498,8 +502,8 @@ SSH workspace entries are validated and listed, but not launched yet:
 ```
 
 Use SSH/SFTP `pull-spool` for remote event collection today. Remote queue
-mutation should use task-ingest command files rather than letting remote
-workers open canonical SQLite directly.
+mutation must use task-ingest command files rather than letting remote workers
+open canonical SQLite directly.
 
 ## Current Validation Behavior
 

@@ -609,8 +609,13 @@ after `--command` is treated as part of the worker command argv.
 
 `launch-worker` execution is currently local-only. SSH workspaces can be
 validated and listed, and SSH/SFTP `pull-spool` can collect remote event files,
-but remote queue mutation should use task-ingest command files instead of
-letting remote agents write canonical SQLite directly.
+but remote queue mutation must use task-ingest command files instead of letting
+remote agents write canonical SQLite directly. The worker launch contract is the
+same for local and future SSH launches: the canonical tracker owns leases,
+workers receive a concrete prompt/assignment, launchers capture stdout, stderr,
+reports, timeout/cancellation status, and launch events as artifacts, and queue
+state changes return through task-ingest responses.
+See [](worker-launch-contract.md) for the full contract.
 
 ## Heartbeat A Lease
 

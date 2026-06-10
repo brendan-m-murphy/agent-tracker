@@ -459,9 +459,12 @@ agent-tracker launch-worker --config tracking/project.json \
 ```
 
 The default command is a local `codex exec` one-shot. Current `launch-worker`
-execution is local-only. SSH/SFTP support exists for pulling remote spool
-events; remote queue mutation remains mediated by the task-ingest command
-contract and processor work.
+execution is local-only. SSH workspace entries are validated and listed so the
+SSH adapter can use the same worker launch contract later: the canonical
+tracker owns leases and SQLite writes, worker prompts receive explicit branch
+and worktree assignments, reports/logs are saved as launch artifacts, and
+remote queue mutation remains mediated by task-ingest command files.
+See `docs/worker-launch-contract.md` for the full local/SSH launch contract.
 
 Evidence is stored as URI-like strings such as `git:<sha>`, `file:README.md`,
 `pr:https://github.com/org/repo/pull/123`, or `artifact:s3://bucket/key`.

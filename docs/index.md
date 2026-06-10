@@ -10,6 +10,7 @@ operations
 notebooks
 planning
 task-ingest-command-contract
+worker-launch-contract
 remote-spooling-ssh-codex
 task-plans
 plugins
