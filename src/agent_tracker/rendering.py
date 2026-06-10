@@ -15,6 +15,8 @@ from agent_tracker.config import ProjectConfig
 from agent_tracker.models import TaskState
 
 HUMAN_OUTPUT_WIDTH = 80
+OVERVIEW_ID_WIDTH = 32
+OVERVIEW_DETAIL_LIMIT = 2
 OVERVIEW_GROUPS = (
     ("ready", "Ready"),
     ("active", "Active"),
@@ -40,6 +42,7 @@ class HumanOutputRenderer:
         *,
         initial_indent: str = "",
         subsequent_indent: str = "",
+        break_long_words: bool = False,
     ) -> None:
         """Print a wrapped human-oriented line with stable indentation."""
         self._console.print(
@@ -49,7 +52,7 @@ class HumanOutputRenderer:
                     width=self._width,
                     initial_indent=initial_indent,
                     subsequent_indent=subsequent_indent or initial_indent,
-                    break_long_words=False,
+                    break_long_words=break_long_words,
                     break_on_hyphens=False,
                 )
             )
@@ -115,7 +118,8 @@ class HumanOutputRenderer:
             for item in items:
                 self.overview_item(key, item)
             if len(items) < total:
-                self._console.print(Text(f"  ... {total - len(items)} more"))
+                hidden_count = total - len(items)
+                self._console.print(Text(f"  ... {hidden_count} more; use --limit 0 to show all"))
 
     def overview_item(self, group: str, item: dict[str, Any]) -> None:
         """Render one overview item."""
@@ -123,28 +127,95 @@ class HumanOutputRenderer:
         if group in {"active", "review", "integration"}:
             qualifiers.append(str(item["state"]))
         if item.get("lease_agent_id"):
-            qualifiers.append(f"agent {item['lease_agent_id']}")
+            qualifiers.append(f"agent {self._truncate(item['lease_agent_id'], 24)}")
         qualifier = f" [{'; '.join(qualifiers)}]" if qualifiers else ""
+        task_id = self._truncate(str(item["id"]), OVERVIEW_ID_WIDTH)
+        prefix = f"  {task_id:<{OVERVIEW_ID_WIDTH}}  "
         self.line(
-            f"- {item['id']}: {item['title']}{qualifier}",
-            initial_indent="  ",
-            subsequent_indent="      ",
+            self._compact_text(f"{item['title']}{qualifier}"),
+            initial_indent=prefix,
+            subsequent_indent=" " * len(prefix),
+            break_long_words=True,
         )
 
-        for blocker in item.get("blockers", [])[:2]:
-            self.field("blocker", blocker, indent=4)
-        if len(item.get("blockers", [])) > 2:
-            self.field("blocker", f"+{len(item['blockers']) - 2} more", indent=4)
-        if item.get("next_action"):
-            self.field("next", item["next_action"], indent=4)
-        if item.get("latest_evidence"):
-            self.field("evidence", item["latest_evidence"], indent=4)
-        if group == "recently_completed" and item.get("completed_at"):
-            self.field(
-                "completed",
-                f"{item['completed_at']} by {item.get('completed_by') or 'system'}",
-                indent=4,
+        detail_widths = {
+            "blocker": self._detail_width("blocker"),
+            "evidence": self._detail_width("evidence"),
+            "next": self._detail_width("next"),
+            "completed": self._detail_width("completed"),
+        }
+        for label, value in self._overview_details(group, item, detail_widths):
+            prefix = f"    {label}: "
+            width = max(1, self._width - len(prefix))
+            self.line(
+                self._truncate(value, width),
+                initial_indent=prefix,
+                subsequent_indent=" " * len(prefix),
             )
+
+    def _overview_details(
+        self,
+        group: str,
+        item: dict[str, Any],
+        detail_widths: dict[str, int],
+    ) -> list[tuple[str, str]]:
+        """Return compact overview detail lines for one item."""
+        details: list[tuple[str, str]] = []
+        blockers = [self._compact_text(value) for value in item.get("blockers", []) if value]
+        if blockers:
+            blocker = blockers[0]
+            if len(blockers) > 1:
+                blocker = self._truncate_with_suffix(
+                    blocker,
+                    detail_widths["blocker"],
+                    f" (+{len(blockers) - 1} more)",
+                )
+            details.append(("blocker", blocker))
+        if item.get("latest_evidence"):
+            details.append(("evidence", self._compact_text(item["latest_evidence"])))
+        if (
+            group != "recently_completed"
+            and item.get("next_action")
+            and len(details) < OVERVIEW_DETAIL_LIMIT
+        ):
+            details.append(("next", self._compact_text(item["next_action"])))
+        if group == "recently_completed" and not details and item.get("completed_at"):
+            details.append(
+                (
+                    "completed",
+                    self._compact_text(
+                        f"{item['completed_at']} by {item.get('completed_by') or 'system'}"
+                    ),
+                )
+            )
+        return details[:OVERVIEW_DETAIL_LIMIT]
+
+    def _compact_text(self, value: object) -> str:
+        """Collapse internal whitespace for one-line summaries."""
+        return " ".join(str(value).split())
+
+    def _truncate(self, value: object, width: int) -> str:
+        """Return a single-line value capped to a display width."""
+        text = self._compact_text(value)
+        if len(text) <= width:
+            return text
+        if width <= 3:
+            return text[:width]
+        return text[: width - 3].rstrip() + "..."
+
+    def _truncate_with_suffix(self, value: object, width: int, suffix: str) -> str:
+        """Truncate a value while preserving an important trailing marker."""
+        text = self._compact_text(value)
+        if len(text) + len(suffix) <= width:
+            return f"{text}{suffix}"
+        available = width - len(suffix)
+        if available <= 0:
+            return suffix[-width:]
+        return f"{self._truncate(text, available)}{suffix}"
+
+    def _detail_width(self, label: str) -> int:
+        """Return available display width for one overview detail value."""
+        return max(1, self._width - len(f"    {label}: "))
 
     def next_tasks(self, states: list[TaskState]) -> None:
         """Render ready task summaries."""

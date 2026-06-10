@@ -204,8 +204,10 @@ agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role ma
 
 Human `status`, `overview`, `next`, and intake output is rendered with Rich for
 readable wrapping and alignment without decorative panels or box-drawing
-characters by default. For automation, add `--json` to `next`, `status`,
-`overview`, or intake list commands; JSON output is not wrapped or reformatted.
+characters by default. Human `overview` uses compact grouped rows and truncates
+long detail summaries; add `--json` when you need full task dictionaries. For
+automation, add `--json` to `next`, `status`, `overview`, or intake list
+commands; JSON output is not wrapped or reformatted.
 
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
 the token; `heartbeat`, `complete`, and `fail` require it.

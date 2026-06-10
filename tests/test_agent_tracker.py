@@ -795,28 +795,32 @@ def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
     assert "Toy Project (toy)" in output
     assert (
         "Ready (1)\n"
-        "  - other-ready: Other Ready\n"
+        "  other-ready                       Other Ready\n"
         "    next: Pick up the remaining ready task." in output
     )
-    assert "Active (1)\n  - ready: Ready [claimed; agent agent-1]" in output
+    assert (
+        "Active (1)\n  ready                             Ready [claimed; agent agent-1]" in output
+    )
     assert (
         "Review (1)\n"
-        "  - review-task: Review Task [awaiting_review]\n"
+        "  review-task                       Review Task [awaiting_review]\n"
         "    evidence: pr:review-task" in output
     )
     assert (
         "Integration (1)\n"
-        "  - integration-task: Integration Task [awaiting_merge]\n"
+        "  integration-task                  Integration Task [awaiting_merge]\n"
         "    evidence: git:integration-task"
     ) in output
     assert (
         "Blocked (1)\n"
-        "  - blocked: Blocked\n"
+        "  blocked                           Blocked\n"
         "    blocker: Depends on ready (ready: claimed)" in output
     )
-    assert "Recently completed (2)\n  - done-b: Done B\n    evidence: git:done-b" in output
-    assert "    completed: " in output
+    assert "Recently completed (2)\n  done-b                            Done B\n" in output
+    assert "    evidence: git:done-b" in output
+    assert "    completed: " not in output
     assert "foundation: Foundation" not in output
+    assert "  - other-ready" not in output
 
 
 def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
@@ -838,13 +842,14 @@ def test_cli_overview_human_compatibility_helpers_delegate_to_renderer(
 
     assert "Toy Project (toy)" in overview_output
     assert "Ready (1)" in overview_output
-    assert "  - other-ready: Other Ready" in item_output
+    assert "  other-ready                       Other Ready" in item_output
+    assert "... 1 more; use --limit 0 to show all" in overview_output
     assert_no_box_drawing(overview_output)
     assert_no_box_drawing(item_output)
 
 
-def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
-    """Human overview wraps long next-action and blocker lines with hanging indents."""
+def test_cli_overview_human_output_truncates_long_detail_fields(tmp_path: Path) -> None:
+    """Human overview keeps long next-action and blocker summaries compact."""
     config_path = write_project(tmp_path)
     task_path = tmp_path / "tasks.json"
     payload = json.loads(task_path.read_text(encoding="utf-8"))
@@ -863,7 +868,15 @@ def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
                         "Wait until the ready task publishes a detailed operational "
                         "handoff with enough evidence for a reviewer to resume safely."
                     ),
-                }
+                },
+                {
+                    "kind": "task",
+                    "task": "deferred",
+                    "description": (
+                        "Wait for the deferred task to publish a second operational "
+                        "handoff with enough detail to keep the queue understandable."
+                    ),
+                },
             ]
     task_path.write_text(json.dumps(payload), encoding="utf-8")
     coord = Coordinator(load_config(config_path))
@@ -878,9 +891,25 @@ def test_cli_overview_human_output_wraps_long_fields(tmp_path: Path) -> None:
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
     assert any(line.startswith("    next: Coordinate the implementation") for line in lines)
-    assert any(line.startswith("          details before asking another worker") for line in lines)
-    assert any(line.startswith("    blocker: Wait until the ready task") for line in lines)
-    assert any(line.startswith("             with enough evidence") for line in lines)
+    assert any(line.startswith("    next: ") and line.endswith("...") for line in lines)
+    assert any(
+        line.startswith("    blocker: ") and line.endswith("... (+1 more)") for line in lines
+    )
+    assert not any(
+        line.startswith("          details before asking another worker") for line in lines
+    )
+
+    stdout = StringIO()
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--json", "--limit", "10"])
+    payload = json.loads(stdout.getvalue())
+    active_ready = next(item for item in payload["groups"]["active"] if item["id"] == "ready")
+    blocked = payload["groups"]["blocked"][0]
+
+    assert code == 0
+    assert active_ready["next_action"].endswith("continue the queue.")
+    assert len(blocked["blockers"]) == 2
+    assert any(value.endswith("resume safely. (ready: claimed)") for value in blocked["blockers"])
 
 
 def test_cli_overview_human_output_distinguishes_wrapped_titles(
@@ -909,9 +938,40 @@ def test_cli_overview_human_output_distinguishes_wrapped_titles(
 
     assert code == 0
     assert all(len(line) <= 80 for line in lines)
-    assert any(line.startswith("      that should not look like a field") for line in lines)
-    assert not any(line.startswith("    that should not look like a field") for line in lines)
+    assert any(
+        line.startswith(" " * 36 + "with title continuation that should not look") for line in lines
+    )
+    assert any(line.startswith(" " * 36 + "like a field") for line in lines)
+    assert not any(line.startswith("    with title continuation") for line in lines)
     assert any(line.startswith("    next: Keep detail fields") for line in lines)
+
+
+def test_cli_overview_human_output_wraps_unbroken_titles_under_title_column(
+    tmp_path: Path,
+) -> None:
+    """Unbroken overview title tokens stay under the compact title column."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    long_token = "x" * 90
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["title"] = long_token
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--limit", "10"])
+    lines = stdout.getvalue().splitlines()
+    title_lines = [line for line in lines if "x" in line]
+
+    assert code == 0
+    assert all(len(line) <= 80 for line in lines)
+    assert title_lines
+    assert title_lines[0].startswith("  ready                             ")
+    assert any(line.startswith(" " * 36 + "x") for line in title_lines[1:])
+    assert not any(line.startswith("x") for line in title_lines)
 
 
 def test_cli_next_human_output_wraps_long_next_action(tmp_path: Path) -> None:
