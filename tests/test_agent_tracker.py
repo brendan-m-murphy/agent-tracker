@@ -85,6 +85,19 @@ def run_cli_captured(argv: list[str]) -> tuple[int, str, str]:
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def parser_help_for(parser: Any, *commands: str) -> str:
+    """Return argparse help for a nested command without invoking SystemExit."""
+    current = parser
+    for command in commands:
+        subparsers = next(
+            action
+            for action in current._actions
+            if isinstance(getattr(action, "choices", None), dict)
+        )
+        current = subparsers.choices[command]
+    return current.format_help()
+
+
 def write_project(root: Path) -> Path:
     """Write a toy non-project-specific config and task plan."""
     (root / "tasks.json").write_text(
@@ -5805,10 +5818,13 @@ def test_cli_export_pr_notifications_returns_nonzero_when_refused(
 
 def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     """Root and grouped help output stay copy-paste-safe plain text."""
-    root_help = cli.build_parser().format_help()
+    parser = cli.build_parser()
+    root_help = parser.format_help()
     code, intake_help, intake_stderr = run_cli_captured(["intake", "--help"])
     record_code, record_help, record_stderr = run_cli_captured(["intake", "record", "--help"])
     list_code, list_help, list_stderr = run_cli_captured(["intake", "list", "--help"])
+    plan_help = parser_help_for(parser, "plan")
+    plan_task_help = parser_help_for(parser, "plan", "task")
     normalized_root_help = " ".join(root_help.split())
     assert code == 0
     assert record_code == 0
@@ -5819,6 +5835,7 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "record-intake" in root_help
     assert "capture-intake" in root_help
     assert "intake" in root_help
+    assert "plan" in root_help
     assert "Return active owned work to pending; not for finished handoffs." in normalized_root_help
     assert "Mark finished leased work awaiting review; clears the lease." in normalized_root_help
     assert "Mark finished leased work awaiting PR, merge, or integration." in normalized_root_help
@@ -5833,13 +5850,21 @@ def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:
     assert "--metadata-json" in record_help
     assert "--json" in list_help
     assert "--no-color" in list_help
-    for help_output in (root_help, intake_help, record_help, list_help):
+    assert "task" in plan_help
+    assert "list" in plan_help
+    assert "promote" in plan_help
+    assert "--intake-metadata" in plan_task_help
+    assert "--metadata-json" in plan_task_help
+    assert "--write-scope" in plan_task_help
+    for help_output in (root_help, intake_help, record_help, list_help, plan_help, plan_task_help):
         assert "install-completion" not in help_output
         assert "show-completion" not in help_output
     assert_no_box_drawing(root_help)
     assert_no_box_drawing(intake_help)
     assert_no_box_drawing(record_help)
     assert_no_box_drawing(list_help)
+    assert_no_box_drawing(plan_help)
+    assert_no_box_drawing(plan_task_help)
 
 
 @pytest.mark.parametrize(
@@ -5884,6 +5909,257 @@ def test_cli_root_contract_hides_completion_helpers_and_preserves_aliases() -> N
     assert "release-lease" in root_help
     assert release_args.func is cli.command_release
     assert alias_args.func is cli.command_release
+
+
+def test_cli_plan_task_creates_proposal_without_live_task(tmp_path: Path) -> None:
+    """Readable planning records intake and a proposal without making work claimable."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "plan",
+            "task",
+            "--config",
+            str(config_path),
+            "--proposal-id",
+            "proposal-plan-triage",
+            "--intake-id",
+            "intake-plan-triage",
+            "--task-id",
+            "plan-triage",
+            "--title",
+            "Plan triage workflow",
+            "--kind",
+            "feature",
+            "--source",
+            "user:thread-123",
+            "--repo",
+            "agent-tracker",
+            "--tag",
+            "planning",
+            "--intake-metadata",
+            "source_date=2026-06-10",
+            "--intake-metadata-json",
+            '{"thread": "readable-plan"}',
+            "--summary",
+            "Create a reviewed planning task.",
+            "--next-action",
+            "Review and promote the proposed task.",
+            "--role",
+            "maintainer",
+            "--write-scope",
+            "src/agent_tracker/cli.py",
+            "--validation-check",
+            "uv run pytest tests/test_agent_tracker.py -k plan",
+            "--dependency",
+            "foundation:Base queue exists.",
+            "--authority",
+            "local code and docs",
+            "--intervention-need",
+            "approval if scope widens",
+            "--notebook-update",
+            "notebooks/project.md",
+            "--metadata-json",
+            '{"lane": "planning/intake"}',
+            "--actor",
+            "pm",
+            "User asked for readable planning commands.",
+        ]
+    )
+
+    proposed = json.loads(stdout)
+    coord = Coordinator(load_config(config_path))
+    intake = coord.intake_records(status="triaged")[0]
+
+    assert code == 0
+    assert "agent-tracker paths:" in stderr
+    assert proposed["id"] == "proposal-plan-triage"
+    assert proposed["intake_id"] == "intake-plan-triage"
+    assert proposed["status"] == "proposed"
+    assert proposed["task"]["id"] == "plan-triage"
+    assert proposed["task"]["repo"] == "agent-tracker"
+    assert proposed["task"]["summary"] == "Create a reviewed planning task."
+    assert proposed["task"]["next_action"] == "Review and promote the proposed task."
+    assert proposed["task"]["validation_checks"] == [
+        "uv run pytest tests/test_agent_tracker.py -k plan"
+    ]
+    assert proposed["task"]["execution"]["primary_files"] == ["src/agent_tracker/cli.py"]
+    assert proposed["task"]["metadata"] == {
+        "lane": "planning/intake",
+        "roles": ["maintainer"],
+        "write_scopes": ["src/agent_tracker/cli.py"],
+        "authority": "local code and docs",
+        "intervention_needs": ["approval if scope widens"],
+        "notebook_updates": ["notebooks/project.md"],
+    }
+    assert proposed["requirements"] == [
+        {"kind": "task", "task": "foundation", "description": "Base queue exists."}
+    ]
+    assert intake.intake_id == "intake-plan-triage"
+    assert intake.text == "User asked for readable planning commands."
+    assert intake.kind == "feature"
+    assert intake.source == "user:thread-123"
+    assert intake.repo == "agent-tracker"
+    assert intake.tags == ["planning"]
+    assert intake.metadata == {"thread": "readable-plan", "source_date": "2026-06-10"}
+    with pytest.raises(ValueError, match="no matching ready task"):
+        coord.claim(agent_id="agent-1", task_id="plan-triage")
+
+
+def test_plan_task_from_text_rolls_back_partial_intake_on_proposal_failure(
+    tmp_path: Path,
+) -> None:
+    """Readable planning writes intake and proposal atomically."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+
+    with pytest.raises(ValueError, match="task already exists: ready"):
+        coord.plan_task_from_text(
+            "This should not leave intake behind.",
+            intake_id="partial-intake",
+            proposal_id="partial-proposal",
+            task_id="ready",
+            title="Duplicate live task",
+        )
+
+    snapshot = coord.store.snapshot(config.project_id)
+    assert coord.intake_records() == []
+    assert coord.proposed_task_records() == []
+    assert not any(
+        audit["action"] in {"intake.record", "intake.status", "proposal.record"}
+        and audit["payload"].get("intake_id") == "partial-intake"
+        for audit in snapshot["audit"]
+    )
+
+    proposal = coord.plan_task_from_text(
+        "This proposal is valid.",
+        intake_id="intake-one",
+        proposal_id="duplicate-proposal-id",
+        task_id="first-plan-task",
+        title="First planned task",
+    )
+    with pytest.raises(ValueError, match="proposal already exists: duplicate-proposal-id"):
+        coord.plan_task_from_text(
+            "This should not leave a second intake behind.",
+            intake_id="partial-intake-two",
+            proposal_id=proposal.proposal_id,
+            task_id="second-plan-task",
+            title="Second planned task",
+        )
+
+    assert [record.intake_id for record in coord.intake_records()] == ["intake-one"]
+    assert coord.proposed_task_records() == [proposal]
+
+
+def test_cli_plan_task_intake_metadata_json_error_uses_option_name(tmp_path: Path) -> None:
+    """Plan intake metadata errors name the intake-specific option."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+
+    code, stdout, stderr = run_cli_captured(
+        [
+            "plan",
+            "task",
+            "--config",
+            str(config_path),
+            "--task-id",
+            "bad-intake-metadata",
+            "--title",
+            "Bad intake metadata",
+            "--intake-metadata-json",
+            "[]",
+            "Malformed intake metadata.",
+        ]
+    )
+
+    assert code == 1
+    assert stdout == ""
+    assert "error: intake-metadata-json must be a JSON object" in stderr
+    assert Coordinator(load_config(config_path)).intake_records() == []
+
+
+def test_cli_plan_promote_creates_ready_task_without_task_plan_edit(tmp_path: Path) -> None:
+    """Readable promotion moves an approved proposal into live ready state."""
+    config_path = write_project(tmp_path)
+    Coordinator(load_config(config_path)).import_tasks()
+    task_plan_before = (tmp_path / "tasks.json").read_text(encoding="utf-8")
+    proposed_code, proposed_stdout, _ = run_cli_captured(
+        [
+            "plan",
+            "task",
+            "--config",
+            str(config_path),
+            "--proposal-id",
+            "proposal-readable-promote",
+            "--task-id",
+            "readable-promote",
+            "--title",
+            "Promote readable plan",
+            "--repo",
+            "agent-tracker",
+            "--dependency",
+            "foundation:Base queue exists.",
+            "Promote this after review.",
+        ]
+    )
+
+    proposed = json.loads(proposed_stdout)
+    promote_code, promote_stdout, promote_stderr = run_cli_captured(
+        [
+            "plan",
+            "promote",
+            "--config",
+            str(config_path),
+            proposed["id"],
+            "--actor",
+            "pm",
+        ]
+    )
+    promoted = json.loads(promote_stdout)
+    state = Coordinator(load_config(config_path)).get_task("readable-promote")
+    next_code, next_stdout, _ = run_cli_captured(
+        ["next", "--config", str(config_path), "--json", "--limit", "10"]
+    )
+    ready_ids = {item["id"] for item in json.loads(next_stdout)}
+
+    assert proposed_code == 0
+    assert promote_code == 0
+    assert "agent-tracker paths:" in promote_stderr
+    assert promoted["status"] == "promoted"
+    assert state.state == "ready"
+    assert "readable-promote" in ready_ids
+    assert next_code == 0
+    assert (tmp_path / "tasks.json").read_text(encoding="utf-8") == task_plan_before
+
+
+def test_cli_plan_list_wraps_existing_proposal_listing(tmp_path: Path) -> None:
+    """Readable proposal listing is an alias for the existing list behavior."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    intake = coord.record_intake("List readable proposals.", kind="check")
+    proposal = coord.propose_task_from_intake(
+        intake.intake_id,
+        proposal_id="proposal-readable-list",
+        task_id="readable-list",
+        title="Readable list",
+    )
+
+    flat_code, flat_stdout, flat_stderr = run_cli_captured(
+        ["list-proposals", "--config", str(config_path), "--json"]
+    )
+    plan_code, plan_stdout, plan_stderr = run_cli_captured(
+        ["plan", "list", "--config", str(config_path), "--json"]
+    )
+
+    assert flat_code == 0
+    assert plan_code == 0
+    assert flat_stderr == ""
+    assert plan_stderr == ""
+    assert json.loads(plan_stdout) == json.loads(flat_stdout)
+    assert json.loads(plan_stdout)["proposals"][0]["id"] == proposal.proposal_id
 
 
 def test_triage_proposes_task_from_intake_without_claiming(tmp_path: Path) -> None:

@@ -1206,6 +1206,131 @@ class Store:
             )
         return replace(proposal, created_at=now, updated_at=now)
 
+    def record_planned_task(
+        self,
+        project_id: str,
+        intake: IntakeRecord,
+        proposal: ProposedTaskRecord,
+        *,
+        actor: str = "system",
+    ) -> ProposedTaskRecord:
+        """Atomically record planning intake and its proposed task contract."""
+        if proposal.intake_id != intake.intake_id:
+            raise ValueError("proposal intake id must match the recorded intake id")
+        self.init_schema()
+        now = iso()
+        with self.transaction(immediate=True) as conn:
+            if _task_exists(conn, project_id, proposal.task.task_id):
+                raise ValueError(f"task already exists: {proposal.task.task_id}")
+            existing_id = conn.execute(
+                """
+                SELECT 1
+                FROM proposed_tasks
+                WHERE project_id = ? AND proposal_id = ?
+                """,
+                (project_id, proposal.proposal_id),
+            ).fetchone()
+            if existing_id is not None:
+                raise ValueError(f"proposal already exists: {proposal.proposal_id}")
+            existing_task = conn.execute(
+                """
+                SELECT proposal_id, status
+                FROM proposed_tasks
+                WHERE project_id = ? AND task_id = ?
+                """,
+                (project_id, proposal.task.task_id),
+            ).fetchone()
+            if existing_task is not None:
+                status = str(existing_task["status"])
+                if status == "rejected":
+                    raise ValueError(
+                        "proposal task id conflicts with an existing rejected proposal: "
+                        f"{proposal.task.task_id}"
+                    )
+                raise ValueError(f"proposal task id already exists: {proposal.task.task_id}")
+            if proposal.status not in PROPOSAL_STATES:
+                raise ValueError(f"invalid proposal status: {proposal.status}")
+            conn.execute(
+                """
+                INSERT INTO intake (
+                    project_id, intake_id, kind, source, repo, status, text,
+                    tags_json, metadata_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    intake.intake_id,
+                    intake.kind,
+                    intake.source,
+                    intake.repo,
+                    intake.status,
+                    intake.text,
+                    dumps(intake.tags),
+                    dumps(intake.metadata),
+                    now,
+                    now,
+                ),
+            )
+            self._audit(
+                conn,
+                project_id,
+                "",
+                "intake.record",
+                actor,
+                {"intake_id": intake.intake_id, "kind": intake.kind, "repo": intake.repo},
+            )
+            contract = proposed_task_to_dict(proposal)
+            conn.execute(
+                """
+                INSERT INTO proposed_tasks (
+                    project_id, proposal_id, intake_id, task_id, status,
+                    contract_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    proposal.proposal_id,
+                    proposal.intake_id,
+                    proposal.task.task_id,
+                    proposal.status,
+                    dumps(contract),
+                    now,
+                    now,
+                ),
+            )
+            cur = conn.execute(
+                """
+                UPDATE intake
+                SET status = 'triaged', updated_at = ?
+                WHERE project_id = ? AND intake_id = ? AND status = 'open'
+                """,
+                (now, project_id, proposal.intake_id),
+            )
+            if cur.rowcount:
+                self._audit(
+                    conn,
+                    project_id,
+                    "",
+                    "intake.status",
+                    actor,
+                    {
+                        "intake_id": proposal.intake_id,
+                        "previous": "open",
+                        "status": "triaged",
+                    },
+                )
+            self._audit(
+                conn,
+                project_id,
+                proposal.task.task_id,
+                "proposal.record",
+                actor,
+                {"proposal_id": proposal.proposal_id, "intake_id": proposal.intake_id},
+            )
+        return replace(proposal, created_at=now, updated_at=now)
+
     def proposed_task_records(
         self,
         project_id: str,

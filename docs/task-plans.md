@@ -267,19 +267,30 @@ proposal stores a task-shaped contract plus proposed dependencies, but it is not
 inserted into the live `tasks` table and is not claimable:
 
 ```bash
-agent-tracker propose-task --config project.json <intake-id> \
+agent-tracker plan task --config project.json \
   --task-id add-triage \
   --title "Add triage workflow" \
+  --repo agent-tracker \
+  --kind feature \
+  --source user \
   --role maintainer \
   --write-scope src/agent_tracker/service.py \
-  --validation-check "uv run pytest"
+  --validation-check "uv run pytest" \
+  "User asked for a triage workflow"
 ```
 
-Use `list-proposals --json` or exported snapshots to review proposed tasks. A
-reviewed proposal can be promoted without editing the task plan:
+`plan task` records the positional text as intake and creates the proposed task
+contract in one audited operation. Use `--intake-metadata KEY=VALUE` for source
+context, and use `--metadata-json` only for task metadata. Existing scripts can
+still call `propose-task --config project.json <intake-id> ...` when they
+already have an intake record.
+
+Use `plan list --json`, `list-proposals --json`, or exported snapshots to review
+proposed tasks. A reviewed proposal can be promoted without editing the task
+plan:
 
 ```bash
-agent-tracker promote-proposal --config project.json <proposal-id>
+agent-tracker plan promote --config project.json <proposal-id>
 ```
 
 Promotion records the proposal as `promoted`, inserts the task contract into
