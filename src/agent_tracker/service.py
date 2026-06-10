@@ -1460,6 +1460,39 @@ class Coordinator:
             },
         }
 
+    def task_detail_payload(
+        self,
+        task_id: str,
+        *,
+        recover_stale_leases: bool = False,
+    ) -> dict[str, Any]:
+        """Return a JSON-friendly payload for one human task detail view.
+
+        Args:
+            task_id: Identifier of the task to inspect.
+            recover_stale_leases: Whether stale leases should be recovered while
+                evaluating task state.
+
+        Returns:
+            Full task state plus computed blocker and completion fields used by
+            the human detail renderer.
+
+        Raises:
+            KeyError: If the task does not exist.
+        """
+        state = self.get_task(task_id, recover_stale_leases=recover_stale_leases)
+        completion_record = None
+        if state.state == "done":
+            completion_records = {
+                record["task_id"]: record
+                for record in self.store.recent_completion_records(self.config.project_id)
+            }
+            completion_record = completion_records.get(state.task.task_id)
+        return _overview_state_to_dict(
+            state,
+            completion_record=completion_record,
+        )
+
     def path_summary(self) -> dict[str, str]:
         """Return resolved paths used by this coordinator."""
         return self.config.path_summary(db_path=self.store.path)

@@ -333,6 +333,19 @@ def command_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_show(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.task_detail_payload(
+        args.task_id,
+        recover_stale_leases=args.recover_stale_leases,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    human_renderer().task_detail(payload)
+    return 0
+
+
 def command_claim(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -1286,6 +1299,13 @@ def build_parser() -> argparse.ArgumentParser:
     task.add_argument("--markdown", action="store_true")
     task.add_argument("--recover-stale-leases", action="store_true")
     task.set_defaults(func=command_task)
+
+    show = sub.add_parser("show", help="Show full human detail for one task.")
+    add_common(show)
+    show.add_argument("task_id")
+    show.add_argument("--json", action="store_true")
+    show.add_argument("--recover-stale-leases", action="store_true")
+    show.set_defaults(func=command_show)
 
     claim = sub.add_parser("claim", help="Claim a ready task.")
     add_common(claim)

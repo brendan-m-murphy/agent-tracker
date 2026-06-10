@@ -208,8 +208,9 @@ characters by default. Human `overview` is a quick triage view: it shows count
 summaries, an attention list for active/review/merge work, blocked tasks with
 their current blockers, ready task titles, and a short recent-completion tail.
 It intentionally omits full `next_action` prose and evidence paths; use
-`agent-tracker task <task-id>` for full detail and add `--json` when you need
-full task dictionaries. For automation, add `--json` to `next`, `status`,
+`agent-tracker show <task-id>` for a human detail drilldown, or
+`agent-tracker show <task-id> --json` when you need the same drilldown payload
+as structured data. For automation, add `--json` to `next`, `status`,
 `overview`, or intake list commands; JSON output is not wrapped or reformatted.
 
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
@@ -224,6 +225,17 @@ agent-tracker task --config demo-tracker/project.json write-readme --markdown
 The rendered prompt contains the summary, execution notes, dependency state,
 validation checks, and next action. For task-level automation, add `--json` to
 `task`.
+
+Show a full human detail view from an overview row:
+
+```bash
+agent-tracker show --config demo-tracker/project.json write-readme
+```
+
+The detail view prints full identity, state, blockers and requirements, next
+action, validation checks, evidence history, metadata, lease details, and
+completion details when they are available. Add `--json` for the same computed
+detail payload without human wrapping.
 
 Extend a lease while working:
 
@@ -308,6 +320,7 @@ agent-tracker status --json
 | `overview` | Show grouped ready, active, review, integration, blocked, and recent completion work; add `--json` for grouped task dictionaries. | `agent-tracker overview --config demo-tracker/project.json --limit 5` |
 | `next` | List ready tasks, optionally filtered by repo or role. | `agent-tracker next --config demo-tracker/project.json --role maintainer --limit 1` |
 | `task` | Show one task's prompt/context; add `--json` for stored state. | `agent-tracker task --config demo-tracker/project.json write-readme --markdown` |
+| `show` | Show full human or JSON detail for one task from a compact overview row. | `agent-tracker show --config demo-tracker/project.json write-readme` |
 | `claim` | Atomically claim a ready task and create a lease token. | `agent-tracker claim --config demo-tracker/project.json --agent agent-1 --role maintainer --lease-seconds 7200` |
 | `heartbeat` | Extend a live lease and mark the task `in_progress`. | `agent-tracker heartbeat --config demo-tracker/project.json write-readme --lease-token <token> --agent agent-1` |
 | `complete` | Mark a leased task `done` and record evidence URIs. | `agent-tracker complete --config demo-tracker/project.json write-readme --lease-token <token> --evidence "git:<branch-sha>" --evidence "pr:<url>"` |
