@@ -253,6 +253,12 @@ SQLite remains the canonical state for interventions. PR comments, issue
 comments, and prepared notification payloads should point at intervention
 records rather than becoming the coordination state themselves.
 
+Run `check-pr-notification-setup` before adding a task dependency on PR-based
+intervention delivery. The check distinguishes missing remotes, missing PR
+association, missing `gh` authentication, and unsupported sandbox live posting.
+Future notification exporters should refuse unsafe live posting with those
+diagnostics and emit prepared payloads instead.
+
 ## Proposed Task Contracts
 
 Project-manager triage can create proposed task contracts from raw intake. A

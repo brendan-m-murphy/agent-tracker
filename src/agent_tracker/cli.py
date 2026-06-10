@@ -553,11 +553,12 @@ def command_list_interventions(args: argparse.Namespace) -> int:
     if args.json:
         print_json(payload)
         return 0
+    renderer = human_renderer()
     if not payload["interventions"]:
-        _human_console().print(Text("No interventions."))
+        renderer.raw_line("No interventions.")
         return 0
     for item in payload["interventions"]:
-        _print_human_line(f"{item['id']}: {item['summary']}", subsequent_indent="  ")
+        renderer.line(f"{item['id']}: {item['summary']}", subsequent_indent="  ")
         rows: list[tuple[str, object]] = [
             ("status", item["status"]),
             ("reason", item["reason"]),
@@ -568,7 +569,7 @@ def command_list_interventions(args: argparse.Namespace) -> int:
             rows.append(("resolution", item["resolution"]))
         if item.get("evidence"):
             rows.append(("evidence", ", ".join(item["evidence"])))
-        _print_human_kv_table(rows, label_width=10)
+        renderer.kv_table(rows, label_width=10)
     return 0
 
 
@@ -582,6 +583,62 @@ def command_resolve_intervention(args: argparse.Namespace) -> int:
         actor=args.actor,
     )
     print_json(intervention_to_dict(intervention))
+    return 0
+
+
+def command_check_pr_notification_setup(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.pr_notification_setup_payload(
+        workspace=args.workspace,
+        repo_path=args.repo_path,
+        remote=args.remote,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    renderer = human_renderer()
+    renderer.section("PR notification setup")
+    renderer.kv_table(
+        [
+            ("status", payload["status"]),
+            ("ok", str(payload["ok"]).lower()),
+            ("posting", payload["posting"]["mode"]),
+            ("workspace", payload["workspace"].get("name") or "(config root)"),
+            ("path", payload["workspace"]["path"]),
+        ],
+        label_width=10,
+    )
+    remote = payload["repo"].get("remote")
+    if remote:
+        renderer.kv_table(
+            [
+                ("remote", f"{remote['name']} {remote['url']}"),
+                ("branch", payload["repo"].get("branch") or "(none)"),
+            ],
+            label_width=10,
+        )
+    target = payload.get("target")
+    if target:
+        renderer.kv_table(
+            [("pr", target["url"]), ("auth", payload["auth"]["method"])],
+            label_width=10,
+        )
+    if payload["issues"]:
+        renderer.section("Issues")
+        for issue in payload["issues"]:
+            renderer.line(
+                f"{issue['severity']} {issue['code']}: {issue['message']}",
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+            renderer.line(
+                f"remediation: {issue['remediation']}",
+                initial_indent="    ",
+                subsequent_indent="    ",
+            )
+    else:
+        renderer.raw_line("No setup issues detected.")
     return 0
 
 
@@ -1219,6 +1276,18 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_intervention.add_argument("--evidence", action="append", default=[])
     resolve_intervention.add_argument("--actor", default="system")
     resolve_intervention.set_defaults(func=command_resolve_intervention)
+
+    check_pr_notification_setup = sub.add_parser(
+        "check-pr-notification-setup",
+        help="Diagnose whether open interventions can be notified through a PR.",
+    )
+    add_common(check_pr_notification_setup)
+    check_pr_notification_setup.add_argument("--workspace", default="")
+    check_pr_notification_setup.add_argument("--repo-path", default="")
+    check_pr_notification_setup.add_argument("--remote", default="origin")
+    check_pr_notification_setup.add_argument("--timeout-seconds", type=int, default=5)
+    check_pr_notification_setup.add_argument("--json", action="store_true")
+    check_pr_notification_setup.set_defaults(func=command_check_pr_notification_setup)
 
     record_intake = sub.add_parser(
         "record-intake",

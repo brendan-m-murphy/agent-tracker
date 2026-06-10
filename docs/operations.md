@@ -207,6 +207,29 @@ PR comments, issue comments, and prepared notification payloads should refer to
 these intervention records. They should not replace SQLite as the coordination
 state.
 
+Before relying on PR comments for intervention notifications, run a setup
+diagnostic from the repository checkout:
+
+```bash
+agent-tracker check-pr-notification-setup --config project.json \
+  --repo-path . --json
+```
+
+The diagnostic is read-only. It checks the configured Git remote, current
+branch, associated pull request, GitHub CLI authentication, and whether live PR
+posting is explicitly enabled. It returns stable issue codes:
+
+- `missing_remote` when no usable Git remote is available;
+- `missing_pr_association` when the checkout is detached or has no associated
+  pull request;
+- `missing_auth` when `gh` cannot resolve or authenticate the PR path;
+- `unsupported_sandbox` when live posting is not safe, with prepared payloads
+  still available when the PR target is known.
+
+Prepared payload output is always derived from open intervention records. Use it
+for sandboxes, unauthenticated shells, and review-only workflows where a later
+exporter or human will post the PR comment.
+
 ## Project Overview
 
 Use `overview` when you need a compact project-log view instead of raw status
