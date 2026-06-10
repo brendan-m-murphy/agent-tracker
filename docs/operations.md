@@ -440,6 +440,64 @@ the task-plan JSON untouched. Normal definition imports preserve promoted
 runtime tasks; use destructive runtime reconciliation only when you intend to
 make the importer source authoritative again.
 
+## Validate Preview Git Refs
+
+Publish a preview git ref only when a downstream uv project is blocked on an
+in-progress `agent-tracker` feature and needs to validate it before it reaches
+`main` or a release. The ref should point at scoped, reviewable work that has
+already passed the maintainer's normal local checks. Do not use preview refs as
+a long-lived compatibility promise or as a substitute for review, merge, or
+release policy.
+
+Maintainer checklist:
+
+- create or update a named preview branch such as `preview/<feature-or-task>`;
+- keep the branch narrow enough that downstream results map to one tracker
+  task or task group;
+- record upstream evidence such as `git:<preview-commit>` and `pr:<url>` or an
+  equivalent review surface;
+- tell downstream validators which branch or commit SHA to pin and which checks
+  to run.
+
+Downstream uv projects should pin the preview in dependency config rather than
+depending on an adjacent checkout:
+
+```toml
+[project]
+dependencies = ["agent-tracker"]
+
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "preview/<feature-or-task>" }
+```
+
+For a repeatable result, pin the exact preview commit:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", rev = "<commit-sha>" }
+```
+
+Validate from the downstream project:
+
+```bash
+uv lock --upgrade-package agent-tracker
+uv sync
+uv run <downstream-validation-command>
+```
+
+While validating, collect tracker evidence that another maintainer can inspect:
+
+- `git:<preview-commit>` for the preview being tested;
+- `validation:<project>:<command-or-run-url>` for the downstream check;
+- `file:<path>` for a concise log, report, or config diff;
+- `pr:<url>` or `review:<summary>` when validation happens through review.
+
+When validation succeeds and the feature lands, remove the temporary preview
+pin. If the downstream project intentionally tracks unreleased main, switch the
+uv source to `branch = "main"`. Prefer `tag = "<release-tag>"` or the normal
+published dependency for long-lived downstream configuration. Rerun
+`uv lock --upgrade-package agent-tracker` after replacing the source.
+
 ## Complete Work
 
 If the task changed tracked code, docs, config, tests, or task plans, complete

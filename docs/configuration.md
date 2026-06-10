@@ -208,6 +208,62 @@ AGENT_TRACKER_DB=/tmp/example-agent-tracker.sqlite \
 agent-tracker status --json
 ```
 
+## Downstream uv Preview Pins
+
+Downstream uv projects can validate in-progress `agent-tracker` work by pinning
+a temporary git ref in `pyproject.toml`. This is the recommended preview path
+for uv projects because the ref is named, lockable, and reproducible. Avoid
+adjacent-checkout path dependencies as the default workflow; reserve them for
+local package development that is not meant to produce tracker validation
+evidence.
+
+Branch preview:
+
+```toml
+[project]
+dependencies = ["agent-tracker"]
+
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "preview/<feature-or-task>" }
+```
+
+Immutable preview:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", rev = "<commit-sha>" }
+```
+
+Refresh the downstream lock and run the downstream checks:
+
+```bash
+uv lock --upgrade-package agent-tracker
+uv sync
+uv run <downstream-validation-command>
+```
+
+After validation succeeds and the feature lands on `main` or a release is
+available, replace the preview pin. For unreleased `main` validation:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "main" }
+```
+
+For a release:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", tag = "<release-tag>" }
+```
+
+If `agent-tracker` is consumed from a package index, remove the
+`tool.uv.sources.agent-tracker` entry and keep only the normal dependency
+specifier, then rerun `uv lock --upgrade-package agent-tracker`.
+
+Preview refs are temporary validation channels. They do not define release
+support, compatibility guarantees, or long-lived downstream policy.
+
 ## Plugin Specs
 
 Plugin fields use `module:object` strings:

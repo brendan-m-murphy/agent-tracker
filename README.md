@@ -61,6 +61,47 @@ uv tool install /path/to/agent-tracker
 agent-tracker --help
 ```
 
+### Preview Refs For Downstream Validation
+
+When a downstream uv project needs an in-progress `agent-tracker` feature before
+it reaches `main`, a maintainer can publish a temporary preview branch or share
+a reachable commit SHA for validation. Use this only after the scoped change is
+reviewable and has passed the maintainer's normal local checks. Preview refs are
+temporary validation channels, not stable release policy.
+
+In the downstream project, pin the preview through uv dependency sources:
+
+```toml
+[project]
+dependencies = ["agent-tracker"]
+
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", branch = "preview/<feature-or-task>" }
+```
+
+For an immutable validation run, pin the exact commit instead:
+
+```toml
+[tool.uv.sources]
+agent-tracker = { git = "<agent-tracker-git-url>", rev = "<commit-sha>" }
+```
+
+Then refresh and validate the downstream lock:
+
+```bash
+uv lock --upgrade-package agent-tracker
+uv sync
+uv run <downstream-validation-command>
+```
+
+Record the downstream result on the tracker task as evidence, for example
+`git:<preview-commit>`, `validation:<project>:<command-or-run-url>`, and any
+review or PR URL. After the feature lands on `main` or is released, replace the
+preview source with `branch = "main"`, `tag = "<release-tag>"`, or the normal
+published dependency, then rerun `uv lock --upgrade-package agent-tracker`.
+Avoid adjacent-checkout path dependencies as the default validation path; they
+are harder to reproduce than a named git ref.
+
 ## Quickstart
 
 The quickest way to try the queue is to scaffold a small plugin-free tracker
