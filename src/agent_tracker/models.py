@@ -161,3 +161,19 @@ class InterventionRecord:
     updated_at: str = ""
     resolved_at: str = ""
     resolved_by: str = ""
+
+
+@dataclass(frozen=True)
+class NotificationDeliveryRecord:
+    """Durable notification delivery state for an external target."""
+
+    target_key: str
+    channel: str
+    target: dict[str, Any] = field(default_factory=dict)
+    comment_id: str = ""
+    payload_hash: str = ""
+    status: str = ""
+    last_posted_at: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""

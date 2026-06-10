@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -22,9 +23,11 @@ from agent_tracker.db import (
     Store,
     intake_to_dict,
     intervention_to_dict,
+    notification_delivery_to_dict,
     proposed_task_to_dict,
     state_to_dict,
 )
+from agent_tracker.exporters import PreparedPrNotificationExporter
 from agent_tracker.models import (
     ACTIVE_STATES,
     INTAKE_STATES,
@@ -37,6 +40,7 @@ from agent_tracker.models import (
     EventRecord,
     IntakeRecord,
     InterventionRecord,
+    NotificationDeliveryRecord,
     ProposedTaskRecord,
     RequirementState,
     TaskRecord,
@@ -859,6 +863,144 @@ class Coordinator:
             remote=remote,
             timeout_seconds=timeout_seconds,
         )
+
+    def export_pr_notifications(
+        self,
+        *,
+        workspace: str = "",
+        repo_path: str | Path | None = None,
+        remote: str = "origin",
+        timeout_seconds: int = 5,
+        prepared_payload_path: str | Path | None = None,
+        dry_run: bool = False,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        """Export open intervention notifications to a PR or prepared payload."""
+        self._ensure_mutation_allowed()
+        setup = self.pr_notification_setup_payload(
+            workspace=workspace,
+            repo_path=repo_path,
+            remote=remote,
+            timeout_seconds=timeout_seconds,
+        )
+        prepared_payload = setup["prepared_payload"]
+        intervention_ids = list(prepared_payload.get("intervention_ids") or [])
+        target = setup.get("target")
+        target_payload = target if isinstance(target, dict) else {}
+        target_key = _notification_target_key(target_payload)
+        payload_hash = _notification_payload_hash(prepared_payload)
+        existing = (
+            self.store.notification_delivery(
+                self.config.project_id,
+                target_key,
+                channel="pull_request_comment",
+            )
+            if target_key
+            else None
+        )
+        result: dict[str, Any] = {
+            "project_id": self.config.project_id,
+            "ok": False,
+            "action": "refused",
+            "status": setup["status"],
+            "target_key": target_key,
+            "payload_hash": payload_hash,
+            "setup": setup,
+            "prepared_payload": prepared_payload,
+            "prepared_payload_path": "",
+            "delivery": notification_delivery_to_dict(existing) if existing else None,
+            "issues": list(setup.get("issues") or []),
+        }
+        if not intervention_ids:
+            result["ok"] = True
+            result["action"] = "skipped"
+            result["status"] = "no_open_interventions"
+            return result
+        if not target_key:
+            return result
+        posting_mode = str(setup.get("posting", {}).get("mode") or "")
+        if setup.get("ok") and posting_mode == "live_comment":
+            if _live_export_satisfied(existing, payload_hash):
+                result["ok"] = True
+                result["action"] = "suppressed"
+                result["status"] = "unchanged"
+                return result
+            if dry_run:
+                result["ok"] = True
+                result["action"] = "dry_run"
+                result["status"] = "pending"
+                return result
+            delivery = _post_pr_notification(
+                target_payload,
+                prepared_payload,
+                existing=existing,
+                timeout_seconds=timeout_seconds,
+                path=Path(setup["repo"]["path"]),
+            )
+            record = self.store.upsert_notification_delivery(
+                self.config.project_id,
+                target_key=target_key,
+                channel="pull_request_comment",
+                target=target_payload,
+                comment_id=delivery["comment_id"],
+                payload_hash=payload_hash,
+                status=delivery["status"],
+                last_posted_at=_utc_timestamp(),
+                metadata={
+                    "intervention_ids": intervention_ids,
+                    "body": prepared_payload["body"],
+                },
+                actor=actor,
+            )
+            result["ok"] = True
+            result["action"] = delivery["action"]
+            result["status"] = delivery["status"]
+            result["delivery"] = notification_delivery_to_dict(record)
+            return result
+
+        path = _prepared_pr_notification_path(self.config, prepared_payload_path)
+        if _prepared_export_satisfied(existing, payload_hash, path):
+            result["ok"] = True
+            result["action"] = "suppressed"
+            result["status"] = "unchanged"
+            result["prepared_payload_path"] = str(path)
+            return result
+        if dry_run:
+            result["ok"] = True
+            result["action"] = "dry_run"
+            result["status"] = "pending"
+            result["prepared_payload_path"] = str(path)
+            return result
+        payload_to_write = {
+            "project_id": self.config.project_id,
+            "target_key": target_key,
+            "payload_hash": payload_hash,
+            "target": target_payload,
+            "payload": prepared_payload,
+            "setup_status": setup["status"],
+            "setup_issues": setup.get("issues", []),
+        }
+        written_path = PreparedPrNotificationExporter().export(path, payload_to_write)
+        record = self.store.upsert_notification_delivery(
+            self.config.project_id,
+            target_key=target_key,
+            channel="pull_request_comment",
+            target=target_payload,
+            comment_id=existing.comment_id if existing else "",
+            payload_hash=payload_hash,
+            status="prepared",
+            metadata={
+                "intervention_ids": intervention_ids,
+                "prepared_payload_path": str(path),
+            },
+            actor=actor,
+        )
+        result["ok"] = True
+        result["action"] = "prepared"
+        result["status"] = "prepared"
+        result["prepared_payload_path"] = written_path
+        result["delivery"] = notification_delivery_to_dict(record)
+        return result
 
     def ingest_event_file(self, path: str | Path, *, actor: str = "system") -> bool:
         """Record an event from a JSON file."""
@@ -1804,6 +1946,7 @@ def _default_pr_notification_setup_payload(
         workspace.path,
         timeout_seconds,
         remote_info=remote_check["remote"],
+        branch=branch_check["branch"],
     )
     if not pr_check["ok"]:
         issue_code = (
@@ -1955,12 +2098,14 @@ def _gh_pr_check(
     timeout_seconds: int,
     *,
     remote_info: dict[str, str],
+    branch: str,
 ) -> dict[str, Any]:
     """Return diagnostic information for the PR associated with the branch."""
     command = [
         "gh",
         "pr",
         "view",
+        branch,
         "--repo",
         _gh_repo_argument(remote_info),
         "--json",
@@ -2188,12 +2333,151 @@ def _prepared_pr_notification_payload(
     else:
         lines.append("")
         lines.append("No open interventions are currently recorded.")
+    lines.append("")
+    lines.append("Managed by agent-tracker intervention notifications.")
     return {
         "surface": "pull_request_comment",
         "body": "\n".join(lines),
         "intervention_ids": [str(item["id"]) for item in interventions],
         "interventions": interventions,
     }
+
+
+def _notification_target_key(target: Any) -> str:
+    """Return a stable delivery key for a notification target."""
+    if not isinstance(target, dict):
+        return ""
+    host = _first_text(target.get("host")) or "github.com"
+    owner = _first_text(target.get("owner"))
+    repo = _first_text(target.get("repo"))
+    number = target.get("number")
+    if not owner or not repo or not isinstance(number, int):
+        return ""
+    return f"github:{host}/{owner}/{repo}#pull/{number}"
+
+
+def _notification_payload_hash(payload: dict[str, Any]) -> str:
+    """Return a deterministic content hash for one notification payload."""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _prepared_pr_notification_path(
+    config: ProjectConfig,
+    override: str | Path | None,
+) -> Path:
+    """Return the configured prepared PR notification payload path."""
+    value = _first_text(str(override) if override is not None else "")
+    if not value:
+        notifications = config.raw.get("notifications", {})
+        github = notifications.get("github", {}) if isinstance(notifications, dict) else {}
+        if isinstance(github, dict):
+            value = _first_text(github.get("prepared_payload_path"))
+    path = Path(value or "exports/pr-notification.json").expanduser()
+    if not path.is_absolute():
+        path = config.effective_state_root / path
+    return path
+
+
+def _live_export_satisfied(
+    existing: NotificationDeliveryRecord | None,
+    payload_hash: str,
+) -> bool:
+    """Return whether an existing live PR comment already has this payload."""
+    if existing is None:
+        return False
+    return (
+        existing.payload_hash == payload_hash
+        and existing.status in {"posted", "updated"}
+        and bool(existing.comment_id)
+    )
+
+
+def _prepared_export_satisfied(
+    existing: NotificationDeliveryRecord | None,
+    payload_hash: str,
+    path: Path,
+) -> bool:
+    """Return whether an existing prepared payload file already has this payload."""
+    if existing is None or existing.status != "prepared":
+        return False
+    return (
+        existing.payload_hash == payload_hash
+        and existing.metadata.get("prepared_payload_path") == str(path)
+        and path.exists()
+    )
+
+
+def _post_pr_notification(
+    target: dict[str, Any],
+    prepared_payload: dict[str, Any],
+    *,
+    existing: NotificationDeliveryRecord | None,
+    timeout_seconds: int,
+    path: Path,
+) -> dict[str, str]:
+    """Create or update the PR comment for a prepared notification payload."""
+    comment_id = _first_text(existing.comment_id if existing else "")
+    body = _first_text(prepared_payload.get("body"))
+    if not body:
+        raise RuntimeError("notification payload body is empty")
+    repo_path = _gh_issue_comments_path(target)
+    command = _gh_api_command(target, repo_path, body=body)
+    status = "posted"
+    action = "created"
+    if comment_id:
+        command = _gh_api_command(
+            target,
+            f"repos/{target['owner']}/{target['repo']}/issues/comments/{quote(comment_id)}",
+            method="PATCH",
+            body=body,
+        )
+        status = "updated"
+        action = "updated"
+    completed = _run_setup_check_command(command, path=path, timeout_seconds=timeout_seconds)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            _command_failure_detail(completed, "GitHub CLI failed to post PR notification.")
+        )
+    if not comment_id:
+        try:
+            response = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("GitHub CLI returned non-JSON comment data.") from exc
+        raw_comment_id = response.get("id")
+        comment_id = str(raw_comment_id) if raw_comment_id else ""
+        if not comment_id:
+            raise RuntimeError("GitHub CLI did not return a PR comment id.")
+    return {"action": action, "status": status, "comment_id": comment_id}
+
+
+def _gh_api_command(
+    target: dict[str, Any],
+    path: str,
+    *,
+    body: str,
+    method: str = "POST",
+) -> list[str]:
+    """Return a GitHub CLI API command for an issue comment operation."""
+    command = ["gh", "api", path.lstrip("/")]
+    host = _first_text(target.get("host"))
+    if host and host != "github.com":
+        command.extend(["--hostname", host])
+    if method != "POST":
+        command.extend(["-X", method])
+    command.extend(["-f", f"body={body}"])
+    return command
+
+
+def _gh_issue_comments_path(target: dict[str, Any]) -> str:
+    """Return the GitHub API path for PR issue comments."""
+    return f"repos/{target['owner']}/{target['repo']}/issues/{target['number']}/comments"
+
+
+def _utc_timestamp() -> str:
+    """Return the current UTC timestamp."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _live_pr_notifications_enabled(config: ProjectConfig) -> bool:

@@ -230,6 +230,21 @@ Prepared payload output is always derived from open intervention records. Use it
 for sandboxes, unauthenticated shells, and review-only workflows where a later
 exporter or human will post the PR comment.
 
+Export open interventions after the setup check succeeds or identifies a
+prepared-payload fallback:
+
+```bash
+agent-tracker export-pr-notifications --config project.json \
+  --repo-path . --json
+```
+
+The exporter stores delivery state in SQLite, including the target, payload
+hash, comment ID when GitHub returns one, and the last live post time. Repeated
+runs with the same payload are suppressed instead of creating duplicate PR
+comments. Live PR comments require `notifications.github.allow_live: true`;
+otherwise the command writes a prepared payload JSON file, defaulting to
+`exports/pr-notification.json` below `state_root`.
+
 ## Project Overview
 
 Use `overview` when you need a compact project-log view instead of raw status

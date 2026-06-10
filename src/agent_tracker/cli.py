@@ -659,6 +659,52 @@ def command_check_pr_notification_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_export_pr_notifications(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.export_pr_notifications(
+        workspace=args.workspace,
+        repo_path=args.repo_path,
+        remote=args.remote,
+        timeout_seconds=args.timeout_seconds,
+        prepared_payload_path=args.prepared_payload_path,
+        dry_run=args.dry_run,
+        actor=args.actor,
+    )
+    if args.json:
+        print_json(payload)
+        return 0 if payload["ok"] else 1
+    print_path_report(coord)
+    renderer = human_renderer()
+    renderer.section("PR notification export")
+    rows: list[tuple[str, object]] = [
+        ("status", payload["status"]),
+        ("action", payload["action"]),
+        ("ok", str(payload["ok"]).lower()),
+    ]
+    if payload.get("target_key"):
+        rows.append(("target", payload["target_key"]))
+    if payload.get("prepared_payload_path"):
+        rows.append(("payload", payload["prepared_payload_path"]))
+    delivery = payload.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("comment_id"):
+        rows.append(("comment", delivery["comment_id"]))
+    renderer.kv_table(rows, label_width=10)
+    if payload.get("issues"):
+        renderer.section("Issues")
+        for issue in payload["issues"]:
+            renderer.line(
+                f"{issue['severity']} {issue['code']}: {issue['message']}",
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+            renderer.line(
+                f"remediation: {issue['remediation']}",
+                initial_indent="    ",
+                subsequent_indent="    ",
+            )
+    return 0 if payload["ok"] else 1
+
+
 def command_record_intake(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -1322,6 +1368,21 @@ def build_parser() -> argparse.ArgumentParser:
     check_pr_notification_setup.add_argument("--timeout-seconds", type=int, default=5)
     check_pr_notification_setup.add_argument("--json", action="store_true")
     check_pr_notification_setup.set_defaults(func=command_check_pr_notification_setup)
+
+    export_pr_notifications = sub.add_parser(
+        "export-pr-notifications",
+        help="Export open interventions as PR notifications or prepared payloads.",
+    )
+    add_common(export_pr_notifications)
+    export_pr_notifications.add_argument("--workspace", default="")
+    export_pr_notifications.add_argument("--repo-path", default="")
+    export_pr_notifications.add_argument("--remote", default="origin")
+    export_pr_notifications.add_argument("--timeout-seconds", type=int, default=5)
+    export_pr_notifications.add_argument("--prepared-payload-path", default="")
+    export_pr_notifications.add_argument("--dry-run", action="store_true")
+    export_pr_notifications.add_argument("--actor", default="system")
+    export_pr_notifications.add_argument("--json", action="store_true")
+    export_pr_notifications.set_defaults(func=command_export_pr_notifications)
 
     record_intake = sub.add_parser(
         "record-intake",

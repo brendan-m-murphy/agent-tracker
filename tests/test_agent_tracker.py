@@ -400,6 +400,13 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
             {"project_id": "toy", "notifications": {"github": {"allow_live": "yes"}}},
             "config field 'notifications.github.allow_live' must be a boolean",
         ),
+        (
+            {
+                "project_id": "toy",
+                "notifications": {"github": {"prepared_payload_path": []}},
+            },
+            "config field 'notifications.github.prepared_payload_path' must be a string",
+        ),
     ],
 )
 def test_cli_reports_malformed_config_errors_without_traceback(
@@ -3501,6 +3508,7 @@ def test_pr_notification_setup_flags_missing_pr_association(
                 "gh",
                 "pr",
                 "view",
+                "feature/pr-notifications",
                 "--repo",
                 "example/library",
                 "--json",
@@ -3542,6 +3550,7 @@ def test_pr_notification_setup_rejects_pr_target_from_different_remote(
                 "gh",
                 "pr",
                 "view",
+                "feature/setup",
                 "--repo",
                 "example/selected",
                 "--json",
@@ -3573,6 +3582,7 @@ def test_pr_notification_setup_rejects_pr_target_from_different_remote(
         "gh",
         "pr",
         "view",
+        "feature/setup",
         "--repo",
         "example/selected",
         "--json",
@@ -3639,6 +3649,7 @@ def test_pr_notification_setup_flags_missing_auth_after_pr_resolution(
                 "gh",
                 "pr",
                 "view",
+                "feature/setup",
                 "--repo",
                 "example/library",
                 "--json",
@@ -3702,6 +3713,7 @@ def test_pr_notification_setup_uses_prepared_payload_when_live_posting_unsupport
                 "gh",
                 "pr",
                 "view",
+                "feature/setup",
                 "--repo",
                 "example/library",
                 "--json",
@@ -3794,6 +3806,427 @@ def test_cli_check_pr_notification_setup_outputs_json_payload(
 
     assert code == 0
     assert json.loads(stdout.getvalue()) == expected
+
+
+def test_pr_notification_exporter_writes_prepared_payload_and_suppresses_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared PR notification exports persist delivery state without duplicates."""
+    config = load_config(write_project(tmp_path))
+    coord = Coordinator(config)
+    coord.import_tasks()
+    intervention = coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    _stub_setup_commands(
+        monkeypatch,
+        {
+            ("git", "remote", "get-url", "origin"): (
+                0,
+                "https://github.com/example/library.git\n",
+                "",
+            ),
+            ("git", "branch", "--show-current"): (0, "feature/setup\n", ""),
+            (
+                "gh",
+                "pr",
+                "view",
+                "feature/setup",
+                "--repo",
+                "example/library",
+                "--json",
+                "number,url,headRefName,baseRefName,state",
+            ): (
+                0,
+                json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            ),
+            ("gh", "auth", "status"): (0, "Logged in to github.com\n", ""),
+        },
+    )
+
+    first = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/pr-notification.json",
+        actor="pm",
+    )
+    second = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/pr-notification.json",
+        actor="pm",
+    )
+    third = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/alternate-pr-notification.json",
+        actor="pm",
+    )
+    alternate_path = tmp_path / "exports" / "alternate-pr-notification.json"
+    fourth = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/alternate-pr-notification.json",
+        actor="pm",
+    )
+    alternate_path.unlink()
+    fifth = coord.export_pr_notifications(
+        repo_path=tmp_path,
+        prepared_payload_path="exports/alternate-pr-notification.json",
+        actor="pm",
+    )
+    snapshot = coord.store.snapshot(config.project_id)
+
+    assert first["ok"] is True
+    assert first["action"] == "prepared"
+    assert first["target_key"] == "github:github.com/example/library#pull/123"
+    assert first["delivery"]["payload_hash"] == first["payload_hash"]
+    assert first["delivery"]["status"] == "prepared"
+    payload_path = tmp_path / "exports" / "pr-notification.json"
+    assert first["prepared_payload_path"] == str(payload_path)
+    written = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert written["payload_hash"] == first["payload_hash"]
+    assert written["payload"]["intervention_ids"] == [intervention.intervention_id]
+    assert "Human review is needed." in written["payload"]["body"]
+    assert second["ok"] is True
+    assert second["action"] == "suppressed"
+    assert second["payload_hash"] == first["payload_hash"]
+    assert third["ok"] is True
+    assert third["action"] == "prepared"
+    assert third["prepared_payload_path"] == str(alternate_path)
+    assert fourth["ok"] is True
+    assert fourth["action"] == "suppressed"
+    assert fifth["ok"] is True
+    assert fifth["action"] == "prepared"
+    assert alternate_path.exists()
+    assert len(snapshot["notification_deliveries"]) == 1
+    assert snapshot["notification_deliveries"][0]["target_key"] == first["target_key"]
+
+
+def test_pr_notification_exporter_can_promote_prepared_payload_to_live_comment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepared delivery state does not suppress a later live PR comment."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if key == ("git", "remote", "get-url", "origin"):
+            return _completed_process(command, stdout="https://github.com/example/library.git\n")
+        if key == ("git", "branch", "--show-current"):
+            return _completed_process(command, stdout="feature/setup\n")
+        if key == (
+            "gh",
+            "pr",
+            "view",
+            "feature/setup",
+            "--repo",
+            "example/library",
+            "--json",
+            "number,url,headRefName,baseRefName,state",
+        ):
+            return _completed_process(
+                command,
+                stdout=json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+            )
+        if key == ("gh", "auth", "status"):
+            return _completed_process(command, stdout="Logged in to github.com\n")
+        if key[:3] == ("gh", "api", "repos/example/library/issues/123/comments"):
+            return _completed_process(command, stdout=json.dumps({"id": 456}))
+        raise AssertionError(f"unexpected command: {key}")
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+    prepared = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["notifications"] = {"github": {"allow_live": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    live_coord = Coordinator(load_config(config_path))
+
+    live = live_coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+
+    assert prepared["action"] == "prepared"
+    assert live["ok"] is True
+    assert live["action"] == "created"
+    assert live["delivery"]["comment_id"] == "456"
+    assert len([call for call in calls if call[:2] == ("gh", "api")]) == 1
+
+
+def test_pr_notification_exporter_posts_live_comment_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live PR notification exports create once, suppress, then patch changed content."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["notifications"] = {"github": {"allow_live": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        calls.append(key)
+        if key == ("git", "remote", "get-url", "origin"):
+            return _completed_process(
+                command,
+                stdout="https://github.com/example/library.git\n",
+            )
+        if key == ("git", "branch", "--show-current"):
+            return _completed_process(command, stdout="feature/setup\n")
+        if key == (
+            "gh",
+            "pr",
+            "view",
+            "feature/setup",
+            "--repo",
+            "example/library",
+            "--json",
+            "number,url,headRefName,baseRefName,state",
+        ):
+            return _completed_process(
+                command,
+                stdout=json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+            )
+        if key == ("gh", "auth", "status"):
+            return _completed_process(command, stdout="Logged in to github.com\n")
+        if key[:3] == ("gh", "api", "repos/example/library/issues/123/comments"):
+            body_arg = key[-1]
+            assert body_arg.startswith("body=Agent tracker intervention notification")
+            return _completed_process(command, stdout=json.dumps({"id": 456}))
+        if key[:5] == (
+            "gh",
+            "api",
+            "repos/example/library/issues/comments/456",
+            "-X",
+            "PATCH",
+        ):
+            body_arg = key[-1]
+            assert "Second intervention." in body_arg
+            return _completed_process(command, stdout=json.dumps({"id": 456}))
+        raise AssertionError(f"unexpected command: {key}")
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+
+    first = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+    second = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+    coord.record_intervention(
+        intervention_id="needs-approval",
+        reason="approval_required",
+        task_id="ready",
+        summary="Second intervention.",
+    )
+    third = coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+
+    assert first["ok"] is True
+    assert first["action"] == "created"
+    assert first["delivery"]["comment_id"] == "456"
+    assert first["delivery"]["last_posted_at"]
+    assert second["ok"] is True
+    assert second["action"] == "suppressed"
+    assert third["ok"] is True
+    assert third["action"] == "updated"
+    assert len([call for call in calls if call[:2] == ("gh", "api")]) == 2
+
+
+def test_pr_notification_live_create_requires_comment_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live create failures without a comment id do not persist delivery state."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["notifications"] = {"github": {"allow_live": True}}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    coord.record_intervention(
+        intervention_id="needs-review",
+        reason="pr_review_needed",
+        task_id="ready",
+        summary="Human review is needed.",
+    )
+
+    def fake_run(command: list[str], **_: object) -> Any:
+        key = _setup_command_key(command)
+        if key == ("git", "remote", "get-url", "origin"):
+            return _completed_process(command, stdout="https://github.com/example/library.git\n")
+        if key == ("git", "branch", "--show-current"):
+            return _completed_process(command, stdout="feature/setup\n")
+        if key == (
+            "gh",
+            "pr",
+            "view",
+            "feature/setup",
+            "--repo",
+            "example/library",
+            "--json",
+            "number,url,headRefName,baseRefName,state",
+        ):
+            return _completed_process(
+                command,
+                stdout=json.dumps(
+                    {
+                        "number": 123,
+                        "url": "https://github.com/example/library/pull/123",
+                        "headRefName": "feature/setup",
+                        "baseRefName": "main",
+                        "state": "OPEN",
+                    }
+                ),
+            )
+        if key == ("gh", "auth", "status"):
+            return _completed_process(command, stdout="Logged in to github.com\n")
+        if key[:3] == ("gh", "api", "repos/example/library/issues/123/comments"):
+            return _completed_process(command, stdout="{}")
+        raise AssertionError(f"unexpected command: {key}")
+
+    monkeypatch.setattr(service_module.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="comment id"):
+        coord.export_pr_notifications(repo_path=tmp_path, actor="pm")
+
+    assert coord.store.notification_deliveries(config.project_id) == []
+
+
+def test_cli_export_pr_notifications_outputs_json_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The PR notification export command exposes machine-readable output."""
+    config_path = write_project(tmp_path)
+    expected = {
+        "project_id": "toy",
+        "ok": True,
+        "action": "prepared",
+        "status": "prepared",
+        "target_key": "github:github.com/example/library#pull/123",
+        "payload_hash": "abc",
+        "setup": {},
+        "prepared_payload": {"body": "body", "intervention_ids": ["i1"]},
+        "prepared_payload_path": str(tmp_path / "exports" / "pr.json"),
+        "delivery": None,
+        "issues": [],
+    }
+
+    def fake_export(self: Coordinator, **_: object) -> dict[str, Any]:
+        return expected
+
+    monkeypatch.setattr(Coordinator, "export_pr_notifications", fake_export)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(
+            [
+                "export-pr-notifications",
+                "--config",
+                str(config_path),
+                "--repo-path",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+
+    assert code == 0
+    assert json.loads(stdout.getvalue()) == expected
+
+
+def test_cli_export_pr_notifications_returns_nonzero_when_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Notification export refusal is visible to shell automation."""
+    config_path = write_project(tmp_path)
+    refused = {
+        "project_id": "toy",
+        "ok": False,
+        "action": "refused",
+        "status": "missing_remote",
+        "target_key": "",
+        "payload_hash": "abc",
+        "setup": {},
+        "prepared_payload": {"body": "body", "intervention_ids": ["i1"]},
+        "prepared_payload_path": "",
+        "delivery": None,
+        "issues": [
+            {
+                "code": "missing_remote",
+                "severity": "error",
+                "message": "missing",
+                "remediation": "add remote",
+            }
+        ],
+    }
+
+    def fake_export(self: Coordinator, **_: object) -> dict[str, Any]:
+        return refused
+
+    monkeypatch.setattr(Coordinator, "export_pr_notifications", fake_export)
+    json_stdout = StringIO()
+    human_stdout = StringIO()
+
+    with redirect_stdout(json_stdout):
+        json_code = cli.main(
+            [
+                "export-pr-notifications",
+                "--config",
+                str(config_path),
+                "--json",
+            ]
+        )
+    with redirect_stdout(human_stdout):
+        human_code = cli.main(["export-pr-notifications", "--config", str(config_path)])
+
+    assert json_code == 1
+    assert human_code == 1
+    assert json.loads(json_stdout.getvalue()) == refused
+    assert "PR notification export" in human_stdout.getvalue()
+    assert "missing_remote" in human_stdout.getvalue()
 
 
 def test_cli_help_output_is_plain_text_without_rich_boxes() -> None:

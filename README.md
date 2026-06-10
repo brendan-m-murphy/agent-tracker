@@ -320,6 +320,7 @@ agent-tracker status --json
 | `list-interventions` | List open or resolved human intervention records; add `--json` for exporter input. | `agent-tracker list-interventions --config demo-tracker/project.json --status open --json` |
 | `resolve-intervention` | Resolve an intervention with evidence or a reason. | `agent-tracker resolve-intervention --config demo-tracker/project.json <intervention-id> --evidence "review:approved"` |
 | `check-pr-notification-setup` | Diagnose whether open interventions can be delivered through a PR comment or prepared payload. | `agent-tracker check-pr-notification-setup --config demo-tracker/project.json --repo-path . --json` |
+| `export-pr-notifications` | Export open interventions as one idempotent PR notification or prepared payload. | `agent-tracker export-pr-notifications --config demo-tracker/project.json --repo-path . --json` |
 | `intake record` | Record raw ideas, features, checks, or planning notes without creating claimable tasks. | `agent-tracker intake --config demo-tracker/project.json record --kind feature --tag inbox "Add triage workflow"` |
 | `intake list` | List raw intake records for later project-manager triage. | `agent-tracker intake --config demo-tracker/project.json list --json` |
 | `intake update` | Mark intake as `triaged`, `closed`, `deferred`, or `open`. | `agent-tracker intake --config demo-tracker/project.json update <intake-id> --status closed` |
@@ -357,6 +358,8 @@ Built-in defaults:
 - `prompt_renderer`: `agent_tracker.rendering:DefaultPromptRenderer`
 - `exporter`: `agent_tracker.exporters:JsonSnapshotExporter`
 - `pr_notification_setup_checker`: built-in local Git and `gh` diagnostics
+- `notifications.github.prepared_payload_path`: optional prepared PR payload
+  output path, defaulting to `exports/pr-notification.json`
 
 See [docs/plugins.md](docs/plugins.md) for importer, prompt renderer, event
 adapter, notification setup checker, follow-up planner, and exporter contracts.

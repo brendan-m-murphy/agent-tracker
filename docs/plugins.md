@@ -334,6 +334,10 @@ Custom checkers should be read-only. They return the same payload shape as
 non-standard PR discovery or authentication checks; notification exporters
 should still treat SQLite intervention records as canonical state.
 
+`agent-tracker export-pr-notifications` consumes this setup payload and records
+notification delivery state in SQLite. Projects should customize setup
+discovery here rather than storing delivery state in checker plugins.
+
 ## Follow-Up Planners
 
 Protocol:
