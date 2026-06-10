@@ -35,6 +35,7 @@ _TEXT_FIELDS = {
     "prompt_renderer",
     "event_adapter",
     "exporter",
+    "pr_notification_setup_checker",
     "export_path",
     "spool_inbox",
     "spool_done",
@@ -159,6 +160,7 @@ def load_config(path: str | Path) -> ProjectConfig:
     _validate_text_fields(data)
     _validate_spool(data)
     _validate_workspaces(data)
+    _validate_notifications(data)
     coordination_policy = _coordination_policy(data)
     raw = dict(data)
     raw["config_schema_version"] = config_schema_version
@@ -347,3 +349,27 @@ def _coordination_policy_choice(
         joined = ", ".join(sorted(choices))
         raise ValueError(f"config field '{field_name}' must be one of: {joined}")
     return cleaned
+
+
+def _validate_notifications(data: dict[str, Any]) -> None:
+    """Validate optional notification settings."""
+    if "notifications" not in data or data["notifications"] is None:
+        return
+    notifications = data["notifications"]
+    if not isinstance(notifications, dict):
+        raise ValueError("config field 'notifications' must be an object")
+    github = notifications.get("github")
+    if github is None:
+        return
+    if not isinstance(github, dict):
+        raise ValueError("config field 'notifications.github' must be an object")
+    if "allow_live" in github and not isinstance(github["allow_live"], bool):
+        raise ValueError("config field 'notifications.github.allow_live' must be a boolean")
+    if (
+        "prepared_payload_path" in github
+        and github["prepared_payload_path"] is not None
+        and not isinstance(github["prepared_payload_path"], str)
+    ):
+        raise ValueError(
+            "config field 'notifications.github.prepared_payload_path' must be a string"
+        )

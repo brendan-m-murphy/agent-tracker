@@ -40,15 +40,18 @@ If no config is discoverable, ask for the config path.
    the project has no task-ingest path yet, make the task-plan edit narrow,
    call it friction, import it, and record that fact as evidence.
 4. Claim one task with a stable agent ID. Keep the lease token in your working
-   notes until completion or failure.
+   notes until completion, release, failure, or explicit review/integration
+   handoff.
 5. Establish the task branch/worktree policy before editing or dispatching
    workers. Do not implement directly in the canonical repository checkout.
 6. Render the task prompt, then coordinate bounded workers by default when the
    user requested agent coordination. Local work is fine for tiny coordination
    mutations or when subagents are unavailable, but do not silently replace
    requested agent coordination with solo implementation.
-7. Use review/integration states when code, docs, config, tests, or task plans
-   changed and final evidence is not available yet.
+7. Use `release` with an audited reason when stopping early, switching scope, or
+   returning untouched work to the queue. Use review/integration states when
+   code, docs, config, tests, or task plans changed and final evidence is not
+   available yet.
 8. Complete only after evidence satisfies the task's completion policy.
 9. Re-run `overview` and report ready work, active work, and any friction that
    remains.
@@ -93,6 +96,24 @@ When dispatching subagents, give each worker or reviewer the branch name, base
 ref, worktree path, write scope, task IDs, and the exact diff or commit range to
 review. A reviewer should inspect the branch or patch that will be integrated,
 not stale canonical `main`.
+
+## Release Policy
+
+When you intentionally stop early or switch scope, return the task to `pending`
+with an explicit audit reason instead of waiting for stale-lease recovery:
+
+```bash
+uv run agent-tracker release --config tracking/project.json <task-id> --lease-token <lease-token> --agent <agent-id> --reason "<why the lease is being released>"
+```
+
+Closeout command choice:
+
+- `release` returns active owned work to `pending` for another claim when you are
+  stopping early, switching scope, or returning untouched work.
+- `submit-review` and `await-integration` clear the lease for finished work that
+  is waiting on review, PR, merge, deployment, or other integration evidence.
+- `fail` is terminal for the task. Use it only when the current task should be
+  failed, not for pauses or review/integration handoffs.
 
 ## Planning And Creating Work
 

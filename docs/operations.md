@@ -203,6 +203,78 @@ inspection, opt in:
 agent-tracker status --config project.json --recover-stale-leases
 ```
 
+## Human Intervention State
+
+Use interventions when a human action is needed but the task should not be
+silently completed, failed, or used as a notification delivery record.
+Interventions are live SQLite state and are exported in snapshots alongside
+audit logs.
+
+Record an intervention:
+
+```bash
+agent-tracker record-intervention --config project.json \
+  --task-id write-readme \
+  --reason pr_review_needed \
+  "PR review is needed before completion"
+```
+
+List open interventions for dashboards, PR notification setup checks, or later
+exporters:
+
+```bash
+agent-tracker list-interventions --config project.json --status open --json
+```
+
+Resolve an intervention only with evidence or a clear reason:
+
+```bash
+agent-tracker resolve-intervention --config project.json <intervention-id> \
+  --evidence "review:approved"
+```
+
+PR comments, issue comments, and prepared notification payloads should refer to
+these intervention records. They should not replace SQLite as the coordination
+state.
+
+Before relying on PR comments for intervention notifications, run a setup
+diagnostic from the repository checkout:
+
+```bash
+agent-tracker check-pr-notification-setup --config project.json \
+  --repo-path . --json
+```
+
+The diagnostic is read-only. It checks the configured Git remote, current
+branch, associated pull request, GitHub CLI authentication, and whether live PR
+posting is explicitly enabled. It returns stable issue codes:
+
+- `missing_remote` when no usable Git remote is available;
+- `missing_pr_association` when the checkout is detached or has no associated
+  pull request;
+- `missing_auth` when `gh` cannot resolve or authenticate the PR path;
+- `unsupported_sandbox` when live posting is not safe, with prepared payloads
+  still available when the PR target is known.
+
+Prepared payload output is always derived from open intervention records. Use it
+for sandboxes, unauthenticated shells, and review-only workflows where a later
+exporter or human will post the PR comment.
+
+Export open interventions after the setup check succeeds or identifies a
+prepared-payload fallback:
+
+```bash
+agent-tracker export-pr-notifications --config project.json \
+  --repo-path . --json
+```
+
+The exporter stores delivery state in SQLite, including the target, payload
+hash, comment ID when GitHub returns one, and the last live post time. Repeated
+runs with the same payload are suppressed instead of creating duplicate PR
+comments. Live PR comments require `notifications.github.allow_live: true`;
+otherwise the command writes a prepared payload JSON file, defaulting to
+`exports/pr-notification.json` below `state_root`.
+
 ## Project Overview
 
 Use `overview` when you need a compact project-log view instead of raw status
@@ -293,6 +365,9 @@ payloads:
   `lease_expires_at`, and `agent_id`.
 - `heartbeat(task_id, lease_token, lease_seconds=3600, agent_id="")`: the same
   claim-shaped lease payload after extending the lease.
+- `release(task_id, lease_token, reason, agent_id="", status="pending")`:
+  release an active owned lease back to the queue and return the audited release
+  payload.
 - `complete(task_id, lease_token, evidence=None, agent_id="",
   direct_merge=False)`: `{"ok": true}` after successful completion.
 - `record_evidence(task_id, uri, actor="system")`: idempotently append one
@@ -317,13 +392,13 @@ APIs.
 
 Existing method names remain supported as compatibility aliases:
 `get_project_status()`, `claim_task(...)`, `heartbeat_task(...)`,
-`complete_task(...)`, `list_ready_tasks(...)`, `get_task_context(...)`, and
-`render_prompt(...)`.
+`release_task(...)`, `complete_task(...)`, `list_ready_tasks(...)`,
+`get_task_context(...)`, and `render_prompt(...)`.
 
 These wrappers are adapters over `Coordinator`, not a second queue authority.
 Canonical config and database override checks still run for mutating calls, and
 lease tokens and optional `agent_id` ownership checks still apply to heartbeat,
-completion, review, integration, and failure operations. `status` and
+release, completion, review, integration, and failure operations. `status` and
 `overview` remain read-only unless their `recover_stale_leases` flag is set.
 
 ## List Ready Tasks
@@ -495,6 +570,35 @@ agent-tracker heartbeat --config project.json write-readme \
 Use heartbeats for longer tasks so stale-lease recovery does not return active
 work to the ready queue.
 
+## Release A Lease
+
+Release a task when the current owner is stopping early, switching scope, or
+handing unstarted work back to the queue:
+
+```bash
+agent-tracker release --config project.json write-readme \
+  --lease-token <lease-token> \
+  --agent agent-1 \
+  --reason "switching to higher-priority release work"
+```
+
+`release` requires the active lease token and records the reason in audit
+history. It clears the lease and returns the task to `pending`; if dependencies
+are already satisfied, the task appears ready for another claim. Use
+`submit-review` or `await-integration` instead when implementation is complete
+but review, PR, merge, or other integration evidence is still pending. Use
+`fail` only when the task should become terminally failed.
+
+Command choice summary:
+
+- `release`: active owned work is stopping early and should become claimable
+  again as `pending`.
+- `submit-review` / `await-integration`: implementation is finished, the lease
+  should clear, and the task should wait in a non-terminal review or integration
+  state without unblocking dependents.
+- `fail`: the leased task should become terminally failed; use a separate
+  follow-up task for any new recovery work.
+
 ## Log Work While Active
 
 Use concise events or spool records for durable progress that another agent or
@@ -529,13 +633,26 @@ Use intake for ideas, feature requests, checks, and planning notes that should
 not become claimable tasks yet:
 
 ```bash
-agent-tracker intake --config project.json record \
+agent-tracker intake --config project.json capture \
   --kind feature \
   --source user \
   --repo agent-tracker \
   --tag triage \
+  --metadata source_date=2026-06-10 \
+  --metadata thread=codex-friction \
   "Add an inbox for untriaged requests"
 ```
+
+The guided `intake capture` form requires `--kind`, `--source`, and `--repo`,
+preserves the raw text argument exactly, and still does not create a claimable
+task. Supported guided kinds are `idea`, `feature`, `check`, `concern`, and
+`note`. Use repeatable `--metadata KEY=VALUE` entries for small structured
+fields such as `source_date`, `thread`, `project`, `owner`, or `priority`. Use
+`--metadata-json '{"key": "value"}'` when the metadata is already assembled as a
+JSON object; explicit `--metadata` pairs are merged into that object. Keep the
+raw request or note as the positional text argument rather than splitting it
+across metadata fields. Use `intake record` or the flat `record-intake` alias
+for looser backward-compatible intake capture.
 
 List intake for project-manager triage:
 
@@ -548,8 +665,8 @@ The grouped `intake` command is implemented with Typer and accepts common
 Without `--json`, `intake list` uses Rich rendering and prints each record with
 its current status, such as `status open`, `status triaged`, `status closed`, or
 `status deferred`, plus its creation timestamp when available. The flat aliases
-`record-intake`, `list-intake`, and `update-intake` remain supported for
-existing scripts and produce the same JSON payloads.
+`capture-intake`, `record-intake`, `list-intake`, and `update-intake` remain
+supported for existing scripts and produce the same JSON payloads.
 
 Intake records are stored in SQLite, audited as `intake.record`, and included
 in snapshots. They do not appear in `next`, `overview` ready groups, or `claim`
@@ -764,13 +881,18 @@ agent-tracker check-completion-integrity --config project.json --json
 ```
 
 The check is read-only and uses the same completion-policy validator as the
-state transitions. It exits non-zero when it finds issues. Missing, malformed,
-or unknown `completion_policy` metadata remains legacy behavior and is not
-reported as a policy issue.
+state transitions. It also inspects completed-task `file:` evidence inside the
+containing Git worktree and reports evidence that still points at untracked,
+ignored, or unstaged workspace files. Ignored files are reported with the
+untracked hygiene kind, because they are also absent from durable tracked
+history. These hygiene findings use additive issue kinds:
+`file_evidence_untracked` and `file_evidence_unstaged`. The check exits non-zero
+when it finds issues. Missing, malformed, or unknown `completion_policy`
+metadata remains legacy behavior and is not reported as a policy issue.
 
 ## Await Review Or Integration
 
-When implementation work is finished but the task is not done yet, release the
+When implementation work is finished but the task is not done yet, move the
 active lease into an explicit non-terminal queue state. This prevents the task
 from being reclaimed as active work while preserving that dependencies are not
 satisfied until the task is `done`.
@@ -869,7 +991,10 @@ agent-tracker fail --config project.json write-readme \
 ```
 
 Failure is terminal for the task. Create or import follow-up tasks separately if
-more work is needed.
+more work is needed. Do not use `fail` just to stop work, switch priorities, or
+hand a task to another coordinator; use `release` when the task should return to
+the queue, or `submit-review` / `await-integration` when finished work is
+waiting on handoff evidence.
 
 ## Stale Lease Recovery
 
@@ -1117,6 +1242,16 @@ batch_pr_allowed`, include all covered task IDs, the batching rationale, and
 per-task validation and closeout evidence in the PR or review surface. Each
 tracker task still needs its own evidence entries and terminal state transition.
 
+If you need to stop early or switch scope before work is ready for review,
+return the task to the queue with an audited reason:
+
+```bash
+agent-tracker release --config project.json <task-id> \
+  --lease-token <lease-token> \
+  --agent <agent-id> \
+  --reason "<why this lease is being released>"
+```
+
 After review or integration is finished:
 
 ```bash
@@ -1129,7 +1264,7 @@ agent-tracker resolve-integration --config project.json <task-id> \
   --evidence "git:<main-commit>"
 ```
 
-If blocked after investigation:
+If investigation shows the leased task should terminally fail:
 
 ```bash
 agent-tracker fail --config project.json <task-id> \

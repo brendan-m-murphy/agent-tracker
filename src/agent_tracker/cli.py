@@ -20,10 +20,20 @@ from agent_tracker.config import (
     SUPPORTED_CONFIG_SCHEMA_VERSION,
     load_config,
 )
-from agent_tracker.db import intake_to_dict, proposed_task_to_dict, state_to_dict
-from agent_tracker.models import INTAKE_STATES, INTEGRATION_STATES
+from agent_tracker.db import (
+    intake_to_dict,
+    intervention_to_dict,
+    proposed_task_to_dict,
+    state_to_dict,
+)
+from agent_tracker.models import (
+    INTAKE_STATES,
+    INTEGRATION_STATES,
+    INTERVENTION_REASONS,
+    INTERVENTION_STATES,
+)
 from agent_tracker.rendering import HumanOutputRenderer
-from agent_tracker.service import Coordinator
+from agent_tracker.service import STRUCTURED_INTAKE_KINDS, Coordinator
 
 BOOTSTRAP_GITIGNORE_LINES = (
     ".agent-tracker/",
@@ -364,6 +374,23 @@ def command_complete(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_release(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    payload = coord.release(
+        args.task_id,
+        lease_token=args.lease_token,
+        reason=args.reason,
+        agent_id=args.agent,
+        status=args.status,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    print(f"Released {args.task_id} to {payload['status']}")
+    return 0
+
+
 def command_record_evidence(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
@@ -519,11 +546,191 @@ def command_launch_worker(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_record_intake(args: argparse.Namespace) -> int:
+def command_record_intervention(args: argparse.Namespace) -> int:
     coord = coordinator(args)
     print_path_report(coord)
     metadata = parse_json_object(args.metadata_json, "metadata-json")
+    intervention = coord.record_intervention(
+        reason=args.reason,
+        task_id=args.task_id,
+        summary=args.summary,
+        metadata=metadata,
+        intervention_id=args.id,
+        actor=args.actor,
+    )
+    print_json(intervention_to_dict(intervention))
+    return 0
+
+
+def command_list_interventions(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.interventions_payload(
+        status=args.status,
+        reason=args.reason,
+        task_id=args.task_id,
+        limit=args.limit,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    renderer = human_renderer()
+    if not payload["interventions"]:
+        renderer.raw_line("No interventions.")
+        return 0
+    for item in payload["interventions"]:
+        renderer.line(f"{item['id']}: {item['summary']}", subsequent_indent="  ")
+        rows: list[tuple[str, object]] = [
+            ("status", item["status"]),
+            ("reason", item["reason"]),
+        ]
+        if item["task_id"]:
+            rows.append(("task", item["task_id"]))
+        if item.get("resolution"):
+            rows.append(("resolution", item["resolution"]))
+        if item.get("evidence"):
+            rows.append(("evidence", ", ".join(item["evidence"])))
+        renderer.kv_table(rows, label_width=10)
+    return 0
+
+
+def command_resolve_intervention(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    intervention = coord.resolve_intervention(
+        args.intervention_id,
+        resolution=args.reason,
+        evidence=args.evidence,
+        actor=args.actor,
+    )
+    print_json(intervention_to_dict(intervention))
+    return 0
+
+
+def command_check_pr_notification_setup(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.pr_notification_setup_payload(
+        workspace=args.workspace,
+        repo_path=args.repo_path,
+        remote=args.remote,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if args.json:
+        print_json(payload)
+        return 0
+    renderer = human_renderer()
+    renderer.section("PR notification setup")
+    renderer.kv_table(
+        [
+            ("status", payload["status"]),
+            ("ok", str(payload["ok"]).lower()),
+            ("posting", payload["posting"]["mode"]),
+            ("workspace", payload["workspace"].get("name") or "(config root)"),
+            ("path", payload["workspace"]["path"]),
+        ],
+        label_width=10,
+    )
+    remote = payload["repo"].get("remote")
+    if remote:
+        renderer.kv_table(
+            [
+                ("remote", f"{remote['name']} {remote['url']}"),
+                ("branch", payload["repo"].get("branch") or "(none)"),
+            ],
+            label_width=10,
+        )
+    target = payload.get("target")
+    if target:
+        renderer.kv_table(
+            [("pr", target["url"]), ("auth", payload["auth"]["method"])],
+            label_width=10,
+        )
+    if payload["issues"]:
+        renderer.section("Issues")
+        for issue in payload["issues"]:
+            renderer.line(
+                f"{issue['severity']} {issue['code']}: {issue['message']}",
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+            renderer.line(
+                f"remediation: {issue['remediation']}",
+                initial_indent="    ",
+                subsequent_indent="    ",
+            )
+    else:
+        renderer.raw_line("No setup issues detected.")
+    return 0
+
+
+def command_export_pr_notifications(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    payload = coord.export_pr_notifications(
+        workspace=args.workspace,
+        repo_path=args.repo_path,
+        remote=args.remote,
+        timeout_seconds=args.timeout_seconds,
+        prepared_payload_path=args.prepared_payload_path,
+        dry_run=args.dry_run,
+        actor=args.actor,
+    )
+    if args.json:
+        print_json(payload)
+        return 0 if payload["ok"] else 1
+    print_path_report(coord)
+    renderer = human_renderer()
+    renderer.section("PR notification export")
+    rows: list[tuple[str, object]] = [
+        ("status", payload["status"]),
+        ("action", payload["action"]),
+        ("ok", str(payload["ok"]).lower()),
+    ]
+    if payload.get("target_key"):
+        rows.append(("target", payload["target_key"]))
+    if payload.get("prepared_payload_path"):
+        rows.append(("payload", payload["prepared_payload_path"]))
+    delivery = payload.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("comment_id"):
+        rows.append(("comment", delivery["comment_id"]))
+    renderer.kv_table(rows, label_width=10)
+    if payload.get("issues"):
+        renderer.section("Issues")
+        for issue in payload["issues"]:
+            renderer.line(
+                f"{issue['severity']} {issue['code']}: {issue['message']}",
+                initial_indent="  ",
+                subsequent_indent="  ",
+            )
+            renderer.line(
+                f"remediation: {issue['remediation']}",
+                initial_indent="    ",
+                subsequent_indent="    ",
+            )
+    return 0 if payload["ok"] else 1
+
+
+def command_record_intake(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    metadata = parse_intake_metadata(args.metadata_json, getattr(args, "metadata", []))
     intake = coord.record_intake(
+        args.text,
+        kind=args.kind,
+        source=args.source,
+        repo=args.repo,
+        tags=args.tag,
+        metadata=metadata,
+        intake_id=args.id,
+        actor=args.actor,
+    )
+    print_json(intake_to_dict(intake))
+    return 0
+
+
+def command_capture_intake(args: argparse.Namespace) -> int:
+    coord = coordinator(args)
+    print_path_report(coord)
+    metadata = parse_intake_metadata(args.metadata_json, args.metadata)
+    intake = coord.record_structured_intake(
         args.text,
         kind=args.kind,
         source=args.source,
@@ -677,6 +884,25 @@ def parse_json_object(value: str, label: str) -> dict[str, Any]:
     return parsed
 
 
+def parse_key_value_metadata(values: list[str]) -> dict[str, str]:
+    """Parse repeatable metadata KEY=VALUE CLI arguments."""
+    metadata: dict[str, str] = {}
+    for value in values:
+        key, separator, raw = value.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError("metadata entries must use KEY=VALUE")
+        metadata[key] = raw.strip()
+    return metadata
+
+
+def parse_intake_metadata(metadata_json: str, metadata_entries: list[str]) -> dict[str, Any]:
+    """Parse intake metadata from JSON plus repeatable KEY=VALUE entries."""
+    metadata = parse_json_object(metadata_json, "metadata-json")
+    metadata.update(parse_key_value_metadata(metadata_entries))
+    return metadata
+
+
 def parse_dependency(value: str) -> dict[str, str]:
     """Parse a proposed task dependency argument."""
     task_id, separator, description = value.partition(":")
@@ -702,15 +928,63 @@ def parse_dependencies(values: list[str] | None) -> list[dict[str, str]] | None:
 def add_record_intake_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments for commands that record raw intake."""
     add_common(parser)
-    parser.add_argument("text")
-    parser.add_argument("--id", default="")
-    parser.add_argument("--kind", default="idea")
-    parser.add_argument("--source", default="")
-    parser.add_argument("--repo", default="")
-    parser.add_argument("--tag", action="append", default=[])
-    parser.add_argument("--metadata-json", default="{}")
-    parser.add_argument("--actor", default="system")
+    parser.add_argument("text", help="Raw intake text to preserve for triage.")
+    parser.add_argument("--id", default="", help="Optional stable intake id.")
+    parser.add_argument(
+        "--kind", default="idea", help="Intake kind, such as idea, feature, check, or note."
+    )
+    parser.add_argument(
+        "--source", default="", help="Where the intake came from, such as user, thread, or review."
+    )
+    parser.add_argument("--repo", default="", help="Repository or component this intake concerns.")
+    parser.add_argument("--tag", action="append", default=[], help="Repeatable triage tag.")
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable structured metadata entry merged into metadata-json.",
+    )
+    parser.add_argument(
+        "--metadata-json", default="{}", help="JSON object for structured metadata."
+    )
+    parser.add_argument("--actor", default="system", help="Actor recorded in audit history.")
     parser.set_defaults(func=command_record_intake)
+
+
+def add_capture_intake_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for the guided structured intake helper."""
+    add_common(parser)
+    parser.add_argument("text", help="Raw intake text to preserve exactly for triage.")
+    parser.add_argument("--id", default="", help="Optional stable intake id.")
+    parser.add_argument(
+        "--kind",
+        required=True,
+        help=f"Required intake kind: {', '.join(STRUCTURED_INTAKE_KINDS)}.",
+    )
+    parser.add_argument(
+        "--source",
+        required=True,
+        help="Required source, such as user, thread URL, review, or agent id.",
+    )
+    parser.add_argument(
+        "--repo",
+        required=True,
+        help="Required repository or component this intake concerns.",
+    )
+    parser.add_argument("--tag", action="append", default=[], help="Repeatable triage tag.")
+    parser.add_argument(
+        "--metadata",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable structured metadata entry merged into metadata-json.",
+    )
+    parser.add_argument(
+        "--metadata-json", default="{}", help="JSON object for structured metadata."
+    )
+    parser.add_argument("--actor", default="system", help="Actor recorded in audit history.")
+    parser.set_defaults(func=command_capture_intake)
 
 
 def add_list_intake_arguments(parser: argparse.ArgumentParser) -> None:
@@ -776,11 +1050,22 @@ def _typer_record_intake(
     config: str = typer.Option("", "--config"),
     db: str = typer.Option("", "--db"),
     id_: str = typer.Option("", "--id"),
-    kind: str = typer.Option("idea", "--kind"),
-    source: str = typer.Option("", "--source"),
-    repo: str = typer.Option("", "--repo"),
-    tag: list[str] | None = typer.Option(None, "--tag"),
-    metadata_json: str = typer.Option("{}", "--metadata-json"),
+    kind: str = typer.Option(
+        "idea", "--kind", help="Intake kind, such as idea, feature, check, or note."
+    ),
+    source: str = typer.Option(
+        "", "--source", help="Where the intake came from, such as user, thread, or review."
+    ),
+    repo: str = typer.Option("", "--repo", help="Repository or component this intake concerns."),
+    tag: list[str] | None = typer.Option(None, "--tag", help="Repeatable triage tag."),
+    metadata: list[str] | None = typer.Option(
+        None,
+        "--metadata",
+        help="Repeatable structured metadata entry as KEY=VALUE.",
+    ),
+    metadata_json: str = typer.Option(
+        "{}", "--metadata-json", help="JSON object for structured metadata."
+    ),
     actor: str = typer.Option("system", "--actor"),
 ) -> None:
     """Record raw project intake without creating a task."""
@@ -793,10 +1078,63 @@ def _typer_record_intake(
         source=source,
         repo=repo,
         tag=tag or [],
+        metadata=metadata or [],
         metadata_json=metadata_json,
         actor=actor,
     )
     code = command_record_intake(args)
+    if code:
+        raise typer.Exit(code)
+
+
+@intake_typer_app.command("capture")
+def _typer_capture_intake(
+    ctx: typer.Context,
+    text: str = typer.Argument(..., help="Raw intake text to preserve exactly."),
+    config: str = typer.Option("", "--config"),
+    db: str = typer.Option("", "--db"),
+    id_: str = typer.Option("", "--id"),
+    kind: str = typer.Option(
+        ...,
+        "--kind",
+        help=f"Required intake kind: {', '.join(STRUCTURED_INTAKE_KINDS)}.",
+    ),
+    source: str = typer.Option(
+        ...,
+        "--source",
+        help="Required source, such as user, thread URL, review, or agent id.",
+    ),
+    repo: str = typer.Option(
+        ...,
+        "--repo",
+        help="Required repository or component this intake concerns.",
+    ),
+    tag: list[str] | None = typer.Option(None, "--tag", help="Repeatable triage tag."),
+    metadata: list[str] | None = typer.Option(
+        None,
+        "--metadata",
+        help="Repeatable structured metadata entry as KEY=VALUE.",
+    ),
+    metadata_json: str = typer.Option(
+        "{}", "--metadata-json", help="JSON object for structured metadata."
+    ),
+    actor: str = typer.Option("system", "--actor"),
+) -> None:
+    """Capture structured raw intake without creating a task."""
+    args = argparse.Namespace(
+        config=_typer_common_value(ctx, config, "config"),
+        db=_typer_common_value(ctx, db, "db"),
+        text=text,
+        id=id_,
+        kind=kind,
+        source=source,
+        repo=repo,
+        tag=tag or [],
+        metadata=metadata or [],
+        metadata_json=metadata_json,
+        actor=actor,
+    )
+    code = command_capture_intake(args)
     if code:
         raise typer.Exit(code)
 
@@ -966,6 +1304,36 @@ def build_parser() -> argparse.ArgumentParser:
     heartbeat.add_argument("--lease-seconds", type=int, default=3600)
     heartbeat.set_defaults(func=command_heartbeat)
 
+    release = sub.add_parser(
+        "release",
+        aliases=["release-lease"],
+        help="Return active owned work to pending; not for finished handoffs.",
+        description=(
+            "Return active owned work to pending. Use this when stopping early, "
+            "switching scope, or handing untouched work back to the queue. "
+            "Finished work waiting on review, PR, merge, or integration belongs "
+            "in submit-review or await-integration. Use fail only for terminal "
+            "failure."
+        ),
+    )
+    add_common(release)
+    release.add_argument("task_id")
+    release.add_argument("--lease-token", required=True)
+    release.add_argument("--agent", default="")
+    release.add_argument(
+        "--reason",
+        required=True,
+        help="Audited reason for returning this active lease to pending.",
+    )
+    release.add_argument(
+        "--status",
+        choices=["pending"],
+        default="pending",
+        help="Release target status; only pending is supported.",
+    )
+    release.add_argument("--json", action="store_true")
+    release.set_defaults(func=command_release)
+
     complete = sub.add_parser("complete", help="Complete a task.")
     add_common(complete)
     complete.add_argument("task_id")
@@ -992,13 +1360,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_completion = sub.add_parser(
         "check-completion-integrity",
-        help="Check completed tasks for evidence that no longer satisfies policy.",
+        help=(
+            "Check completed tasks for evidence that no longer satisfies policy "
+            "or points at untracked, ignored, or unstaged files."
+        ),
     )
     add_common(check_completion)
     check_completion.add_argument("--json", action="store_true")
     check_completion.set_defaults(func=command_check_completion_integrity)
 
-    submit_review = sub.add_parser("submit-review", help="Submit a leased task for review.")
+    submit_review = sub.add_parser(
+        "submit-review",
+        help="Mark finished leased work awaiting review; clears the lease.",
+        description=(
+            "Move finished leased work to awaiting_review and clear the lease. "
+            "Use this instead of release when implementation is ready for review "
+            "but should not unblock dependents yet."
+        ),
+    )
     add_common(submit_review)
     submit_review.add_argument("task_id")
     submit_review.add_argument("--lease-token", required=True)
@@ -1008,7 +1387,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     await_integration = sub.add_parser(
         "await-integration",
-        help="Move a leased task to an integration wait state.",
+        help="Mark finished leased work awaiting PR, merge, or integration.",
+        description=(
+            "Move finished leased work to an integration wait state and clear the "
+            "lease. Use this instead of release when work is complete but a PR, "
+            "merge, deployment, or other integration step is still pending."
+        ),
     )
     add_common(await_integration)
     await_integration.add_argument("task_id")
@@ -1056,12 +1440,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve_integration.set_defaults(func=command_resolve_integration)
 
-    fail = sub.add_parser("fail", help="Fail a task.")
+    fail = sub.add_parser(
+        "fail",
+        help="Terminally fail a leased task with an actionable reason.",
+        description=(
+            "Terminally fail a leased task with an actionable reason. Do not use "
+            "this to pause work, switch scope, return work to pending, or wait for "
+            "review/integration."
+        ),
+    )
     add_common(fail)
     fail.add_argument("task_id")
     fail.add_argument("--lease-token", required=True)
     fail.add_argument("--agent", default="")
-    fail.add_argument("--reason", required=True)
+    fail.add_argument(
+        "--reason",
+        required=True,
+        help="Actionable terminal failure reason.",
+    )
     fail.set_defaults(func=command_fail)
 
     event = sub.add_parser("ingest-event", help="Ingest one event JSON file.")
@@ -1123,11 +1519,84 @@ def build_parser() -> argparse.ArgumentParser:
     launch_worker.add_argument("--json", action="store_true")
     launch_worker.set_defaults(func=command_launch_worker)
 
+    record_intervention = sub.add_parser(
+        "record-intervention",
+        help="Record durable human intervention state without notifying anyone.",
+    )
+    add_common(record_intervention)
+    record_intervention.add_argument("--id", default="")
+    record_intervention.add_argument("--task-id", default="")
+    record_intervention.add_argument(
+        "--reason",
+        required=True,
+        choices=sorted(INTERVENTION_REASONS),
+    )
+    record_intervention.add_argument("--metadata-json", default="{}")
+    record_intervention.add_argument("--actor", default="system")
+    record_intervention.add_argument("summary")
+    record_intervention.set_defaults(func=command_record_intervention)
+
+    list_interventions = sub.add_parser(
+        "list-interventions",
+        help="List durable human intervention state.",
+    )
+    add_common(list_interventions)
+    list_interventions.add_argument("--json", action="store_true")
+    list_interventions.add_argument("--limit", type=int, default=0)
+    list_interventions.add_argument("--status", choices=sorted(INTERVENTION_STATES), default="")
+    list_interventions.add_argument("--reason", choices=sorted(INTERVENTION_REASONS), default="")
+    list_interventions.add_argument("--task-id", default="")
+    list_interventions.set_defaults(func=command_list_interventions)
+
+    resolve_intervention = sub.add_parser(
+        "resolve-intervention",
+        help="Resolve an intervention with evidence or a reason.",
+    )
+    add_common(resolve_intervention)
+    resolve_intervention.add_argument("intervention_id")
+    resolve_intervention.add_argument("--reason", default="")
+    resolve_intervention.add_argument("--evidence", action="append", default=[])
+    resolve_intervention.add_argument("--actor", default="system")
+    resolve_intervention.set_defaults(func=command_resolve_intervention)
+
+    check_pr_notification_setup = sub.add_parser(
+        "check-pr-notification-setup",
+        help="Diagnose whether open interventions can be notified through a PR.",
+    )
+    add_common(check_pr_notification_setup)
+    check_pr_notification_setup.add_argument("--workspace", default="")
+    check_pr_notification_setup.add_argument("--repo-path", default="")
+    check_pr_notification_setup.add_argument("--remote", default="origin")
+    check_pr_notification_setup.add_argument("--timeout-seconds", type=int, default=5)
+    check_pr_notification_setup.add_argument("--json", action="store_true")
+    check_pr_notification_setup.set_defaults(func=command_check_pr_notification_setup)
+
+    export_pr_notifications = sub.add_parser(
+        "export-pr-notifications",
+        help="Export open interventions as PR notifications or prepared payloads.",
+    )
+    add_common(export_pr_notifications)
+    export_pr_notifications.add_argument("--workspace", default="")
+    export_pr_notifications.add_argument("--repo-path", default="")
+    export_pr_notifications.add_argument("--remote", default="origin")
+    export_pr_notifications.add_argument("--timeout-seconds", type=int, default=5)
+    export_pr_notifications.add_argument("--prepared-payload-path", default="")
+    export_pr_notifications.add_argument("--dry-run", action="store_true")
+    export_pr_notifications.add_argument("--actor", default="system")
+    export_pr_notifications.add_argument("--json", action="store_true")
+    export_pr_notifications.set_defaults(func=command_export_pr_notifications)
+
     record_intake = sub.add_parser(
         "record-intake",
         help="Record raw project intake without creating a task.",
     )
     add_record_intake_arguments(record_intake)
+
+    capture_intake = sub.add_parser(
+        "capture-intake",
+        help="Guided raw intake capture with explicit kind, source, and repo.",
+    )
+    add_capture_intake_arguments(capture_intake)
 
     list_intake = sub.add_parser("list-intake", help="List raw project intake.")
     add_list_intake_arguments(list_intake)
@@ -1145,6 +1614,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record raw project intake without creating a task.",
     )
     add_record_intake_arguments(intake_record)
+    intake_capture = intake_sub.add_parser(
+        "capture",
+        help="Guided raw intake capture with explicit kind, source, and repo.",
+    )
+    add_capture_intake_arguments(intake_capture)
     intake_list = intake_sub.add_parser("list", help="List raw project intake.")
     add_list_intake_arguments(intake_list)
     intake_update = intake_sub.add_parser(

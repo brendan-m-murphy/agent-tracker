@@ -25,6 +25,17 @@ class ClaimPayload(TypedDict):
     agent_id: str
 
 
+class ReleasePayload(TypedDict):
+    """JSON-friendly release response."""
+
+    project_id: str
+    task_id: str
+    from_status: str
+    status: str
+    agent_id: str
+    reason: str
+
+
 class PathSummaryPayload(TypedDict, total=False):
     """Optional resolved path fields included when configured."""
 
@@ -395,6 +406,43 @@ class AgentTrackerTools:
             direct_merge=direct_merge,
         )
         return {"ok": True}
+
+    def release_task(
+        self,
+        task_id: str,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> ReleasePayload:
+        """Release an active leased task back to the queue."""
+        return self.release(
+            task_id=task_id,
+            lease_token=lease_token,
+            reason=reason,
+            agent_id=agent_id,
+            status=status,
+        )
+
+    def release(
+        self,
+        task_id: str,
+        lease_token: str,
+        reason: str,
+        agent_id: str = "",
+        status: str = "pending",
+    ) -> ReleasePayload:
+        """Release an active leased task back to pending queue state."""
+        return cast(
+            ReleasePayload,
+            self.coordinator.release(
+                task_id,
+                lease_token=lease_token,
+                reason=reason,
+                agent_id=agent_id,
+                status=status,
+            ),
+        )
 
     def pull_spool(self, dry_run: bool = False) -> PullSpoolPayload:
         """Pull complete remote spool files into the local spool inbox."""

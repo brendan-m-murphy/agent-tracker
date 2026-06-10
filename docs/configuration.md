@@ -102,7 +102,13 @@ when replacing a built-in default with project-specific behavior.
   "prompt_renderer": "agent_tracker.rendering:DefaultPromptRenderer",
   "event_adapter": "plugins.events:DemoEventAdapter",
   "exporter": "agent_tracker.exporters:JsonSnapshotExporter",
+  "pr_notification_setup_checker": "plugins.notifications:DemoSetupChecker",
   "export_path": "exports/snapshot.json",
+  "notifications": {
+    "github": {
+      "allow_live": false
+    }
+  },
   "spool": {
     "inbox": "spool/inbox",
     "done": "spool/done",
@@ -141,7 +147,9 @@ when replacing a built-in default with project-specific behavior.
 | `prompt_renderer` | No | `agent_tracker.rendering:DefaultPromptRenderer` | Plugin that renders task context for agents. |
 | `event_adapter` | No | Built-in generic event normalization | Plugin that converts incoming event JSON into an `EventRecord`. |
 | `exporter` | No | `agent_tracker.exporters:JsonSnapshotExporter` | Plugin that writes audit snapshots. |
+| `pr_notification_setup_checker` | No | Built-in local Git and `gh` diagnostics | Plugin that checks whether PR notification delivery is safe. |
 | `export_path` | No | `agent-tracker-snapshot.json` | Output path used by the default JSON exporter. Relative paths resolve below `state_root`. |
+| `notifications` | No | None | Optional notification settings. `notifications.github.allow_live` must be `true` before setup diagnostics report live PR comments as supported. `notifications.github.prepared_payload_path` can override the prepared PR payload output path. |
 | `spool` | No | None | Spool paths for `pull-spool` and `ingest-spool`. Relative paths resolve below `state_root`. |
 | `spool_inbox` | No | None | Legacy top-level inbox path used when `spool` is absent. Relative paths resolve below `state_root`. |
 | `spool_done` | No | `<inbox>/done` | Legacy top-level done path used when `spool` is absent. |
