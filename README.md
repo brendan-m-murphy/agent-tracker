@@ -392,7 +392,9 @@ The package vendors reusable Codex skills:
   or promote tasks without taking a worker lease.
 - `agent-coordinator`: run an agent-tracker project end to end, including queue
   health checks, lease checks, task planning, worker/review coordination, and
-  closeout evidence.
+  closeout evidence. When the user asks for agent coordination or subagents, it
+  normally delegates bounded implementation, review, test, or evidence work
+  while keeping queue state, leases, integration decisions, and final evidence.
 - `task-worker`: implement exactly one claimed task with scoped edits, focused
   checks, and handoff or closeout evidence.
 

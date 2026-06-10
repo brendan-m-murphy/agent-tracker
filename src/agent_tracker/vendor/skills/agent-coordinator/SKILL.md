@@ -6,7 +6,10 @@ description: Coordinate an agent-tracker-backed project end to end. Use when Cod
 # Agent Coordinator
 
 Use this skill to run an `agent-tracker` project as the coordinator, not as a
-single task worker. Keep SQLite as live queue state, use task-plan or intake
+single task worker. When the user asks for agent coordination or subagents,
+normally delegate bounded implementation, review, test, or evidence-gathering
+work to subagents by default. Keep SQLite queue state, leases, integration
+decisions, and final evidence with the coordinator. Use task-plan or intake
 files only as source definitions, and make friction visible instead of turning
 it into hidden manual work. Use `task-worker` for one claimed implementation
 task and `project-manager` for intake, status, and planning triage.
@@ -38,7 +41,10 @@ If no config is discoverable, ask for the config path.
    call it friction, import it, and record that fact as evidence.
 4. Claim one task with a stable agent ID. Keep the lease token in your working
    notes until completion or failure.
-5. Render the task prompt, then implement or coordinate bounded workers.
+5. Render the task prompt, then coordinate bounded workers by default when the
+   user requested agent coordination. Local work is fine for tiny coordination
+   mutations or when subagents are unavailable, but do not silently replace
+   requested agent coordination with solo implementation.
 6. Use review/integration states when code, docs, config, tests, or task plans
    changed and final evidence is not available yet.
 7. Complete only after evidence satisfies the task's completion policy.
@@ -81,7 +87,9 @@ untracked side notes, and state that this is remaining product friction.
 
 ## Delegating Work
 
-Use subagents only when the current session and user request allow it. Give each
+When the user asks for agent coordination, subagents, or project-wide execution,
+delegate bounded implementation, review, test, or evidence work unless the task
+is only a tiny coordination mutation or subagents are unavailable. Give each
 agent one bounded job and an explicit write scope. Prefer `task-worker` for a
 claimed implementation task. Tell workers they are not alone in the codebase and
 must not revert unrelated changes.
@@ -93,8 +101,9 @@ Useful patterns:
 - read-only reviewer after the concrete diff exists;
 - focused test agent when behavior changed and risk is high.
 
-Integrate results yourself. Do not let worker reports substitute for reviewing
-the actual diff and live queue state.
+Integrate results yourself. Keep queue mutations, lease ownership, integration
+decisions, and final tracker evidence with the coordinator. Do not let worker
+reports substitute for reviewing the actual diff and live queue state.
 
 ## Closeout Policy
 

@@ -770,7 +770,9 @@ Use distinct roles around the same tracker state:
 
 - `agent-coordinator` owns project-wide orchestration: queue health, leases,
   task planning, worker supervision, review or integration evidence, and final
-  tracker closeout.
+  tracker closeout. When the user asks for agent coordination or subagents, it
+  normally delegates bounded implementation, review, test, or evidence work
+  while keeping queue state, leases, integration decisions, and final evidence.
 - `project-manager` owns planning and triage: intake, status reports, queue
   tidying, proposed tasks, promotions, and notebooks. It does not take a worker
   lease for one-task implementation.
@@ -801,6 +803,12 @@ Do not use this as `task-worker` guidance. A task worker should receive a
 specific task ID or rendered prompt and may only claim that exact task when
 project policy allows it. A project manager should report status, triage intake,
 and propose or promote tasks without taking an implementation lease.
+
+If the user requested agent coordination or subagents, the coordinator should
+normally dispatch bounded implementation, review, test, or evidence work to
+subagents after claiming/rendering the task. Tiny coordination mutations and
+sessions where subagents are unavailable can stay local, but local work should
+be explicit rather than silently replacing requested agent coordination.
 
 Then, while a claimed task is active:
 
