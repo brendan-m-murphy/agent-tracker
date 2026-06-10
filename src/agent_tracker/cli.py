@@ -87,6 +87,16 @@ def print_overview(payload: dict[str, Any]) -> None:
     human_renderer().overview(payload)
 
 
+def print_plain_overview(payload: dict[str, Any]) -> None:
+    """Print a line-oriented grouped project overview."""
+    human_renderer().overview_plain(payload)
+
+
+def print_wide_overview(payload: dict[str, Any]) -> None:
+    """Print a grouped project overview with targeted wide-terminal context."""
+    human_renderer().overview_wide(payload)
+
+
 def print_overview_item(group: str, item: dict[str, Any]) -> None:
     """Print one overview item."""
     human_renderer().overview_item(group, item)
@@ -296,6 +306,12 @@ def command_overview(args: argparse.Namespace) -> int:
     )
     if args.json:
         print_json(payload)
+        return 0
+    if args.plain:
+        print_plain_overview(payload)
+        return 0
+    if args.wide:
+        print_wide_overview(payload)
         return 0
     print_overview(payload)
     return 0
@@ -1273,7 +1289,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     overview = sub.add_parser("overview", help="Show grouped project overview.")
     add_common(overview)
-    overview.add_argument("--json", action="store_true")
+    overview_mode = overview.add_mutually_exclusive_group()
+    overview_mode.add_argument("--json", action="store_true")
+    overview_mode.add_argument(
+        "--plain",
+        action="store_true",
+        help="Print grep-friendly line-oriented text.",
+    )
+    overview_mode.add_argument(
+        "--wide",
+        action="store_true",
+        help="Print a width-aware human summary with targeted context.",
+    )
     overview.add_argument("--recover-stale-leases", action="store_true")
     overview.add_argument(
         "--limit",

@@ -307,9 +307,28 @@ intentionally omits full `next_action` prose, evidence paths, and completion
 evidence from the default view. Use `agent-tracker show <task-id>` for a full
 human drilldown, `agent-tracker show <task-id> --json` for the same computed
 detail payload as structured data, `agent-tracker task <task-id>` for the
-worker prompt, or `overview --json` for grouped structured values. Each group
-reports a count and defaults to five visible items for readability; pass
-`--limit 0` to show every grouped task.
+worker prompt, `overview --wide` for concise terminal-width context, or
+`overview --json` for grouped structured values. Each group reports a count and
+defaults to five visible items for readability; pass `--limit 0` to show every
+grouped task.
+
+Use explicit overview output modes when the compact default is not the right
+shape:
+
+```bash
+agent-tracker overview --config project.json --plain
+agent-tracker overview --config project.json --wide
+agent-tracker overview --config project.json --json
+```
+
+`--plain` prints deterministic line-oriented key/value fragments without Rich
+layout, styling, wrapping, or box drawing. It is intended for grep, awk, shell
+history, and copy/paste into logs. `--wide` keeps the human grouped layout but
+uses the detected terminal width and adds only targeted context: ready and
+attention rows can show `next`, blocked rows show `blocker`, and recent rows can
+show completion evidence, time, and action. It wraps cleanly at narrow widths
+and does not force an 80-column console. `--json` remains the stable automation
+mode and is mutually exclusive with the human output modes.
 
 Show a full human detail view for one task:
 

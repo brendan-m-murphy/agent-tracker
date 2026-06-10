@@ -208,10 +208,12 @@ characters by default. Human `overview` is a quick triage view: it shows count
 summaries, an attention list for active/review/merge work, blocked tasks with
 their current blockers, ready task titles, and a short recent-completion tail.
 It intentionally omits full `next_action` prose and evidence paths; use
-`agent-tracker show <task-id>` for a human detail drilldown, or
-`agent-tracker show <task-id> --json` when you need the same drilldown payload
-as structured data. For automation, add `--json` to `next`, `status`,
-`overview`, or intake list commands; JSON output is not wrapped or reformatted.
+`agent-tracker overview --wide` when a wider terminal should show concise
+next-action, blocker, evidence, and completion context, or
+`agent-tracker show <task-id>` for a full human detail drilldown. Use
+`agent-tracker overview --plain` for grep-friendly line-oriented text. For
+automation, add `--json` to `next`, `status`, `overview`, or intake list
+commands; JSON output is not wrapped or reformatted.
 
 The claim command prints JSON containing the `task_id` and `lease_token`. Keep
 the token; `heartbeat`, `complete`, and `fail` require it.
@@ -317,7 +319,7 @@ agent-tracker status --json
 | `init` | Create or update the project row and database schema. | `agent-tracker init --config demo-tracker/project.json` |
 | `import` | Import tasks and dependencies from the configured importer. | `agent-tracker import --config demo-tracker/project.json` |
 | `status` | Show project counts; add `--json` for full task state. | `agent-tracker status --config demo-tracker/project.json --json` |
-| `overview` | Show grouped ready, active, review, integration, blocked, and recent completion work; add `--json` for grouped task dictionaries. | `agent-tracker overview --config demo-tracker/project.json --limit 5` |
+| `overview` | Show grouped ready, active, review, integration, blocked, and recent completion work; add `--plain`, `--wide`, or `--json` for explicit output modes. | `agent-tracker overview --config demo-tracker/project.json --limit 5` |
 | `next` | List ready tasks, optionally filtered by repo or role. | `agent-tracker next --config demo-tracker/project.json --role maintainer --limit 1` |
 | `task` | Show one task's prompt/context; add `--json` for stored state. | `agent-tracker task --config demo-tracker/project.json write-readme --markdown` |
 | `show` | Show full human or JSON detail for one task from a compact overview row. | `agent-tracker show --config demo-tracker/project.json write-readme` |

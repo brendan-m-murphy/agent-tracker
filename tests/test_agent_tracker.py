@@ -58,6 +58,13 @@ def render_overview_payload(payload: dict[str, Any], *, width: int) -> str:
     return stdout.getvalue()
 
 
+def render_wide_overview_payload(payload: dict[str, Any], *, width: int) -> str:
+    """Render a wide overview payload at a deterministic terminal width."""
+    stdout = StringIO()
+    HumanOutputRenderer(output=stdout, width=width).overview_wide(payload)
+    return stdout.getvalue()
+
+
 def write_project(root: Path) -> Path:
     """Write a toy non-project-specific config and task plan."""
     (root / "tasks.json").write_text(
@@ -855,6 +862,124 @@ def test_cli_overview_json_groups_tasks_and_counts_limited_items(tmp_path: Path)
     assert payload["counts"]["recently_completed"] == 2
     assert [task["id"] for task in payload["groups"]["recently_completed"]] == ["done-b"]
     assert payload["groups"]["blocked"][0]["blockers"] == ["Depends on ready (ready: claimed)"]
+    assert payload["groups"]["ready"][0]["next_action"] == "Pick up the remaining ready task."
+    assert payload["groups"]["recently_completed"][0]["latest_evidence"] == "git:done-b"
+
+
+def test_cli_overview_plain_outputs_line_oriented_key_values(tmp_path: Path) -> None:
+    """Plain overview emits deterministic grep-friendly rows."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    stdout = StringIO()
+
+    with redirect_stdout(stdout):
+        code = cli.main(["overview", "--config", str(config_path), "--plain", "--limit", "10"])
+    output = stdout.getvalue()
+    lines = output.splitlines()
+
+    assert code == 0
+    assert lines[0] == "Toy Project (toy)"
+    assert lines[1] == "counts open=5 ready=1 active=1 review=1 integration=1 blocked=1 recent=2"
+    assert "ready count=1" in lines
+    assert (
+        "status=ready id=other-ready title='Other Ready' next='Pick up the remaining ready task.'"
+        in lines
+    )
+    assert "status=review id=review-task title='Review Task' evidence=pr:review-task" in lines
+    assert any(
+        line.startswith("status=blocked id=blocked title=Blocked blocker=")
+        and "'Depends on ready (ready: claimed)'" in line
+        for line in lines
+    )
+    assert any(
+        line.startswith("status=recent id=done-b title='Done B' evidence=git:done-b ")
+        and "completion=task.complete" in line
+        for line in lines
+    )
+    assert "ATTENTION" not in output
+    assert "blocker:" not in output
+    assert_no_box_drawing(output)
+
+
+def test_cli_overview_mode_flags_conflict_cleanly(tmp_path: Path) -> None:
+    """Overview mode flags are mutually exclusive."""
+    config_path, _ = prepare_overview_state(tmp_path)
+    stdout = StringIO()
+    stderr = StringIO()
+
+    with redirect_stdout(stdout), redirect_stderr(stderr), pytest.raises(SystemExit) as exc:
+        cli.main(["overview", "--config", str(config_path), "--json", "--plain"])
+
+    assert exc.value.code == 2
+    assert stdout.getvalue() == ""
+    assert "not allowed with argument --json" in stderr.getvalue()
+
+
+def test_overview_wide_includes_targeted_context_and_respects_width(tmp_path: Path) -> None:
+    """Wide overview exposes concise context without becoming a detail report."""
+    _, coord = prepare_overview_state(tmp_path)
+    output = render_wide_overview_payload(coord.overview_payload(limit=10), width=160)
+    lines = output.splitlines()
+
+    assert "ATTENTION" in output
+    assert "READY (1)" in output
+    assert "RECENT (2)" in output
+    assert "Other Ready | next: Pick up the remaining ready task." in output
+    assert "Review Task | evidence: pr:review-task" in output
+    assert "Integration Task | evidence: git:integration-task" in output
+    assert "Blocked | blocker: Depends on ready (ready: claimed)" in output
+    assert "Done B | evidence: git:done-b" in output
+    assert "completed:" in output
+    assert "action: task.complete" in output
+    assert "SUMMARY" not in output
+    assert "EVIDENCE" not in output
+    assert all(len(line) <= 160 for line in lines)
+    assert_no_box_drawing(output)
+
+
+def test_overview_wide_degrades_at_narrow_width(tmp_path: Path) -> None:
+    """Wide overview wraps instead of forcing an 80-column console."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["next_action"] = (
+                "Pick up the remaining ready task with enough context for a wide "
+                "terminal but still wrap cleanly when narrow."
+            )
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    output = render_wide_overview_payload(coord.overview_payload(limit=0), width=60)
+
+    assert "next: Pick up the" in output
+    assert "remaining ready task with enough" in output
+    assert "wrap cleanly when narrow." in output
+    assert all(len(line) <= 60 for line in output.splitlines())
+    assert_no_box_drawing(output)
+
+
+def test_overview_wide_keeps_rows_readable_at_very_narrow_width(tmp_path: Path) -> None:
+    """Very narrow wide-mode output does not let the prefix consume the row."""
+    config_path = write_project(tmp_path)
+    task_path = tmp_path / "tasks.json"
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    for raw_task in payload["tasks"]:
+        if raw_task["id"] == "ready":
+            raw_task["title"] = "Readable row"
+            raw_task["next_action"] = "Keep useful words together at narrow width."
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    output = render_wide_overview_payload(coord.overview_payload(limit=0), width=30)
+
+    assert "READY ready Readable row |" in output
+    assert "next: Keep useful" in output
+    assert "words together at" in output
+    assert "narrow width." in output
+    assert not any(line.strip() in {"R", "e", "a", "d", "y"} for line in output.splitlines())
+    assert all(len(line) <= 30 for line in output.splitlines())
+    assert_no_box_drawing(output)
 
 
 def test_cli_overview_human_output_includes_blockers_evidence_and_completion(
