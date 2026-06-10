@@ -3353,6 +3353,223 @@ def test_mcp_handlers_submit_review_and_await_integration(tmp_path: Path) -> Non
     }
 
 
+def test_mcp_typed_wrappers_expose_scoped_operations_and_aliases(
+    tmp_path: Path,
+) -> None:
+    """Typed MCP wrappers expose stable payloads and preserve older names."""
+    config_path = write_overview_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+
+    status = tools.status()
+    alias_status = tools.get_project_status()
+    overview = tools.overview(limit=1)
+    worker_prompt = tools.launch_worker_prompt("ready", agent_id="agent-1")
+    launch_worker = tools.launch_worker("ready", agent_id="agent-1")
+
+    claim_keys = {"project_id", "task_id", "lease_token", "lease_expires_at", "agent_id"}
+    claim = tools.claim(agent_id="agent-1", task_id="ready")
+    alias_claim = tools.claim_task(agent_id="agent-2", task_id="other-ready")
+    heartbeat = tools.heartbeat(
+        task_id="ready",
+        lease_token=claim["lease_token"],
+        agent_id="agent-1",
+    )
+    alias_heartbeat = tools.heartbeat_task(
+        task_id="other-ready",
+        lease_token=alias_claim["lease_token"],
+        agent_id="agent-2",
+    )
+
+    assert {"project_id", "name", "db_path", "tasks", "ready", "active", "blocked"} <= set(status)
+    assert alias_status["project_id"] == status["project_id"] == "toy"
+    assert list(overview["groups"]) == [
+        "ready",
+        "active",
+        "review",
+        "integration",
+        "blocked",
+        "recently_completed",
+    ]
+    assert overview["limit"] == 1
+    assert set(worker_prompt) == {
+        "project_id",
+        "task_id",
+        "agent_id",
+        "launch_mode",
+        "launched",
+        "prompt",
+        "task",
+    }
+    assert worker_prompt["project_id"] == "toy"
+    assert worker_prompt["task_id"] == "ready"
+    assert worker_prompt["agent_id"] == "agent-1"
+    assert worker_prompt["launch_mode"] == "prompt_only"
+    assert worker_prompt["launched"] is False
+    assert launch_worker["launch_mode"] == "prompt_only"
+    assert launch_worker["launched"] is False
+    assert worker_prompt["task"]["id"] == "ready"
+    assert "# Ready" in worker_prompt["prompt"]
+    assert set(claim) == claim_keys
+    assert set(alias_claim) == claim_keys
+    assert set(heartbeat) == claim_keys
+    assert set(alias_heartbeat) == claim_keys
+    assert heartbeat["task_id"] == "ready"
+    assert alias_heartbeat["task_id"] == "other-ready"
+    assert tools.complete(
+        task_id="ready",
+        lease_token=heartbeat["lease_token"],
+        evidence=["evidence://typed-ready"],
+        agent_id="agent-1",
+    ) == {"ok": True}
+    assert tools.complete_task(
+        task_id="other-ready",
+        lease_token=alias_heartbeat["lease_token"],
+        evidence=["evidence://alias-ready"],
+        agent_id="agent-2",
+    ) == {"ok": True}
+
+
+def test_mcp_typed_wrappers_preserve_lease_enforcement(tmp_path: Path) -> None:
+    """Typed mutating wrappers still enforce lease token and owner checks."""
+    config_path = write_project(tmp_path)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+    claim = tools.claim(agent_id="agent-1", task_id="ready")
+
+    with pytest.raises(ValueError, match="different agent"):
+        tools.heartbeat(
+            task_id="ready",
+            lease_token=claim["lease_token"],
+            agent_id="agent-2",
+        )
+    with pytest.raises(ValueError, match="lease token is invalid"):
+        tools.complete(
+            task_id="ready",
+            lease_token="wrong-token",
+            evidence=["evidence://ready"],
+            agent_id="agent-1",
+        )
+
+    assert coord.get_task("ready").state == "claimed"
+
+
+def test_mcp_typed_status_and_overview_keep_stale_lease_recovery_explicit(
+    tmp_path: Path,
+) -> None:
+    """Typed read wrappers inspect stale leases without mutating unless asked."""
+    config_path = write_project(tmp_path)
+    config = load_config(config_path)
+    coord = Coordinator(config)
+    coord.import_tasks()
+    claim = coord.claim(agent_id="agent-1", task_id="ready")
+    with coord.store.transaction(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET lease_expires_at = ?
+            WHERE project_id = ? AND task_id = ?
+            """,
+            ("2000-01-01T00:00:00+00:00", config.project_id, "ready"),
+        )
+    tools = AgentTrackerTools(config_path)
+
+    status = tools.status()
+    overview = tools.overview()
+    with coord.store.transaction() as conn:
+        inspected = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+
+    assert "ready" in status["ready"]
+    assert overview["groups"]["ready"][0]["id"] == "ready"
+    assert inspected["status"] == "claimed"
+    assert inspected["lease_token"] == claim.lease_token
+
+    recovered_status = tools.status(recover_stale_leases=True)
+    with coord.store.transaction() as conn:
+        recovered = conn.execute(
+            "SELECT status, lease_token FROM tasks WHERE project_id = ? AND task_id = ?",
+            (config.project_id, "ready"),
+        ).fetchone()
+    assert "ready" in recovered_status["ready"]
+    assert recovered["status"] == "pending"
+    assert recovered["lease_token"] == ""
+
+
+def test_mcp_typed_mutations_preserve_canonical_config_refusal(tmp_path: Path) -> None:
+    """Typed mutating wrappers cannot bypass canonical config authority."""
+    canonical_root = tmp_path / "canonical"
+    canonical_root.mkdir()
+    config_path = write_project(canonical_root)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["canonical_config_path"] = str(config_path)
+    data["state_root"] = str(canonical_root)
+    data["task_source_root"] = str(canonical_root)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    Coordinator(load_config(config_path)).import_tasks()
+    copied_root = tmp_path / "copied"
+    copied_root.mkdir()
+    copied_config = copied_root / "project.json"
+    copied_config.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    tools = AgentTrackerTools(copied_config)
+
+    assert tools.status()["project_id"] == "toy"
+    with pytest.raises(ValueError, match="canonical config"):
+        tools.claim(agent_id="agent-1", role="worker")
+    assert not (copied_root / "state.sqlite").exists()
+
+
+def test_mcp_typed_spool_wrappers_expose_payload_shapes(tmp_path: Path) -> None:
+    """Typed MCP wrappers expose pull-spool and ingest-spool payloads."""
+    config_path = write_project(tmp_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["spool"]["remote_inbox"] = "remote-spool"
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    remote = tmp_path / "remote-spool"
+    local = tmp_path / "spool" / "inbox"
+    remote.mkdir()
+    (remote / "event.json").write_text(
+        json.dumps({"event_id": "evt-typed", "kind": "sample"}),
+        encoding="utf-8",
+    )
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+    tools = AgentTrackerTools(config_path)
+
+    dry_run = tools.pull_spool(dry_run=True)
+    pulled = tools.pull_spool()
+    ingested = tools.ingest_spool(actor="mcp")
+
+    assert set(dry_run) == {
+        "dry_run",
+        "remote_inbox",
+        "local_inbox",
+        "processed",
+        "copied",
+        "skipped",
+        "conflicts",
+        "files",
+    }
+    assert dry_run["dry_run"] is True
+    assert dry_run["processed"] == 1
+    assert dry_run["copied"] == 0
+    assert dry_run["files"] == [
+        {
+            "source": str(remote / "event.json"),
+            "target": str(local / "event.json"),
+            "action": "copy",
+        }
+    ]
+    assert pulled["dry_run"] is False
+    assert pulled["processed"] == 1
+    assert pulled["copied"] == 1
+    assert ingested == {"processed": 1, "inserted": 1, "errors": 0}
+
+
 def test_mcp_ready_task_limit_rejects_negative_values(tmp_path: Path) -> None:
     """MCP handlers expose service validation for invalid limits."""
     config_path = write_project(tmp_path)

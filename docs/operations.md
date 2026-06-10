@@ -215,6 +215,57 @@ Like `status`, `overview` is read-only by default. It reports the effective
 state without mutating stale leases. Pass `--recover-stale-leases` only when
 inspection should also write stale-lease recovery to SQLite.
 
+## Typed Tool Surface
+
+`agent_tracker.mcp_tools.AgentTrackerTools` exposes a scoped, typed Python tool
+surface for Codex, app, MCP, or local wrapper hosts that should not shell out to
+the broad CLI for routine coordination operations.
+
+Create one tool object per project config:
+
+```python
+from agent_tracker.mcp_tools import AgentTrackerTools
+
+tools = AgentTrackerTools("tracking/project.json")
+```
+
+The routine wrappers mirror the coordinator operations and return JSON-friendly
+payloads:
+
+- `status(recover_stale_leases=False)`: full status payload with task state
+  lists, resolved paths, and queue groups.
+- `overview(limit=5, recover_stale_leases=False)`: grouped ready, active,
+  review, integration, blocked, and recently completed task dictionaries.
+- `claim(agent_id, task_id="", repo="", role="", lease_seconds=3600)`: claim
+  payload containing `project_id`, `task_id`, `lease_token`,
+  `lease_expires_at`, and `agent_id`.
+- `heartbeat(task_id, lease_token, lease_seconds=3600, agent_id="")`: the same
+  claim-shaped lease payload after extending the lease.
+- `complete(task_id, lease_token, evidence=None, agent_id="",
+  direct_merge=False)`: `{"ok": true}` after successful completion.
+- `pull_spool(dry_run=False)`: pull-spool counts and per-file actions.
+- `ingest_spool(actor="system")`: processed, inserted, and error counts.
+- `launch_worker_prompt(task_id, agent_id="", markdown=True)`: prompt-only
+  worker handoff data with `launch_mode` set to `prompt_only`, `launched` set to
+  `false`, the rendered prompt, and the current task context.
+
+`launch_worker(...)` is an equivalent prompt-only alias for hosts that name the
+tool after the launch-worker operation. Neither launch helper starts Codex, an
+app server, or any external worker. Hosts that own execution can use the
+returned prompt and task context as their launch input, then report progress
+back through normal tracker state, evidence, and event APIs.
+
+Existing method names remain supported as compatibility aliases:
+`get_project_status()`, `claim_task(...)`, `heartbeat_task(...)`,
+`complete_task(...)`, `list_ready_tasks(...)`, `get_task_context(...)`, and
+`render_prompt(...)`.
+
+These wrappers are adapters over `Coordinator`, not a second queue authority.
+Canonical config and database override checks still run for mutating calls, and
+lease tokens and optional `agent_id` ownership checks still apply to heartbeat,
+completion, review, integration, and failure operations. `status` and
+`overview` remain read-only unless their `recover_stale_leases` flag is set.
+
 ## List Ready Tasks
 
 Show the next ready tasks:
