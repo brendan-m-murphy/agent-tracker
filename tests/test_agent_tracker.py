@@ -1873,6 +1873,27 @@ def test_launch_worker_dry_run_does_not_create_artifacts(tmp_path: Path) -> None
     assert not Path(result["artifacts"]["directory"]).exists()
 
 
+def test_launch_worker_default_command_targets_assigned_worktree(
+    tmp_path: Path,
+) -> None:
+    """The default executed worker command uses the assigned task worktree."""
+    workspace = tmp_path / "hpc-ci-project-tracker"
+    assigned_worktree = tmp_path / "task-worktrees" / "ready"
+    config_path = write_project_with_workspace(tmp_path / "tracker", workspace)
+    coord = Coordinator(load_config(config_path))
+    coord.import_tasks()
+
+    result = coord.launch_worker(
+        "hpc",
+        task_id="ready",
+        execute=True,
+        dry_run=True,
+        worktree_path=str(assigned_worktree),
+    )
+
+    assert result["command"][0:4] == ["codex", "exec", "--cd", str(assigned_worktree)]
+
+
 def test_launch_worker_rejects_canonical_config_workspace_for_task(
     tmp_path: Path,
 ) -> None:

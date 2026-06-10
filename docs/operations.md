@@ -279,15 +279,19 @@ payloads:
   whose stored evidence no longer satisfies current completion policy.
 - `pull_spool(dry_run=False)`: pull-spool counts and per-file actions.
 - `ingest_spool(actor="system")`: processed, inserted, and error counts.
-- `launch_worker_prompt(task_id, agent_id="", markdown=True)`: prompt-only
-  worker handoff data with `launch_mode` set to `prompt_only`, `launched` set to
-  `false`, the rendered prompt, and the current task context.
+- `launch_worker_prompt(task_id, agent_id="", markdown=True, branch="",
+  base_ref="", worktree_path="")`: prompt-only worker handoff data with
+  `launch_mode` set to `prompt_only`, `launched` set to `false`, the rendered
+  prompt, the current task context, `coordination_policy`, and `coordination`
+  assignment details. Pass `branch`, `base_ref`, and `worktree_path` when the
+  host has already assigned the worker's task branch or non-canonical worktree.
 
 `launch_worker(...)` is an equivalent prompt-only alias for hosts that name the
 tool after the launch-worker operation. Neither launch helper starts Codex, an
 app server, or any external worker. Hosts that own execution can use the
-returned prompt and task context as their launch input, then report progress
-back through normal tracker state, evidence, and event APIs.
+returned prompt, task context, and coordination assignment as their launch input,
+then report progress back through normal tracker state, evidence, and event
+APIs.
 
 Existing method names remain supported as compatibility aliases:
 `get_project_status()`, `claim_task(...)`, `heartbeat_task(...)`,
