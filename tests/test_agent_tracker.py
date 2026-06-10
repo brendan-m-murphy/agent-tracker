@@ -20,6 +20,9 @@ from agent_tracker import cli  # noqa: E402
 from agent_tracker import service as service_module  # noqa: E402
 from agent_tracker import skill_bootstrap as skill_bootstrap_module  # noqa: E402
 from agent_tracker.config import (  # noqa: E402
+    COORDINATION_PR_MODES,
+    COORDINATION_WORKTREE_MODES,
+    DEFAULT_COORDINATION_POLICY,
     PROJECT_CONFIG_ENV_VAR,
     PROJECT_DB_ENV_VAR,
     SUPPORTED_CONFIG_SCHEMA_VERSION,
@@ -321,6 +324,33 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
     assert config.raw["config_schema_version"] == SUPPORTED_CONFIG_SCHEMA_VERSION
 
 
+def test_coordination_policy_defaults_to_conservative_modes(tmp_path: Path) -> None:
+    """Projects default to isolated task worktrees and one PR per task."""
+    config = load_config(write_project(tmp_path))
+
+    assert config.coordination_policy == DEFAULT_COORDINATION_POLICY
+
+
+def test_coordination_policy_accepts_configured_modes(tmp_path: Path) -> None:
+    """Projects can loosen task worktree and PR mapping policy explicitly."""
+    config_path = write_project(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["coordination_policy"] = {
+        "worktree_mode": "shared_worktree_serial",
+        "pr_mode": "batch_pr_allowed",
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.coordination_policy == {
+        "worktree_mode": "shared_worktree_serial",
+        "pr_mode": "batch_pr_allowed",
+    }
+    assert config.coordination_policy["worktree_mode"] in COORDINATION_WORKTREE_MODES
+    assert config.coordination_policy["pr_mode"] in COORDINATION_PR_MODES
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -386,6 +416,21 @@ def test_config_schema_version_defaults_to_current_version(tmp_path: Path) -> No
                 "workspaces": {"hpc": {"path": ".", "capabilities": [1]}},
             },
             "config field 'workspaces.hpc.capabilities' must be a string or list of strings",
+        ),
+        (
+            {"project_id": "toy", "coordination_policy": []},
+            "config field 'coordination_policy' must be an object",
+        ),
+        (
+            {
+                "project_id": "toy",
+                "coordination_policy": {"worktree_mode": "canonical_repo"},
+            },
+            "config field 'coordination_policy.worktree_mode' must be one of",
+        ),
+        (
+            {"project_id": "toy", "coordination_policy": {"pr_mode": "batch_by_default"}},
+            "config field 'coordination_policy.pr_mode' must be one of",
         ),
     ],
 )
@@ -4450,6 +4495,30 @@ def test_task_worker_skill_is_vendored_and_installable(tmp_path: Path) -> None:
     assert "Do not run `next` to select your own work." in skill_text
     assert "claim that exact task" in skill_text
     assert "triage intake" in skill_text
+
+
+def test_skills_document_coordinator_worktree_isolation_policy() -> None:
+    """Vendored skills keep coordinator-managed edits out of canonical checkouts."""
+    coordinator = vendored_skill_path("agent-coordinator").joinpath("SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    worker = vendored_skill_path("task-worker").joinpath("SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    manager = vendored_skill_path("project-manager").joinpath("SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "worktree_mode: one_task_per_worktree" in coordinator
+    assert "pr_mode: one_task_per_pr" in coordinator
+    assert "must not write to the same worktree" in coordinator
+    assert "not stale canonical `main`" in coordinator
+    assert "edit the canonical repository checkout for implementation" in worker
+    assert "assigned branch/worktree" in worker
+    assert "shared worktree policy" in worker
+    assert "configured `coordination_policy`" in manager
+    assert "batch_pr_allowed" in manager
+    assert "task IDs, batching rationale, and closeout evidence" in manager
 
 
 def test_available_skill_names_lists_vendored_skills() -> None:

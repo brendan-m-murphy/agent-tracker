@@ -99,6 +99,36 @@ worktree's `.git` file points to repository metadata outside the writable
 worktree. That is expected for copied Codex worktrees. Record these approvals as
 run evidence or friction only when they block normal coordinator progress.
 
+## Coordinator Worktree Policy
+
+Coordinator-managed implementation should not edit the canonical repository
+checkout directly. The conservative default policy is one task branch and
+worktree per implementation task, and one PR per task:
+
+```json
+{
+  "coordination_policy": {
+    "worktree_mode": "one_task_per_worktree",
+    "pr_mode": "one_task_per_pr"
+  }
+}
+```
+
+Projects can loosen those defaults explicitly. `worktree_mode:
+shared_worktree_serial` allows a coordinator to reuse one non-canonical
+worktree only for serially related tasks with non-conflicting scopes. It does
+not allow parallel agents to write to the same worktree. `pr_mode:
+batch_pr_allowed` allows an explicit batch or epic PR; the PR description or
+review record must list every task ID, the batching rationale, and closeout
+evidence for each task.
+
+Before implementation begins, a coordinator should record the branch, base ref,
+worktree path, and selected policy in its working notes or worker prompt. If the
+coordinator is in the canonical checkout, create or switch to an isolated
+worktree before editing. Subagents and reviewers should receive the same branch
+or explicit patch content that will be integrated; do not ask them to review
+stale canonical `main` when the task diff lives elsewhere.
+
 ## Initialize Storage
 
 Create the project row and database schema:
@@ -374,6 +404,12 @@ both modes. The launcher records `worker-launch:<id>` and
 `file:<launch.json>` evidence on the task when `--task-id` is supplied. If the
 workspace has `spool_outbox`, it also writes a complete
 `agent_tracker.worker_launch` event JSON file there for later collection.
+
+For implementation workers, choose the workspace and prompt context according
+to `coordination_policy` before launch. A worker prompt should name the assigned
+task branch, worktree path, base ref, write scope, and whether the closeout is a
+single-task PR or an explicitly batched PR. Parallel implementation workers
+must receive separate writable worktrees.
 
 Run the configured local worker command with `--execute`:
 
@@ -1044,6 +1080,11 @@ agent-tracker await-integration --config project.json <task-id> \
   --status awaiting_pr \
   --evidence "git:<branch-commit>"
 ```
+
+When one PR intentionally covers multiple tasks under `pr_mode:
+batch_pr_allowed`, include all covered task IDs, the batching rationale, and
+per-task validation and closeout evidence in the PR or review surface. Each
+tracker task still needs its own evidence entries and terminal state transition.
 
 After review or integration is finished:
 
